@@ -56,7 +56,9 @@ use execution::{
 use fanotify::*;
 pub(crate) use linux_abi::*;
 use linux_cgroupfs::*;
-pub(crate) use linux_cgroupfs::{charge_linux_user_pages, reclaim_linux_user_pages};
+pub(crate) use linux_cgroupfs::{
+    charge_linux_user_pages, linux_cache_charge_slot, reclaim_linux_user_pages,
+};
 use linux_fsmount::*;
 use linux_futex::*;
 use linux_hugetlb::*;
@@ -407,7 +409,7 @@ struct X86RuntimeOwner {
         RuntimeRef<CpuBankedAtomicArray<AtomicU32, LINUX_DEVICE_DESCRIPTOR_COUNT>>,
     ELF_PROBE_SOCKET_SLOTS:
         RuntimeRef<CpuBankedAtomicArray<AtomicU16, LINUX_DEVICE_DESCRIPTOR_COUNT>>,
-    ELF_PROBE_STACK: RuntimeRef<BankedAtomicU64>,
+    ELF_PROBE_STACK: RuntimeRef<CpuBankedAtomicU64>,
     ELF_PROBE_STACK_FRAME: RuntimeRef<CpuBankedAtomicU64>,
     ELF_PROBE_STACK_GENERATION: RuntimeRef<CpuBankedAtomicU32>,
     ELF_PROBE_STACK_LOW: RuntimeRef<CpuBankedAtomicU64>,
@@ -2893,14 +2895,18 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
         // A process parked in a wait (Sleeping) is the boot CPU's to resume,
         // unless its affinity keeps it from the boot CPU: then nobody else
         // would, and pinned to another CPU it slept for good (a usleep after
-        // sched_setaffinity, which not even its alarm ended).
+        // sched_setaffinity, which not even its alarm ended). One asleep
+        // until a deadline that has passed is taken here too: the boot CPU
+        // may be held for milliseconds by a process it runs nested (24 ms
+        // past a sleeper's deadline), and an idle CPU resumes it on time.
         let picked = linux_process::ready_live_process_after(after, now, |pid| {
             pid != 1
                 && linux_process::live_process_status(pid).is_some_and(|status| {
                     status.state == linux_process::LiveProcessState::Running
                         || status.state == linux_process::LiveProcessState::Sleeping
-                            && linux_process::live_process_cpu_affinity(pid)
+                            && (linux_process::live_process_cpu_affinity(pid)
                                 .is_some_and(|mask| mask & 1 == 0)
+                                || linux_process::live_process_sleep_due(pid, now))
                 })
                 && !activation::is_running(linux_activation_owner(pid))
         });
@@ -2949,19 +2955,30 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
                 deadline.saturating_sub(now) < 1_000_000_000 / timer::LINUX_WAIT_TICKS_PER_SECOND
             })
         };
-        if ticking && idle_ticks >= LINUX_SMP_IDLE_SPIN_TICKS * 64 && !sleeper_due() {
+        // With a sleeper due this CPU looks again soon, not after a wait
+        // that has backed off to about a millisecond: it may be the one
+        // to resume it.
+        let due_soon = sleeper_due();
+        if ticking && idle_ticks >= LINUX_SMP_IDLE_SPIN_TICKS * 64 && !due_soon {
             // SAFETY: interrupts are enabled only around the halt, with no
             // lock held; this CPU's tick handler returns at once from a
             // kernel-mode frame, and `cli` ends the window.
             unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
         } else {
-            let until = started.wrapping_add(idle_ticks);
+            let wait = if due_soon {
+                LINUX_SMP_IDLE_SPIN_TICKS
+            } else {
+                idle_ticks
+            };
+            let until = started.wrapping_add(wait);
             while timer::timestamp_counter() < until {
                 core::hint::spin_loop();
             }
         }
         crate::cpu_time::add_idle(timer::timestamp_counter().saturating_sub(started));
-        idle_ticks = (idle_ticks * 2).min(LINUX_SMP_IDLE_SPIN_TICKS * 64);
+        if !due_soon {
+            idle_ticks = (idle_ticks * 2).min(LINUX_SMP_IDLE_SPIN_TICKS * 64);
+        }
     }
     if ticking {
         timer::disarm_linux_cpu_tick();
@@ -3424,7 +3441,7 @@ static X86_RUNTIME_BACKING_LINUX_MASKED_WAIT_INTERRUPT_COUNT: BankedAtomicU32 =
     BankedAtomicU32::new(0);
 static X86_RUNTIME_BACKING_LINUX_SIGNAL_WAIT_INTERRUPT_COUNT: BankedAtomicU32 =
     BankedAtomicU32::new(0);
-static X86_RUNTIME_BACKING_ELF_PROBE_STACK: BankedAtomicU64 = BankedAtomicU64::new(0);
+static X86_RUNTIME_BACKING_ELF_PROBE_STACK: CpuBankedAtomicU64 = CpuBankedAtomicU64::new(0);
 static X86_RUNTIME_BACKING_ELF_PROBE_STACK_LOW: CpuBankedAtomicU64 = CpuBankedAtomicU64::new(0);
 static X86_RUNTIME_BACKING_ELF_PROBE_STACK_FRAME: CpuBankedAtomicU64 = CpuBankedAtomicU64::new(0);
 static X86_RUNTIME_BACKING_ELF_PROBE_STACK_GENERATION: CpuBankedAtomicU32 =
@@ -6120,7 +6137,12 @@ pub(crate) fn live_linux_process_address_space_snapshot(
         let stack_pages = (stack_address - stack_low) / PAGE_SIZE + 1;
         for page in 1..stack_pages {
             let address = stack_address.checked_sub(page * PAGE_SIZE)?;
-            let frame_address = address_space::current_linux_mapping_frame_address(address as u64)?;
+            // A deep stack's pages need not all have been touched.
+            let Some(frame_address) =
+                address_space::current_linux_mapping_frame_address(address as u64)
+            else {
+                continue;
+            };
             let frame = memory::live_frame_lease(memory::FrameOwner::KERNEL, frame_address)
                 .or_else(|| {
                     memory::FrameLease::from_parts(frame_address, 1)
@@ -16534,19 +16556,26 @@ pub(super) fn linux_wait_for_interrupt() {
     // deadline (`linux_process_asleep`): the tick comes at it instead of up
     // to a tick later. The tick is the boot CPU's. One already due (its
     // deadline came after the look for work) is resumed now, not after a
-    // whole tick (nanosleep01's 5 ms sleeps all ended 1.1 ms late).
+    // whole tick (nanosleep01's 5 ms sleeps all ended 1.1 ms late): this
+    // CPU looks again after a moment, with the lock let go meanwhile. The
+    // sleeper may be one only another CPU may run (pinned there), which
+    // can take it only with the lock: returning with the lock held, the
+    // boot CPU looked and returned again for good, and the sleeper never
+    // ran (`ginux-threadtest pin`'s 1 ms sleeps marked to their end).
+    let mut sleeper_due = false;
     if let Some((deadline, now)) = linux_elapsed_nanoseconds()
         .filter(|_| current_cpu_index_checked() == Some(0))
         .and_then(|now| Some((linux_process::next_live_futex_sleep_deadline()?, now)))
     {
         if deadline <= now {
-            return;
+            sleeper_due = true;
+        } else {
+            timer::request_linux_tick_within(deadline - now);
         }
-        timer::request_linux_tick_within(deadline - now);
     }
     // Other CPUs enter the kernel while this one waits.
     crate::sync::kernel_entry_leave_to_user();
-    if current_cpu_index_checked().is_some_and(|cpu| cpu != 0) {
+    if sleeper_due || current_cpu_index_checked().is_some_and(|cpu| cpu != 0) {
         let until = timer::timestamp_counter().wrapping_add(LINUX_SMP_IDLE_SPIN_TICKS);
         while timer::timestamp_counter() < until {
             core::hint::spin_loop();
@@ -17399,13 +17428,24 @@ fn linux_process_asleep(pid: u32, now: u64) -> bool {
 }
 
 /// How long before its deadline a sleep (nanosleep) stops being passed over
-/// and looks at the clock itself, every round, as an unmarked sleep does: a
-/// marked process is dispatched at a scheduling point after its deadline,
-/// which a process running nested may hold off for milliseconds, where one
-/// that looks for itself halts until its own deadline (nanosleep01's 1 to
-/// 25 ms sleeps woke 1-10 ms late marked to the end). A futex wait, which
-/// has no such look of its own, is marked to its deadline.
-pub(super) const LINUX_SLEEP_WAKE_MARGIN_NS: u64 = 2_000_000;
+/// and looks at the clock itself, every round, as an unmarked sleep does,
+/// in a domain run on one CPU: a marked process is dispatched at a
+/// scheduling point after its deadline, which a process running nested may
+/// hold off for milliseconds, where one that looks for itself halts until
+/// its own deadline (nanosleep01's 1 to 25 ms sleeps woke 1-10 ms late
+/// marked to the end). With more CPUs an idle one resumes a due sleeper
+/// (`run_application_processor_runtime`), and sleeps are marked to their
+/// deadline. A futex wait, which has no look of its own, always is.
+const LINUX_SLEEP_WAKE_MARGIN_NS: u64 = 2_000_000;
+
+/// The margin a sleep is marked asleep with (`LINUX_SLEEP_WAKE_MARGIN_NS`).
+pub(super) fn linux_sleep_wake_margin() -> u64 {
+    if linux_smp_runtime_active() && linux_available_cpu_count() > 1 {
+        0
+    } else {
+        LINUX_SLEEP_WAKE_MARGIN_NS
+    }
+}
 
 /// Marks process `pid` (current, other than init) asleep in a wait of its
 /// own until `deadline` (0: none) or a timer of its own falls due, whichever
@@ -17830,6 +17870,35 @@ static LINUX_PREEMPTED_CONTEXT: [crate::sync::IrqSpinLock<Option<LinuxPreemptedC
 /// entered.
 static LINUX_PROCESS_SLICE: [AtomicU32; CPU_ENTRY_STATE_LIMIT] =
     [const { AtomicU32::new(0) }; CPU_ENTRY_STATE_LIMIT];
+/// Per CPU, the deadline of the due sleeper its tick last ended a slice
+/// early for (`linux_sleeper_due_from_timer`).
+static LINUX_WAKEUP_PREEMPTED_DEADLINE: [AtomicU64; CPU_ENTRY_STATE_LIMIT] =
+    [const { AtomicU64::new(0) }; CPU_ENTRY_STATE_LIMIT];
+
+/// Whether a process marked asleep has reached its deadline, and this CPU's
+/// tick has not yet ended a slice for that deadline: wakeup preemption.
+/// A marked sleeper runs again at a scheduling point, and a process this
+/// CPU runs (nested in another's system call, or for a whole slice) would
+/// otherwise hold that off for up to its slice, 50 ms (sleeps woke up to
+/// 24 ms late). Once per deadline: if the yield's scheduler runs another
+/// process first, the sleeper waits for the next scheduling point, not a
+/// slice ended on every tick.
+fn linux_sleeper_due_from_timer() -> bool {
+    // User code never holds the lock; held or wanted by another CPU, that
+    // CPU is in the kernel and the next tick looks again.
+    let Some(_guard) = crate::sync::kernel_entry_try_lock() else {
+        return false;
+    };
+    let Some(now) = linux_elapsed_nanoseconds() else {
+        return false;
+    };
+    let Some(deadline) =
+        linux_process::next_live_futex_sleep_deadline().filter(|deadline| *deadline <= now)
+    else {
+        return false;
+    };
+    LINUX_WAKEUP_PREEMPTED_DEADLINE[linux_cpu_slot()].swap(deadline, Ordering::SeqCst) != deadline
+}
 
 /// This CPU's entry in a per-CPU table.
 fn linux_cpu_slot() -> usize {
@@ -17893,7 +17962,7 @@ fn linux_preempt_process_from_timer(frame: &mut UserInterruptFrame) {
     let ticks = LINUX_PROCESS_SLICE[linux_cpu_slot()].fetch_add(1, Ordering::SeqCst) + 1;
     let signal_due = !X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst)
         && linux_signal_due_from_timer(ticks.is_multiple_of(LINUX_SIGNAL_QUEUE_CHECK_TICKS));
-    if ticks < linux_thread_slice_ticks() && !signal_due {
+    if ticks < linux_thread_slice_ticks() && !signal_due && !linux_sleeper_due_from_timer() {
         return;
     }
     let pid = current_linux_process_pid();
@@ -19252,6 +19321,8 @@ struct LinuxProcessRuntimeState {
     descriptors: LinuxDescriptorRuntimeState,
     image_extents: [u64; 8],
     brk: u64,
+    /// The main stack's top (exec moves it), and how far down it has grown.
+    stack: u64,
     stack_low: u64,
     cwd: u16,
     rootfs_cwd: u16,
@@ -19303,6 +19374,7 @@ impl LinuxProcessRuntimeState {
         descriptors: LinuxDescriptorRuntimeState::EMPTY,
         image_extents: [0; 8],
         brk: 0,
+        stack: 0,
         stack_low: 0,
         cwd: LINUX_ROOT_DIRECTORY,
         rootfs_cwd: crate::published_rootfs::ROOT_HANDLE,
@@ -20117,6 +20189,7 @@ fn capture_linux_process_runtime_state_for(thread_slot: u8) -> Option<LinuxProce
             X86_RUNTIME.ELF_PROBE_RELRO_SIZE.load(Ordering::SeqCst),
         ],
         brk: X86_RUNTIME.ELF_PROBE_BRK.load(Ordering::SeqCst),
+        stack: X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst),
         stack_low: X86_RUNTIME.ELF_PROBE_STACK_LOW.load(Ordering::SeqCst),
         cwd: X86_RUNTIME.ELF_PROBE_CWD.load(Ordering::SeqCst),
         rootfs_cwd: X86_RUNTIME.ELF_PROBE_ROOTFS_CWD.load(Ordering::SeqCst),
@@ -20232,6 +20305,11 @@ fn restore_linux_process_runtime_state(state: &LinuxProcessRuntimeState) {
         destination.store(value, Ordering::SeqCst);
     }
     X86_RUNTIME.ELF_PROBE_BRK.store(state.brk, Ordering::SeqCst);
+    if state.stack != 0 {
+        X86_RUNTIME
+            .ELF_PROBE_STACK
+            .store(state.stack, Ordering::SeqCst);
+    }
     X86_RUNTIME
         .ELF_PROBE_STACK_LOW
         .store(state.stack_low, Ordering::SeqCst);
@@ -22121,13 +22199,17 @@ fn linux_semctl(id: u64, number: u64, command: u64, argument: u64) -> u64 {
             }
         }
         SETVAL => {
-            if argument > u64::from(crate::linux_sysv_ipc::SEM_VALUE_MAX) {
+            // The value is the union semun's int: Linux reads the low 32
+            // bits of the argument (musl passes the whole union, whose
+            // upper half is whatever the caller's stack held).
+            let value = argument as u32 as i32;
+            if value < 0 || value > i32::from(crate::linux_sysv_ipc::SEM_VALUE_MAX) {
                 return LINUX_ERANGE;
             }
             crate::linux_sysv_ipc::semaphore_set_value(
                 id,
                 number,
-                argument as u16,
+                value as u16,
                 current_linux_process_pid(),
             )
             .map_or_else(linux_sysv_ipc_error, |()| 0)
@@ -34895,7 +34977,9 @@ fn linux_rootfs_execve_source(
         }
         serial_write("\r\n");
     }
-    let stack_page = X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1);
+    // The new program's stack is at the top of the address space, where it
+    // may grow down to RLIMIT_STACK (`linux_primary_stack_floor`).
+    let stack_page = LINUX_STACK_END - PAGE_SIZE as u64;
     let (mut stack_image, new_stack) = match build_linux_exec_stack_image(
         &launch_arguments,
         arguments_address,
@@ -34907,6 +34991,10 @@ fn linux_rootfs_execve_source(
         Ok(image) => image,
         Err(error) => return error,
     };
+    if !linux_relocate_primary_stack(current_linux_process_pid()) {
+        serial_write("ginux: Linux exec stack relocation failed\r\n");
+        return LINUX_ENOMEM;
+    }
 
     let replacement_count = (0..plan.segment_count()).try_fold(0_usize, |count, index| {
         count.checked_add(plan.segment(index)?.page_count)
@@ -37823,29 +37911,54 @@ fn linux_openat_path(
         linux_note_descriptor_view(directory, &path[..path_length], opened);
     }
     if opened == LINUX_ENOENT {
-        if let Some(error) = linux_volume_damage(directory, &path[..path_length]) {
-            return error;
-        }
+        linux_volume_damage(directory, &path[..path_length]);
     }
     opened
 }
 
-/// Whether a lookup of `path` (from `directory`) that found nothing met a
-/// damaged volume on the way: a directory entry naming no valid inode, or
-/// an inode with no links or file type. Then, as ext4 does, the
-/// filesystem reports the error (fanotify's FAN_FS_ERROR, on the inode at
-/// fault) and the call fails with EFSCORRUPTED.
-fn linux_volume_damage(directory: u64, path: &[u8]) -> Option<u64> {
-    const EFSCORRUPTED: i32 = 117;
+/// Looks for the damage a lookup of `path` (from `directory`) that found
+/// nothing met on a volume: a directory entry naming no valid inode, or an
+/// inode with no links or file type. The volume records it as ext4 does,
+/// and the call fails with EFSCORRUPTED ([`linux_volume_failures`]).
+fn linux_volume_damage(directory: u64, path: &[u8]) {
     if !crate::linux_blockfs::any_mounted() {
-        return None;
+        return;
     }
     let mut canonical = [0_u8; crate::linux_overlay::PATH_CAPACITY];
-    let length = linux_canonical_path_at(u64::from(directory as u32), path, &mut canonical).ok()?;
+    let Ok(length) = linux_canonical_path_at(u64::from(directory as u32), path, &mut canonical)
+    else {
+        return;
+    };
     let storage = crate::linux_mount_paths::storage(&canonical[..length]);
-    let (fsid, handle) = crate::linux_blockfs::damage_at(&storage)?;
-    linux_fanotify_fs_error(fsid, Some(linux_handle_identity(handle)), EFSCORRUPTED);
-    Some(LINUX_EUCLEAN)
+    crate::linux_blockfs::note_damage_at(&storage);
+}
+
+/// Reports the damage this domain's volumes found during the system call
+/// that returns `result`, as ext4 reports each error (fanotify's
+/// FAN_FS_ERROR, on the inode at fault, or on none for a bitmap). A call
+/// that failed fails with the first damage's errno (EBADMSG for a
+/// checksum that does not match, EFSCORRUPTED for other damage) in place
+/// of what the volume's lookup or read made of it (ENOENT, EIO), as the
+/// ext4 operation that met the damage fails with it.
+pub(super) fn linux_volume_failures(result: u64) -> u64 {
+    let failures = crate::linux_blockfs::take_failures();
+    let Some(first) = failures.first() else {
+        return result;
+    };
+    for failure in failures.iter().filter(|failure| failure.notify) {
+        linux_fanotify_fs_error(
+            failure.fsid,
+            failure.handle.map(linux_handle_identity),
+            failure.errno as i32,
+        );
+    }
+    // A Linux errno, not a value or one of the kernel's own markers.
+    let failed = (1..=133).contains(&result.wrapping_neg());
+    if failed {
+        first.errno.wrapping_neg()
+    } else {
+        result
+    }
 }
 
 /// Whether mount(2)'s option string at `data_address` holds `option`
@@ -55207,7 +55320,7 @@ fn linux_proc_mount_table(mountinfo: bool) -> Option<Vec<u8>> {
                         b" rw"
                     },
                 )
-                && append_linux_bytes(&mut line, &mut used, linux_super_options(mount))
+                && append_linux_bytes(&mut line, &mut used, &linux_super_options(mount))
                 && append_linux_bytes(&mut line, &mut used, b"\n")
         } else {
             escaped(&mount.source, &mut line, &mut used)
@@ -55217,7 +55330,7 @@ fn linux_proc_mount_table(mountinfo: bool) -> Option<Vec<u8>> {
                 && escaped(&mount.filesystem, &mut line, &mut used)
                 && append_linux_bytes(&mut line, &mut used, b" ")
                 && linux_mount_options(mount.flags, &mut line, &mut used)
-                && append_linux_bytes(&mut line, &mut used, linux_super_options(mount))
+                && append_linux_bytes(&mut line, &mut used, &linux_super_options(mount))
                 && append_linux_bytes(&mut line, &mut used, b" 0 0\n")
         };
         if written && file.try_reserve(used).is_ok() {
@@ -55230,12 +55343,12 @@ fn linux_proc_mount_table(mountinfo: bool) -> Option<Vec<u8>> {
 }
 
 /// The filesystem's own options a mount shows after its mount options
-/// (ext4's quota options), each with its comma.
-fn linux_super_options(mount: &crate::linux_mounts::Mount) -> &'static [u8] {
+/// (ext4's errors= and quota options), each with its comma.
+fn linux_super_options(mount: &crate::linux_mounts::Mount) -> Vec<u8> {
     if linux_volume_type(&mount.filesystem).is_some() {
         crate::linux_blockfs::shown_options(mount.device)
     } else {
-        b""
+        Vec::new()
     }
 }
 
@@ -58727,7 +58840,7 @@ fn append_linux_dirent(
 
 fn linux_default_resource_limit(resource: u64, runtime: bool) -> Option<[u64; 2]> {
     let value = match resource {
-        LINUX_RLIMIT_STACK if runtime => u64::MAX,
+        LINUX_RLIMIT_STACK if runtime => return Some([LINUX_STACK_DEFAULT_LIMIT, u64::MAX]),
         LINUX_RLIMIT_STACK => PAGE_SIZE as u64,
         // Linux's defaults (INR_OPEN_CUR, INR_OPEN_MAX): a process may raise
         // its soft limit to 4096 and, with CAP_SYS_RESOURCE, its hard limit
@@ -61513,6 +61626,22 @@ fn linux_mount_filesystem(
         {
             return LINUX_EBUSY;
         }
+        // A volume's errors= changes on a remount too.
+        if crate::linux_blockfs::generations_at(storage).is_some() {
+            let mut data = [0_u8; 512];
+            let data_length = if data_address == 0 {
+                0
+            } else {
+                copy_linux_c_string(data_address, &mut data).unwrap_or(0)
+            };
+            match linux_volume_error_option(&data[..data_length]) {
+                Ok(Some(policy)) => {
+                    crate::linux_blockfs::set_error_policy(storage, policy);
+                }
+                Ok(None) => {}
+                Err(error) => return error,
+            }
+        }
         match crate::linux_blockfs::remount(storage, flags & MS_RDONLY != 0) {
             Some(Err(error)) => return error.wrapping_neg(),
             // ext4's "abort" (a debugging option): the filesystem stops as
@@ -61824,9 +61953,6 @@ fn linux_volume_type(filesystem: &[u8]) -> Option<ginux_ext2::FsType> {
     }
 }
 
-/// mount(2) of the ext2, ext3 or ext4 filesystem (`fs_type`) on the block
-/// device at `source` on canonical `target`, a directory, with the domain
-/// mount options `options` (`linux_mounts`).
 /// The quota options of an ext filesystem's mount option string
 /// (usrquota or quota, grpquota, prjquota; noquota clears them). Other
 /// options are taken and have no effect here.
@@ -61844,11 +61970,33 @@ fn linux_volume_quota_options(data: &[u8]) -> ginux_ext2::QuotaOptions {
     quota
 }
 
+/// The errors= option of an ext filesystem's mount option string
+/// (continue, remount-ro, panic; EINVAL for another value), the last one
+/// given if several are.
+fn linux_volume_error_option(data: &[u8]) -> Result<Option<ginux_ext2::ErrorPolicy>, u64> {
+    let mut policy = None;
+    for option in data.split(|byte| *byte == b',') {
+        let Some(value) = option.strip_prefix(b"errors=") else {
+            continue;
+        };
+        policy = Some(match value {
+            b"continue" => ginux_ext2::ErrorPolicy::Continue,
+            b"remount-ro" => ginux_ext2::ErrorPolicy::ReadOnly,
+            b"panic" => ginux_ext2::ErrorPolicy::Panic,
+            _ => return Err(LINUX_EINVAL),
+        });
+    }
+    Ok(policy)
+}
+
 /// Whether the caller may go past quota limits (CAP_SYS_RESOURCE).
 pub(crate) fn linux_quota_exempt() -> bool {
     linux_has_capability(ginux_credentials::capability::SYS_RESOURCE)
 }
 
+/// mount(2) of the ext2, ext3 or ext4 filesystem (`fs_type`) on the block
+/// device at `source` on canonical `target`, a directory, with the domain
+/// mount options `options` (`linux_mounts`) and the option string `data`.
 fn linux_mount_volume(
     source: &[u8],
     target: &[u8],
@@ -61922,7 +62070,15 @@ fn linux_mount_volume(
     let superblock = crate::linux_mounts::new_superblock();
     let storage = crate::linux_mount_paths::storage_root(superblock);
     let quota = linux_volume_quota_options(data);
-    if let Err(error) = crate::linux_blockfs::mount(&storage, source, io, read_only, fs_type, quota)
+    let errors = match linux_volume_error_option(data) {
+        Ok(errors) => errors,
+        Err(error) => {
+            linux_release_volume_device(source);
+            return error;
+        }
+    };
+    if let Err(error) =
+        crate::linux_blockfs::mount(&storage, source, io, read_only, fs_type, quota, errors)
     {
         linux_release_volume_device(source);
         return error.wrapping_neg();
@@ -63371,13 +63527,14 @@ fn materialize_linux_runtime_user_range(address: u64, length: usize, writable: b
 
 fn materialize_linux_primary_stack_page(page_address: u64) -> bool {
     let low = X86_RUNTIME.ELF_PROBE_STACK_LOW.load(Ordering::SeqCst);
-    let floor = X86_RUNTIME
-        .ELF_PROBE_BRK_LIMIT
-        .load(Ordering::SeqCst)
-        .saturating_add(PAGE_SIZE as u64);
+    let floor = linux_primary_stack_floor();
     let end = (X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1))
         .saturating_add(PAGE_SIZE as u64);
-    if low == 0 || page_address < floor || page_address >= end {
+    if low == 0
+        || page_address < floor
+        || page_address >= end
+        || page_address < low && linux_stack_guard_gap_taken(page_address)
+    {
         return false;
     }
     let reserved = address_space::current_linux_runtime_page(page_address);
@@ -63408,10 +63565,7 @@ fn materialize_linux_primary_stack_page(page_address: u64) -> bool {
 }
 
 fn linux_runtime_primary_stack_contains(page_address: u64) -> bool {
-    let floor = X86_RUNTIME
-        .ELF_PROBE_BRK_LIMIT
-        .load(Ordering::SeqCst)
-        .saturating_add(PAGE_SIZE as u64);
+    let floor = linux_primary_stack_floor();
     let end = (X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1))
         .saturating_add(PAGE_SIZE as u64);
     page_address >= floor && page_address < end
@@ -68368,13 +68522,10 @@ fn grow_linux_runtime_stack(fault: domain::FaultMetadata) -> bool {
     }
     let page = fault.address & !(PAGE_SIZE as u64 - 1);
     let low = X86_RUNTIME.ELF_PROBE_STACK_LOW.load(Ordering::SeqCst);
-    let floor = X86_RUNTIME
-        .ELF_PROBE_BRK_LIMIT
-        .load(Ordering::SeqCst)
-        .saturating_add(PAGE_SIZE as u64);
+    let floor = linux_primary_stack_floor();
     let end = (X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1))
         .saturating_add(PAGE_SIZE as u64);
-    if low == 0 || page < floor || page >= low || page >= end {
+    if low == 0 || page < floor || page >= low || page >= end || linux_stack_guard_gap_taken(page) {
         return false;
     }
     let reserved = address_space::current_linux_runtime_page(page);
@@ -68416,6 +68567,102 @@ fn grow_linux_runtime_stack(fault: domain::FaultMetadata) -> bool {
 /// Linux's stack guard gap: a mapping that grows down stops this far
 /// above the mapping below it (256 pages).
 const LINUX_STACK_GUARD_GAP: u64 = 256 * PAGE_SIZE as u64;
+
+/// Where an exec'd program's main stack ends: near the top of the user
+/// address space, as on Linux, far above the mmap area and every region
+/// the kernel places, so it can grow down to RLIMIT_STACK.
+const LINUX_STACK_END: u64 = 0x7fff_ffff_f000;
+/// How far a stack with RLIMIT_STACK unlimited may grow (64 GiB).
+const LINUX_STACK_UNLIMITED: u64 = 1 << 36;
+/// RLIMIT_STACK's soft limit by default, as Linux's _STK_LIM (8 MiB).
+const LINUX_STACK_DEFAULT_LIMIT: u64 = 8 << 20;
+
+/// The lowest page the current process's main stack may grow to. A stack at
+/// the top of the address space (`LINUX_STACK_END`, every exec'd program's)
+/// may span RLIMIT_STACK's soft limit from its end, as Linux's
+/// acct_stack_growth allows, with the limit as it is when the stack grows;
+/// the domain's first process keeps its stack above its heap, which bounds
+/// it.
+fn linux_primary_stack_floor() -> u64 {
+    let end = (X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1))
+        .saturating_add(PAGE_SIZE as u64);
+    if end != LINUX_STACK_END {
+        return X86_RUNTIME
+            .ELF_PROBE_BRK_LIMIT
+            .load(Ordering::SeqCst)
+            .saturating_add(PAGE_SIZE as u64);
+    }
+    let limit = linux_resource_limit_values(LINUX_RLIMIT_STACK, true)
+        .map_or(LINUX_STACK_DEFAULT_LIMIT, |values| values[0]);
+    let size = if limit == u64::MAX {
+        LINUX_STACK_UNLIMITED
+    } else {
+        limit.min(LINUX_STACK_UNLIMITED)
+    };
+    end.saturating_sub(size)
+        .checked_next_multiple_of(PAGE_SIZE as u64)
+        .unwrap_or(end)
+}
+
+/// Whether the main stack growing down to `page` would come within the
+/// stack guard gap of a mapping below it (Linux's stack_guard_gap): the
+/// growth is refused then, and the access is SIGSEGV. A stack the domain's
+/// first process keeps above its heap has no mappings below to keep from.
+fn linux_stack_guard_gap_taken(page: u64) -> bool {
+    let end = (X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst) & !(PAGE_SIZE as u64 - 1))
+        .saturating_add(PAGE_SIZE as u64);
+    end == LINUX_STACK_END
+        && crate::sync::rank_available(crate::sync::LockRank::MEMORY_AREAS)
+        && crate::linux_areas::overlaps(
+            linux_execution_instance(),
+            current_linux_process_pid(),
+            page.saturating_sub(LINUX_STACK_GUARD_GAP),
+            LINUX_STACK_GUARD_GAP.min(page),
+        )
+}
+
+/// Moves process `pid`'s main stack (the active address space's) to the top
+/// of the address space for exec, if it is not there: the pages it grew
+/// into are freed and its top page moves to just below `LINUX_STACK_END`,
+/// which exec then fills. False if the move failed.
+fn linux_relocate_primary_stack(pid: u32) -> bool {
+    let target = LINUX_STACK_END - PAGE_SIZE as u64;
+    let stack = X86_RUNTIME.ELF_PROBE_STACK.load(Ordering::SeqCst);
+    let page = stack & !(PAGE_SIZE as u64 - 1);
+    if page == target {
+        return true;
+    }
+    let low = X86_RUNTIME.ELF_PROBE_STACK_LOW.load(Ordering::SeqCst);
+    if low == 0 || low > page {
+        return false;
+    }
+    for address in (low..page).step_by(PAGE_SIZE) {
+        let removed = address_space::remove_current_linux_runtime_page(address);
+        if !removed.occupied {
+            continue;
+        }
+        let _ = linux_process::remove_live_process_mapping(pid, address as usize);
+        if let Some(frame) = removed.frame.filter(|_| !removed.shared) {
+            if memory::frame_leases_releasable(memory::FrameOwner::KERNEL, &[frame])
+                && !address_space::release_linux_private_page(frame)
+            {
+                return false;
+            }
+        }
+    }
+    if !address_space::move_current_linux_runtime_page(page, target)
+        || !linux_process::move_live_process_mapping(pid, page as usize, target as usize)
+    {
+        return false;
+    }
+    X86_RUNTIME
+        .ELF_PROBE_STACK
+        .store(target | (stack & (PAGE_SIZE as u64 - 1)), Ordering::SeqCst);
+    X86_RUNTIME
+        .ELF_PROBE_STACK_LOW
+        .store(target, Ordering::SeqCst);
+    true
+}
 
 /// A fault just below a mapping made with MAP_GROWSDOWN grows it down to
 /// the faulting page (`linux_areas::grow_down`); the pages it gains are

@@ -475,6 +475,7 @@ interior-mutable	kernel/src/linux_pty.rs	PTYS	domain-runtime	allowlist	none	rank
 interior-mutable	kernel/src/linux_userfaultfd.rs	CONTEXTS	domain-runtime	allowlist	none	ranked-userfaultfd-contexts-owned-per-process
 interior-mutable	kernel/src/linux_userfaultfd.rs	LIVE	domain-runtime	allowlist	none	atomic-live-context-count
 interior-mutable	kernel/src/linux_blockfs.rs	VOLUMES	domain-runtime	allowlist	none	ranked-mounted-volumes
+interior-mutable	kernel/src/linux_blockfs.rs	FAILURES_PENDING	domain-runtime	allowlist	none	atomic-volume-damage-pending-flag
 interior-mutable	kernel/src/linux_fscontext.rs	OBJECTS	domain-runtime	allowlist	none	ranked-fs-contexts-and-detached-mounts
 interior-mutable	kernel/src/linux_mounts.rs	EXPIRY_MARKS	domain-runtime	allowlist	none	atomic-mnt-expire-mark-count
 interior-mutable	kernel/src/linux_mounts.rs	STRICT_ATIME_MOUNTS	domain-runtime	allowlist	none	atomic-strictatime-mount-count
@@ -607,6 +608,7 @@ interior-mutable	kernel/src/linux_io_uring.rs	RINGS	process-runtime	allowlist	no
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_DOMAIN_EXEC_DEPTH	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_PREEMPTED_CONTEXT	process-runtime	allowlist	none	irq-locked-timer-preemption-handoff
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_PROCESS_SLICE	process-runtime	allowlist	none	timer-process-slice-counter
+interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_WAKEUP_PREEMPTED_DEADLINE	process-runtime	allowlist	none	timer-wakeup-preemption-deadline
 interior-mutable	kernel/src/linux_event_files.rs	EVENTFDS	domain-runtime	allowlist	none	atomic-refcounted-shared-open-files
 interior-mutable	kernel/src/linux_event_files.rs	TIMERFDS	domain-runtime	allowlist	none	atomic-refcounted-shared-open-files
 interior-mutable	kernel/src/linux_drm.rs	FAILURES_LOGGED	domain-runtime	allowlist	none	atomic-diagnostic-counter
@@ -687,3 +689,4 @@ interior-mutable	kernel/src/linux_record_lock.rs	WAITING	process-runtime	allowli
 interior-mutable	kernel/src/linux_async_io.rs	ENTRIES	process-runtime	allowlist	none	ranked-async-io-owners
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_SWAP_CURSOR	domain-runtime	allowlist	none	atomic-swap-scan-cursor
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_USER_FAULT_RECLAIM	process-runtime	allowlist	none	atomic-user-fault-reclaim-tag
+interior-mutable	kernel/src/arch/x86_64/cpu/linux_cgroupfs.rs	LINUX_CACHE_RECLAIM_ROTOR	domain-runtime	allowlist	none	atomic-cache-reclaim-rotor

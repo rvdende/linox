@@ -209,7 +209,16 @@ feature rather than a fix:
   /proc/sys/vm/min_free_kbytes reads 8192 and swappiness 60.
 - **Page cache and tmpfs limits**: a volume's file data goes through a
   page cache (`linux_blockfs`, frames in overlay page-cache nodes) that
-  reads fill and `/proc/sys/vm/drop_caches` empties, so RWF_NOWAIT reads
+  reads and writes fill and `/proc/sys/vm/drop_caches` empties. Its
+  pages, and tmpfs, memfd and shared-memory pages, are charged to the
+  memory cgroup of the process that brings them in (memory.stat file and
+  shmem; the frame's charge records which), and a charge past memory.max
+  drops clean page cache first, never below a cgroup's effective
+  memory.min, nor below its memory.low until nothing else is left (a low
+  event then), as Linux's mem_cgroup_calculate_protection works the
+  protection out (memcontrol01-04; 03 and 04 are skipped in the list, as
+  late in a full run their 50 MiB page-cache writes outlast the tests'
+  10 s checkpoints, though they pass alone). RWF_NOWAIT reads
   only cached pages (preadv203) and shared mappings of ext2 files map the
   cached pages, written back at msync, fsync, sync and unmount. A tmpfs
   mounted with `size=`, `nr_blocks=` or `nr_inodes=`
@@ -226,6 +235,16 @@ feature rather than a fix:
   it munmap, mprotect and madvise take the program-image paths. Shrinking
   a file turns its pages past the new end into SIGBUS pages only in the
   process that truncates it.
+- **The main stack**: exec puts it at the top of the address space
+  (ending at 0x7fff_ffff_f000, far above the mmap area), where it grows
+  down to RLIMIT_STACK's soft limit as the limit is when it grows (8 MiB
+  by default, as Linux's _STK_LIM; unlimited stops at 64 GiB), and not
+  within the stack guard gap (256 pages) of a mapping below; past either,
+  the fault is SIGSEGV (ginux_stack01, process_madvise01's 1 MiB stack
+  array). The domain's first process keeps its stack above its heap
+  until it execs. stack_clash is skipped: it maps MAP_FIXED next to the
+  stack and over every gap below it, and MAP_FIXED takes only 256 MiB to
+  1 TiB.
 - **musl, not the kernel**: tests that cannot pass with musl are skipped
   in `tests/ltp/syscalls.list` with the reason (fork() is the fork system
   call, readlink with size 0 gets a one-byte buffer, fchmod retries
