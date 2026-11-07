@@ -118,9 +118,11 @@ for expected in \
     'Test a userspace compatibility environment' \
     'Linux userspace runtime conformance summary:' \
     'Interfaces: 17 pass, 5 fail, 1 policy-exempt, 23 total' \
+    'Syscalls: 82 pass, 245 fail, 48 policy-exempt, 375 total' \
     "Run 'test linux all' for every result." \
     'Linux userspace conformance results:' \
     'NAME/IDENTIFIER' \
+    'Summary: 99 pass, 250 fail, 49 policy-exempt, 398 total' \
     'PASS = verified; FAIL = incomplete or unsupported; POLICY-EXEMPT = deliberately denied.' \
     'network list' \
     'List network devices and their state' \
@@ -180,8 +182,9 @@ for expected in \
     'demo            configured  linux' \
     'demo: settings accepted; configured' \
     'demo: setting accepted; configured' \
+    'demo            running     linux' \
     'domains: 2 configured' \
-    'demo            stopped     linux' \
+    'demo: running' \
     'integrity: sealed' \
     'GINUX.EFI component catalog v0:' \
     '- kernel: active, ring 0' \
@@ -194,11 +197,14 @@ for expected in \
     'os-release' \
     'motd' \
     '1/' \
+    '100/' \
     'status' \
     'PID    PPID   STATE  NAME' \
     '1      0      R      controller' \
+    '100    0      R      demo:init' \
     'demo: stopped' \
-    'domain: failure injection rejected' \
+    'demo: failed (contained)' \
+    'ginux: starting configured runtime domain' \
     'Error: unknown command' \
     'Shutting down Ginux.' \
     'ginux: controller requested clean shutdown' \

@@ -177,8 +177,6 @@ The standalone kernel can:
 - execute selected unmodified Alpine musl/BusyBox and Rocky Linux glibc
   programs; and
 - boot Rocky Linux 10 systemd through `multi-user.target`.
-- boot a native ring-3 controller desktop, render trusted windows, and present
-  the tested Linux-domain Wayland subset as a managed or full-screen surface.
 
 Ginux is experimental. Linux ABI coverage, device support, filesystems,
 networking, resource enforcement, security validation, and real-hardware
@@ -378,19 +376,8 @@ make test-rocky-shell      # Rocky glibc shell and process/file behavior
 make test-multi-domain     # concurrent domain lifecycle
 make test-rocky-systemd    # cold and cached Rocky systemd boot
 make test-storage          # volume initialization, recovery, and reset
-make test-controller-desktop-all         # integrated desktop and SMP recovery
-make test-controller-desktop-performance # measured responsiveness budgets
-make test-controller-desktop-visible     # QEMU pixels plus keyboard/pointer input
-make test-controller-desktop-latency     # 1024x768 event-to-visible-frame latency
-make run-gui                             # open the controller GUI on macOS
 make check                 # architecture, ABI, format, lint, and unit checks
 ```
-
-The desktop architecture, operator model, tested Wayland subset, recovery
-behavior, measured budgets, and unsupported features are documented in the
-[native controller desktop specification](docs/CONTROLLER-DESKTOP.md).
-The visible test retains baseline, keyboard, and pointer framebuffer evidence
-under `build/qualification/controller-desktop/`.
 
 The evaluated checkpoint does **not** have a fully passing aggregate `make
 test`: a post-`execve()` system-supervisor lifecycle probe remains a recorded

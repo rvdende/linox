@@ -63,8 +63,6 @@ if [[ -n "${GINUX_QEMU_DEBUG_LOG:-}" ]]; then
     qemu_debug=(-d "${GINUX_QEMU_DEBUG_FLAGS:-int}" -D "$GINUX_QEMU_DEBUG_LOG")
 fi
 qemu_netdev="user,id=ginux-net,restrict=off"
-qemu_display="${GINUX_QEMU_DISPLAY:-none}"
-qemu_monitor="${GINUX_QEMU_MONITOR:-none}"
 if [[ -n "${GINUX_QEMU_DNS:-}" ]]; then
     qemu_netdev+=",dns=${GINUX_QEMU_DNS}"
 fi
@@ -78,8 +76,8 @@ exec "$qemu" \
     -cpu "$cpu_model" \
     -smp "$cpus" \
     -m "$memory" \
-    -display "$qemu_display" \
-    -monitor "$qemu_monitor" \
+    -display none \
+    -monitor none \
     -serial stdio \
     -no-reboot \
     -net none \
