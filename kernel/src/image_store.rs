@@ -11,7 +11,10 @@ use crate::memory::{self, FrameLease, FrameOwner};
 const PAGE_SIZE: usize = 4096;
 const OBJECT_LIMIT: usize = ginux_oci::OCI_LAYER_LIMIT;
 pub(crate) const CACHE_QUOTA: usize = usize::MAX;
-pub(crate) const DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+/// The most a root filesystem may expand to, checked against the layers'
+/// untrusted size fields before anything is allocated for it. Upstream's
+/// 512 MiB is too small for toolchain images (rust:alpine expands past it).
+pub(crate) const DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 struct ImageStoreOwner {
     installed: AtomicBool,
@@ -593,9 +596,12 @@ fn rootfs_unpack_allocation(
 }
 
 pub(crate) fn verify_rootfs_unpack_policy() -> bool {
-    DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES == 512 * 1024 * 1024
-        && rootfs_unpack_allocation(&[u32::MAX as usize], DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES)
-            .is_none()
+    DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES == 4 * 1024 * 1024 * 1024
+        && rootfs_unpack_allocation(
+            &[u32::MAX as usize, u32::MAX as usize],
+            DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES,
+        )
+        .is_none()
         && rootfs_unpack_allocation(
             &[DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES, 1],
             DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES,
