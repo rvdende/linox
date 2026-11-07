@@ -5,6 +5,12 @@ userspace compatibility.**
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23682548.svg)](https://doi.org/10.5281/zenodo.23682548)
 
+This fork (rvdende/ginux) continues the standalone bootable kernel. Upstream
+(gmkurtzer/ginux) ended that line on 2026-11-04, froze it as the
+`bootable-kernel-final` tag and moved on to a userspace kernel; its fixes up
+to that tag are merged here, without its native controller desktop (this
+fork's desktop runs in a Linux domain).
+
 Ginux is an independent kernel and operating-system prototype. It boots directly
 through UEFI without a Linux host kernel, provides its own memory management,
 scheduler, process model, VFS, networking, device support, and Linux ABI, and

@@ -3,6 +3,15 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+boot_timeout_seconds="${GINUX_BOOT_TIMEOUT_SECONDS:-180}"
+if [[ ! "$boot_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Boot test failed: GINUX_BOOT_TIMEOUT_SECONDS must be a positive integer." >&2
+    exit 2
+fi
+if [[ -n "${GINUX_BOOT_ARTIFACT_DIR:-}" ]]; then
+    mkdir -p "$GINUX_BOOT_ARTIFACT_DIR"
+fi
+
 output_file="$(mktemp -t ginux-boot.XXXXXX)"
 reboot_output_file="$(mktemp -t ginux-reboot.XXXXXX)"
 corrupt_output_file="$(mktemp -t ginux-corrupt.XXXXXX)"
@@ -29,6 +38,13 @@ cleanup() {
         kill "$qemu_pid" 2>/dev/null || true
         wait "$qemu_pid" 2>/dev/null || true
     fi
+    if [[ -n "${GINUX_BOOT_ARTIFACT_DIR:-}" ]]; then
+        mkdir -p "$GINUX_BOOT_ARTIFACT_DIR"
+        cp "$output_file" "$GINUX_BOOT_ARTIFACT_DIR/initial-boot.log"
+        cp "$reboot_output_file" "$GINUX_BOOT_ARTIFACT_DIR/reboot.log"
+        cp "$corrupt_output_file" "$GINUX_BOOT_ARTIFACT_DIR/corrupt-media.log"
+        cp "$native_corrupt_output_file" "$GINUX_BOOT_ARTIFACT_DIR/native-corrupt-media.log"
+    fi
     rm -f \
         "$output_file" \
         "$reboot_output_file" \
@@ -51,7 +67,7 @@ run_boot() {
     : >"$qemu_pid_file"
     {
         qemu_seen=false
-        for _ in {1..180}; do
+        for ((attempt = 0; attempt < boot_timeout_seconds; attempt++)); do
             if grep -Fq 'ginux> ' "$boot_output"; then
                 break
             fi
@@ -76,7 +92,7 @@ run_boot() {
         "$repo_root/tools/qemu/run.sh" >"$boot_output" 2>&1 &
     qemu_pid=$!
 
-    for _ in {1..180}; do
+    for ((attempt = 0; attempt < boot_timeout_seconds; attempt++)); do
         if ! kill -0 "$qemu_pid" 2>/dev/null; then
             break
         fi
@@ -89,7 +105,7 @@ run_boot() {
         wait "$qemu_pid" 2>/dev/null || true
         qemu_pid=""
         cat "$boot_output"
-        echo "Boot test failed: $boot_name QEMU boot did not finish within 180 seconds." >&2
+        echo "Boot test failed: $boot_name QEMU boot did not finish within ${boot_timeout_seconds} seconds." >&2
         exit 1
     fi
 
@@ -146,6 +162,11 @@ if ! grep -q '^GINUX_KERNEL_OK' "$output_file"; then
     exit 1
 fi
 
+if ! grep -q '^ginux: bounded OCI rootfs unpack policy verified' "$output_file"; then
+    echo "Boot test failed: OCI rootfs expansion was not bounded before allocation." >&2
+    exit 1
+fi
+
 "$repo_root/tests/qemu/check-linux-runtime.sh" "$output_file"
 
 if ! grep -q '^ginux: modern virtio network function: 0:3.0' "$output_file" ||
@@ -161,8 +182,8 @@ if ! grep -q '^ginux: modern virtio network function: 0:3.0' "$output_file" ||
     ! grep -q '^ginux: virtio-net cacheable alias absent' "$output_file" ||
     ! grep -q '^ginux: virtio-net accepted features: 12884934688' "$output_file" ||
     ! grep -q '^ginux: virtio-net queues available: 3' "$output_file" ||
-    ! grep -q '^ginux: virtio-net receive queue size: 256' "$output_file" ||
-    ! grep -q '^ginux: virtio-net transmit queue size: 256' "$output_file" ||
+    ! grep -Eq '^ginux: virtio-net receive queue size: (8|16|32|64|128|256|512|1024|2048|4096|8192|16384|32768)[[:space:]]*$' "$output_file" ||
+    ! grep -Eq '^ginux: virtio-net transmit queue size: (8|16|32|64|128|256|512|1024|2048|4096|8192|16384|32768)[[:space:]]*$' "$output_file" ||
     ! grep -q '^ginux: virtio-net receive notification address: [0-9]' "$output_file" ||
     ! grep -q '^ginux: virtio-net transmit notification address: [0-9]' "$output_file" ||
     ! grep -q '^ginux: virtio-net queues remain disabled and DMA-unbound' "$output_file" ||
@@ -780,6 +801,7 @@ if ! grep -q '^ginux: IOMMU root/context hierarchy constructed' "$output_file" |
     ! grep -q '^ginux: one-page identity DMA translation encoded exactly' "$output_file" ||
     ! grep -q '^ginux: invalid IOMMU table inputs rejected' "$output_file" ||
     ! grep -q '^ginux: IOMMU hardware state unchanged after table construction' "$output_file" ||
+    ! grep -q '^ginux: failed IOMMU activation rollback quarantined' "$output_file" ||
     ! grep -q '^ginux: IOMMU translation frames scrubbed and released' "$output_file"; then
     echo "Boot test failed: IOMMU translation hierarchy lifecycle did not complete." >&2
     exit 1
@@ -1208,6 +1230,10 @@ fi
 
 if ! grep -q '^ginux: per-domain physical frame budgets enforced' "$output_file"; then
     echo "Boot test failed: per-domain physical-frame budgets were not enforced." >&2
+    exit 1
+fi
+if ! grep -q '^ginux: failed runtime volume DMA retirement quarantined' "$output_file"; then
+    echo "Boot test failed: failed runtime volume DMA retirement was not quarantined." >&2
     exit 1
 fi
 

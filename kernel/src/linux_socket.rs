@@ -1247,7 +1247,14 @@ impl Sockets {
         }
         let mut device = VirtioNet::start(&platform, ipv4).ok_or(Error::Unavailable)?;
         let mut config = InterfaceConfig::new(EthernetAddress(platform.initialization.mac).into());
-        config.random_seed = u64::from(ipv4) << 32 | u64::from(gateway);
+        // smoltcp draws TCP initial sequence numbers and ephemeral ports from
+        // this seed, so it must not be guessable from the addresses: use the
+        // CPU's random source, and the timestamp counter only without one.
+        config.random_seed = crate::arch::x86_64::cpu::linux_startup_random()
+            .map(|random| u64::from_ne_bytes(random[..8].try_into().expect("eight bytes")))
+            .unwrap_or_else(|| {
+                (u64::from(ipv4) << 32 | u64::from(gateway)) ^ timer::timestamp_counter()
+            });
         let now = clock_milliseconds(0);
         let mut interface = Interface::new(config, &mut device, Instant::from_millis(now));
         interface.update_ip_addrs(|addresses| {

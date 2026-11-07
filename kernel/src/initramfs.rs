@@ -12,7 +12,11 @@ const MAX_NAME_SIZE: usize = 256;
 const MAX_FILE_SIZE: usize = 8 * 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 const MAX_INDEXED_ENTRIES: usize = 64;
-const ROOT_FRAME_COUNT: usize = 160;
+// The measured boot archive is immutable and materialized before a general
+// kernel heap exists. Keep its contiguous publication envelope explicit; all
+// runtime domain and image storage remains demand allocated. Release
+// overflow checks grew the embedded services past 160 pages.
+const ROOT_FRAME_COUNT: usize = 192;
 const ROOT_CAPACITY: usize = ROOT_FRAME_COUNT * PAGE_SIZE;
 const TYPE_MASK: u32 = 0o170000;
 const DIRECTORY: u32 = 0o040000;

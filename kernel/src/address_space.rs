@@ -3584,9 +3584,14 @@ pub(crate) fn protect_current_linux_range_read_only(address: u64, length: u64) -
             return false;
         };
         let value = leaf.read();
-        unsafe {
-            leaf.write(value & !WRITABLE);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
+        // Revoking write access must reach every CPU running this address
+        // space before mprotect returns, or a sibling thread keeps writing
+        // through its cached translation.
+        leaf.write(value & !WRITABLE);
+        if !smp::invalidate_runtime_translation(page) {
+            leaf.write(value);
+            let _ = smp::invalidate_runtime_translation(page);
+            return false;
         }
     }
     true
@@ -6043,14 +6048,37 @@ pub(crate) fn replace_linux_cow_page_in_root(
         return false;
     }
     let flags = PRESENT | USER | WRITABLE | if executable { 0 } else { NO_EXECUTE };
-    unsafe {
-        entry.write(replacement.address() | flags);
-        if root.address() == current_root() {
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
-        entry.read() & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE | LINUX_RUNTIME_COW)
-            == replacement.address() | flags
+    write_linux_cow_leaf(
+        root.address(),
+        entry,
+        address,
+        value,
+        replacement.address() | flags,
+    )
+}
+
+/// Installs a copy-on-write break's new leaf `value` (replacing `previous`)
+/// for `address`. A sibling thread of the current process may run with
+/// this root on another CPU: Linux flushes the old copy-on-write
+/// translation on every CPU that may cache it before the new page is used
+/// (ptep_clear_flush in wp_page_copy), since a local invlpg alone leaves
+/// that CPU reading the old shared frame or faulting on its stale
+/// read-only entry. The old entry comes back if the shootdown fails.
+fn write_linux_cow_leaf(
+    root: u64,
+    entry: PageEntry,
+    address: u64,
+    previous: u64,
+    value: u64,
+) -> bool {
+    entry.write(value);
+    if root == current_root() && !smp::invalidate_runtime_translation(address) {
+        entry.write(previous);
+        let _ = smp::invalidate_runtime_translation(address);
+        return false;
     }
+    entry.read() & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE | LINUX_RUNTIME_COW)
+        == value
 }
 
 /// Makes the current address space's copy-on-write mapping of `expected`
@@ -6086,14 +6114,7 @@ fn promote_linux_cow_page_in_root_address(
         return false;
     }
     let flags = PRESENT | USER | WRITABLE | if executable { 0 } else { NO_EXECUTE };
-    unsafe {
-        entry.write(expected.address() | flags);
-        if root == current_root() {
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
-        entry.read() & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE | LINUX_RUNTIME_COW)
-            == expected.address() | flags
-    }
+    write_linux_cow_leaf(root, entry, address, value, expected.address() | flags)
 }
 
 /// Makes the program-image page at `address`, which maps `frame` and is not
@@ -8300,8 +8321,8 @@ pub(crate) fn verify_control_plane_wx_layout() -> bool {
 
 const NATIVE_SERVICE_IMAGE_PAGES: usize = 7;
 pub(crate) const NATIVE_SERVICE_FRAME_COUNT: usize = 4 + NATIVE_SERVICE_IMAGE_PAGES + 3;
-const NATIVE_NETWORK_IMAGE_PAGES: usize = 160;
-const NATIVE_NETWORK_STACK_PAGES: usize = 16;
+pub(crate) const NATIVE_NETWORK_IMAGE_PAGES: usize = 161;
+pub(crate) const NATIVE_NETWORK_STACK_PAGES: usize = 16;
 pub(crate) const NATIVE_NETWORK_FRAME_COUNT: usize =
     4 + NATIVE_NETWORK_IMAGE_PAGES + NATIVE_NETWORK_STACK_PAGES + 1;
 pub(crate) const NATIVE_CONTROLLER_IMAGE_PAGES: usize = 16;

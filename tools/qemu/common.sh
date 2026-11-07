@@ -33,7 +33,9 @@ find_ovmf_code() {
         /opt/homebrew/opt/qemu/share/qemu/edk2-x86_64-code.fd \
         /usr/local/share/qemu/edk2-x86_64-code.fd \
         /usr/share/OVMF/OVMF_CODE.fd \
-        /usr/share/edk2/x64/OVMF_CODE.fd
+        /usr/share/OVMF/OVMF_CODE_4M.fd \
+        /usr/share/edk2/x64/OVMF_CODE.fd \
+        /usr/share/qemu/ovmf-x86_64-4m-code.bin
 }
 
 find_ovmf_vars() {
@@ -46,7 +48,9 @@ find_ovmf_vars() {
         /opt/homebrew/opt/qemu/share/qemu/edk2-i386-vars.fd \
         /usr/local/share/qemu/edk2-i386-vars.fd \
         /usr/share/OVMF/OVMF_VARS.fd \
-        /usr/share/edk2/x64/OVMF_VARS.fd
+        /usr/share/OVMF/OVMF_VARS_4M.fd \
+        /usr/share/edk2/x64/OVMF_VARS.fd \
+        /usr/share/qemu/ovmf-x86_64-4m-vars.bin
 }
 
 default_accelerator() {

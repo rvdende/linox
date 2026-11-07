@@ -13,6 +13,7 @@ members = [
     "crates/landlock",
     "crates/memory-areas",
     "crates/cgroup",
+    "crates/kernel-policy",
     "crates/native-abi",
     "crates/oci",
     "crates/oci-cache",
@@ -50,6 +51,7 @@ panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"
+overflow-checks = true
 panic = "abort"
 strip = true
 

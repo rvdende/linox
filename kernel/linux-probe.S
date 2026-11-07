@@ -1415,7 +1415,9 @@ valid_interpreter_base:
     push 2
     pop r14
 linux_clone_repeat:
-    mov edi, 0x13d0f00
+    # Use the clone(flags, stack, ptid, ctid, tls) register order with ctid in
+    # r10 and tls in r8, plus the legacy CLONE_DETACHED bit musl passes.
+    mov edi, 0x17d0f00
     mov esi, 0x413000
     mov edx, 0x405194
     lea r10d, [edx + 4]

@@ -494,6 +494,7 @@ dependencies = [
  "ginux-drm",
  "ginux-ext2",
  "ginux-image-store",
+ "ginux-kernel-policy",
  "ginux-keyrings",
  "ginux-ktls",
  "ginux-landlock",
@@ -515,6 +516,10 @@ dependencies = [
  "miniz_oxide",
  "smoltcp",
 ]
+
+[[package]]
+name = "ginux-kernel-policy"
+version = "0.1.0"
 
 [[package]]
 name = "ginux-keyrings"

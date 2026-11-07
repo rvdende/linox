@@ -23,14 +23,7 @@ const FAULT_RECORD_STRIDE: u64 = 16;
 const FAULT_RECORD_HIGH_DELTA: u64 = 8;
 const PRIMARY_PENDING_FAULT: u32 = 1 << 1;
 const FAULT_RECORD_VALID: u64 = 1 << 63;
-const FAULT_RECORD_TRANSACTION_READ: u64 = 1 << 62;
-const FAULT_RECORD_REASON_SHIFT: u64 = 32;
-const FAULT_RECORD_REASON_MASK: u64 = 0xff;
-const FAULT_RECORD_PASID_SHIFT: u64 = 40;
-const FAULT_RECORD_NO_PASID: u64 = 0xffff;
-const FAULT_RECORD_SOURCE_MASK: u64 = 0xffff;
 const FAULT_INFORMATION_MASK: u64 = !0xfff;
-const WRITE_PERMISSION_FAULT: u64 = 5;
 const TRANSLATION_ENABLE_STATUS: u32 = 1 << 31;
 const SET_ROOT_TABLE_POINTER: u32 = 1 << 30;
 const ROOT_TABLE_POINTER_STATUS: u32 = 1 << 30;
@@ -137,6 +130,12 @@ pub(crate) struct ActiveTranslation {
     fault_record_register: u64,
 }
 
+pub(crate) enum TranslationActivation {
+    Active(ActiveTranslation),
+    Inactive,
+    RollbackFailed,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct DeviceTranslationProfile {
     register_base: u64,
@@ -203,21 +202,31 @@ impl DeviceTranslationProfile {
             table_frames: inactive.frames,
             dma_frame,
         };
-        let Some(active) = activate_translation(
+        let activation = activate_translation(
             self.register_base,
             self.mapping,
             self.capabilities,
             &inactive,
             dma_frame,
-        ) else {
-            let _ = inactive.retire();
-            return None;
-        };
-        Some(DeviceTranslation {
-            inactive,
-            active,
-            evidence,
-        })
+        );
+        match activation {
+            TranslationActivation::Active(active) => Some(DeviceTranslation {
+                inactive,
+                active,
+                evidence,
+            }),
+            TranslationActivation::Inactive => {
+                let _ = inactive.retire();
+                None
+            }
+            TranslationActivation::RollbackFailed => {
+                // The hardware may still walk this hierarchy. Dropping the
+                // handle deliberately leaves every frame live and kernel-owned
+                // until reboot rather than making it available for reuse.
+                let _ = quarantine_failed_activation(inactive);
+                None
+            }
+        }
     }
 
     pub(crate) fn is_inactive(self) -> bool {
@@ -366,17 +375,10 @@ impl ActiveTranslation {
             return false;
         };
         let source = (u64::from(bus) << 8) | (u64::from(device) << 3) | u64::from(function);
-        let expected_high = FAULT_RECORD_VALID
-            | (FAULT_RECORD_NO_PASID << FAULT_RECORD_PASID_SHIFT)
-            | (WRITE_PERMISSION_FAULT << FAULT_RECORD_REASON_SHIFT)
-            | source;
+        let cleared_high = high & !FAULT_RECORD_VALID;
         if status & FAULT_STATUS_MASK != PRIMARY_PENDING_FAULT
             || low & FAULT_INFORMATION_MASK != fault_address
-            || high != expected_high
-            || high & FAULT_RECORD_TRANSACTION_READ != 0
-            || high >> FAULT_RECORD_REASON_SHIFT & FAULT_RECORD_REASON_MASK
-                != WRITE_PERMISSION_FAULT
-            || high & FAULT_RECORD_SOURCE_MASK != source
+            || !ginux_kernel_policy::valid_vtd_write_fault_record(high, source as u16)
             || read_u32(self.mapping, self.register_base + GLOBAL_STATUS_OFFSET)
                 .is_none_or(|global| global & TRANSLATION_ENABLE_STATUS == 0)
             || read_u64(self.mapping, self.register_base + ROOT_TABLE_ADDRESS_OFFSET)
@@ -393,7 +395,7 @@ impl ActiveTranslation {
             && read_u64(
                 self.mapping,
                 self.fault_record_register + FAULT_RECORD_HIGH_DELTA,
-            ) == Some(expected_high & !FAULT_RECORD_VALID)
+            ) == Some(cleared_high)
             && invalidate_caches(self.mapping, self.register_base, self.iotlb_register)
             && self.is_active()
     }
@@ -548,20 +550,30 @@ pub(crate) fn activate_translation(
     capabilities: Capabilities,
     translation: &InactiveTranslation,
     dma_frame: FrameLease,
-) -> Option<ActiveTranslation> {
-    let iotlb_register = register_base.checked_add(
-        ((capabilities.extended_capability >> IOTLB_OFFSET_SHIFT) & IOTLB_OFFSET_MASK)
-            .checked_mul(16)?
-            .checked_add(IOTLB_INVALIDATE_REGISTER_DELTA)?,
-    )?;
+) -> TranslationActivation {
+    let Some(iotlb_offset) = ((capabilities.extended_capability >> IOTLB_OFFSET_SHIFT)
+        & IOTLB_OFFSET_MASK)
+        .checked_mul(16)
+        .and_then(|offset| offset.checked_add(IOTLB_INVALIDATE_REGISTER_DELTA))
+    else {
+        return TranslationActivation::Inactive;
+    };
+    let Some(iotlb_register) = register_base.checked_add(iotlb_offset) else {
+        return TranslationActivation::Inactive;
+    };
     let fault_record_count = ((capabilities.capability >> CAPABILITY_FAULT_RECORD_COUNT_SHIFT)
         & CAPABILITY_FAULT_RECORD_COUNT_MASK)
         + 1;
-    let fault_record_register = register_base.checked_add(
-        ((capabilities.capability >> CAPABILITY_FAULT_RECORD_OFFSET_SHIFT)
-            & CAPABILITY_FAULT_RECORD_OFFSET_MASK)
-            .checked_mul(FAULT_RECORD_STRIDE)?,
-    )?;
+    let Some(fault_record_offset) = ((capabilities.capability
+        >> CAPABILITY_FAULT_RECORD_OFFSET_SHIFT)
+        & CAPABILITY_FAULT_RECORD_OFFSET_MASK)
+        .checked_mul(FAULT_RECORD_STRIDE)
+    else {
+        return TranslationActivation::Inactive;
+    };
+    let Some(fault_record_register) = register_base.checked_add(fault_record_offset) else {
+        return TranslationActivation::Inactive;
+    };
     if !translation.is_exact(dma_frame)
         || fault_record_count != 1
         || mapping.address(iotlb_register, size_of::<u64>()).is_none()
@@ -574,7 +586,7 @@ pub(crate) fn activate_translation(
         })
         || !fault_status_is_clear(mapping, register_base)
     {
-        return None;
+        return TranslationActivation::Inactive;
     }
     fence(Ordering::SeqCst);
     let root_table_address = translation.root_table_address();
@@ -602,10 +614,48 @@ pub(crate) fn activate_translation(
         fault_record_register,
     };
     if !installed || !active.is_active() {
-        rollback_activation(mapping, register_base);
-        return None;
+        return if rollback_activation(mapping, register_base, iotlb_register) {
+            TranslationActivation::Inactive
+        } else {
+            TranslationActivation::RollbackFailed
+        };
     }
-    Some(active)
+    TranslationActivation::Active(active)
+}
+
+pub(crate) fn verify_failed_activation_retirement(
+    capabilities: Capabilities,
+    dma_frame: FrameLease,
+) -> bool {
+    let Some(baseline) = memory::owner_live_frame_count(FrameOwner::KERNEL) else {
+        return false;
+    };
+    let Some(clean) = build_inactive_translation(capabilities, 0, 2, 0, dma_frame) else {
+        return false;
+    };
+    let clean_frames = clean.frames;
+    let clean_retired = clean.retire() && !memory::any_frame_lease_live(&clean_frames);
+
+    let Some(quarantined) = build_inactive_translation(capabilities, 0, 2, 0, dma_frame) else {
+        return false;
+    };
+    let quarantined_frames = quarantined.frames;
+    let quarantine_preserved = quarantine_failed_activation(quarantined)
+        && memory::frames_owned_by(FrameOwner::KERNEL, &quarantined_frames)
+        && memory::any_frame_lease_live(&quarantined_frames);
+    let quarantine_cleaned =
+        memory::scrub_and_release_frames(FrameOwner::KERNEL, &quarantined_frames)
+            && !memory::any_frame_lease_live(&quarantined_frames);
+
+    clean_retired
+        && quarantine_preserved
+        && quarantine_cleaned
+        && memory::owner_live_frame_count(FrameOwner::KERNEL) == Some(baseline)
+}
+
+fn quarantine_failed_activation(translation: InactiveTranslation) -> bool {
+    memory::frames_owned_by(FrameOwner::KERNEL, &translation.frames)
+        && memory::any_frame_lease_live(&translation.frames)
 }
 
 pub(crate) fn verify_inactive_translation_rejections(
@@ -918,14 +968,48 @@ fn fault_status_is_clear(mapping: MmioMapping, register_base: u64) -> bool {
         .is_some_and(|status| status & FAULT_STATUS_MASK == 0)
 }
 
-fn rollback_activation(mapping: MmioMapping, register_base: u64) {
-    let _ = write_u32(mapping, register_base + GLOBAL_COMMAND_OFFSET, 0);
-    let _ = wait_status(mapping, register_base, TRANSLATION_ENABLE_STATUS, false);
-    let _ = write_u64(mapping, register_base + ROOT_TABLE_ADDRESS_OFFSET, 0);
-    let _ = write_u32(
+fn rollback_activation(mapping: MmioMapping, register_base: u64, iotlb_register: u64) -> bool {
+    let disable_written = write_u32(mapping, register_base + GLOBAL_COMMAND_OFFSET, 0);
+    let translation_disabled =
+        wait_status(mapping, register_base, TRANSLATION_ENABLE_STATUS, false);
+
+    // Do not short-circuit rollback. Even when one command fails, later
+    // disable and root-clear operations remain useful best-effort containment.
+    let context_command = register_base + CONTEXT_COMMAND_OFFSET;
+    let context_written = write_u64(
+        mapping,
+        context_command,
+        CONTEXT_INVALIDATE | CONTEXT_GLOBAL_INVALIDATE,
+    );
+    let context_invalidated = wait_u64_clear(mapping, context_command, CONTEXT_INVALIDATE);
+    let iotlb_written = write_u64(
+        mapping,
+        iotlb_register,
+        IOTLB_INVALIDATE | IOTLB_GLOBAL_INVALIDATE,
+    );
+    let iotlb_invalidated = wait_u64_clear(mapping, iotlb_register, IOTLB_INVALIDATE);
+
+    let root_zero_written = write_u64(mapping, register_base + ROOT_TABLE_ADDRESS_OFFSET, 0);
+    let root_command_written = write_u32(
         mapping,
         register_base + GLOBAL_COMMAND_OFFSET,
         SET_ROOT_TABLE_POINTER,
     );
-    let _ = wait_status(mapping, register_base, ROOT_TABLE_POINTER_STATUS, true);
+    let root_command_completed =
+        wait_status(mapping, register_base, ROOT_TABLE_POINTER_STATUS, true);
+    let final_status = read_u32(mapping, register_base + GLOBAL_STATUS_OFFSET);
+    let final_root = read_u64(mapping, register_base + ROOT_TABLE_ADDRESS_OFFSET);
+
+    disable_written
+        && translation_disabled
+        && context_written
+        && context_invalidated
+        && iotlb_written
+        && iotlb_invalidated
+        && root_zero_written
+        && root_command_written
+        && root_command_completed
+        && final_status.is_some_and(|status| status & TRANSLATION_ENABLE_STATUS == 0)
+        && final_root == Some(0)
+        && fault_status_is_clear(mapping, register_base)
 }

@@ -28440,6 +28440,13 @@ fn linux_runtime_mmap(
             let Some(metadata) = crate::linux_overlay::metadata(handle) else {
                 return LINUX_EBADF;
             };
+            // A writable shared mapping needs a descriptor open for reading
+            // and writing, checked before the seals (mm/mmap.c do_mmap: no
+            // FMODE_WRITE is EACCES); otherwise any reader could change the
+            // file through the mapping.
+            if sharing == LINUX_MAP_SHARED && protection & LINUX_PROT_WRITE != 0 && state & 3 != 3 {
+                return LINUX_EACCES;
+            }
             if sharing == LINUX_MAP_SHARED
                 && protection & LINUX_PROT_WRITE != 0
                 && crate::linux_overlay::file_seals(handle).is_some_and(|seals| {
@@ -28486,8 +28493,11 @@ fn linux_runtime_mmap(
                     LINUX_EBADF
                 };
             };
+            // These descriptors are always read-only, so a writable shared
+            // mapping is refused as Linux refuses one without FMODE_WRITE.
             if linux_proc_file(state)
                 || state & 3 != LINUX_DESCRIPTOR_INPUT
+                || sharing == LINUX_MAP_SHARED && protection & LINUX_PROT_WRITE != 0
                 || !offset.is_multiple_of(PAGE_SIZE as u64)
             {
                 return LINUX_EACCES;
@@ -64806,6 +64816,10 @@ fn dispatch_charged_call(
         ginux_native_abi::NATIVE_NETWORK_INVENTORY_OPERATION => {
             network_inventory_call(caller_domain, capability, frame)
         }
+        // The frequency is the one the Linux clock profile already trusts; it
+        // grants no authority, so no capability is required.
+        ginux_native_abi::NATIVE_TIMESTAMP_FREQUENCY_OPERATION => timer::monotonic_frequency()
+            .unwrap_or(ginux_native_abi::NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE),
         control_abi::PACKET_PUBLISH_OPERATION => {
             packet_publish_call(caller_domain, capability, frame)
         }

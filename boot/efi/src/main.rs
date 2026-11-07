@@ -251,6 +251,11 @@ struct EfiSystemTable {
 #[repr(C, align(16))]
 struct MemoryMapStorage([u8; MEMORY_MAP_CAPACITY]);
 
+extern "C" {
+    // Linker-defined start of the image this code is currently running from.
+    static __ImageBase: u8;
+}
+
 static mut MEMORY_MAP_STORAGE: MemoryMapStorage = MemoryMapStorage([0; MEMORY_MAP_CAPACITY]);
 // Kept in the image rather than on the firmware stack, which may lie above 4 GiB.
 static mut BOOT_INFO: core::mem::MaybeUninit<BootInfo> = core::mem::MaybeUninit::uninit();
@@ -305,12 +310,22 @@ extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable)
             panic!("UEFI boot services are missing");
         }
         let (image_base, image_size) = loaded_image_bounds(image, boot_services);
+        // tests/qemu/efi-load-above-4g.sh reads where the image was loaded
+        // and where it continues.
+        serial_write("ginux: EFI image loaded at ");
+        serial_write_hex(image_base as u64);
+        serial_write(" size ");
+        serial_write_hex(image_size as u64);
+        serial_write("\r\n");
         if (image_base as u64).saturating_add(image_size as u64) <= IMAGE_ADDRESS_LIMIT {
             return continue_boot(image, system_table, image_base, image_size);
         }
         // Firmware placed the image above 4 GiB, which the kernel's initial
         // identity map does not reach. Continue in a relocated copy.
         let relocated = relocate_below_limit(boot_services, image_base, image_size);
+        serial_write("ginux: EFI image relocated below 4 GiB to ");
+        serial_write_hex(relocated as u64);
+        serial_write("\r\n");
         let offset = continue_boot as *const () as usize - image_base as usize;
         let continuation: Continuation = core::mem::transmute(relocated.add(offset));
         continuation(image, system_table, relocated, image_size)
@@ -325,6 +340,11 @@ unsafe extern "efiapi" fn continue_boot(
     image_base: *const u8,
     image_size: usize,
 ) -> EfiStatus {
+    if loaded_image_bounds(image, (*system_table).boot_services).0 != image_base {
+        serial_write("ginux: EFI image entered at relocated base ");
+        serial_write_hex(running_image_base() as u64);
+        serial_write("\r\n");
+    }
     // The handoff function validates the required pointers before using them.
     let acpi_rsdp = find_acpi_rsdp(system_table);
     if acpi_rsdp.is_null() {
@@ -388,6 +408,11 @@ unsafe fn relocate_below_limit(
         block += block_size;
     }
     copy
+}
+
+fn running_image_base() -> *const u8 {
+    // Taking the address of the linker-defined symbol never reads it.
+    core::ptr::addr_of!(__ImageBase)
 }
 
 unsafe fn find_acpi_rsdp(system_table: *const EfiSystemTable) -> *const u8 {
@@ -640,6 +665,24 @@ fn serial_write_u64(mut value: u64) {
             core::hint::spin_loop();
         }
         unsafe { outb(COM1, *byte) };
+    }
+}
+
+fn serial_write_hex(value: u64) {
+    let mut digits = [0_u8; 16];
+    let mut index = digits.len();
+    let mut rest = value;
+    loop {
+        index -= 1;
+        digits[index] = b"0123456789abcdef"[(rest & 0xf) as usize];
+        rest >>= 4;
+        if rest == 0 {
+            break;
+        }
+    }
+    serial_write("0x");
+    if let Ok(text) = core::str::from_utf8(&digits[index..]) {
+        serial_write(text);
     }
 }
 
