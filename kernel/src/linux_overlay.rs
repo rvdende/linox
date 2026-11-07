@@ -1264,7 +1264,7 @@ pub(crate) fn fifo_socket(handle: Handle) -> Option<crate::linux_socket::SlotId>
         return blockfs::fifo_socket(handle).flatten();
     }
     let node = node(handle)?;
-    (node.kind == NodeKind::Fifo && node.fifo_socket != 0).then_some(node.fifo_socket - 1)
+    (node.kind == NodeKind::Fifo && node.fifo_socket != 0).then(|| node.fifo_socket - 1)
 }
 
 pub(crate) fn set_fifo_socket(handle: Handle, slot: crate::linux_socket::SlotId) -> bool {

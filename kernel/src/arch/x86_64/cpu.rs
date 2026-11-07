@@ -50460,9 +50460,9 @@ fn linux_epoll_ctl(epoll: u64, operation: u64, descriptor: u64, event_address: u
     let existing = if runtime {
         (0..LINUX_DESCRIPTOR_TABLE_LIMIT as usize).find(|slot| {
             X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[*slot].load(Ordering::SeqCst)
-                == epoll as u32 + 1
+                == (epoll as u32).wrapping_add(1)
                 && X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[*slot].load(Ordering::SeqCst)
-                    == descriptor as u32 + 1
+                    == (descriptor as u32).wrapping_add(1)
         })
     } else {
         Some(descriptor as usize).filter(|target| {
@@ -50534,9 +50534,10 @@ fn linux_epoll_ctl(epoll: u64, operation: u64, descriptor: u64, event_address: u
         }) else {
             return LINUX_ENOSPC;
         };
-        X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].store(epoll as u32 + 1, Ordering::SeqCst);
+        X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot]
+            .store((epoll as u32).wrapping_add(1), Ordering::SeqCst);
         X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[slot]
-            .store(descriptor as u32 + 1, Ordering::SeqCst);
+            .store((descriptor as u32).wrapping_add(1), Ordering::SeqCst);
         slot
     } else {
         descriptor as usize
@@ -50744,7 +50745,7 @@ fn linux_epoll_event_from(
         let slot = (start + step) % limit;
         let target = if runtime {
             if X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].load(Ordering::SeqCst)
-                != epoll as u32 + 1
+                != (epoll as u32).wrapping_add(1)
             {
                 continue;
             }
@@ -50848,7 +50849,7 @@ fn linux_epoll_event_from(
 fn linux_epoll_watched_instances(epoll: u64) -> impl Iterator<Item = u64> {
     (0..LINUX_DESCRIPTOR_TABLE_LIMIT as usize).filter_map(move |slot| {
         if X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].load(Ordering::SeqCst)
-            != epoll as u32 + 1
+            != (epoll as u32).wrapping_add(1)
         {
             return None;
         }
@@ -50965,7 +50966,7 @@ fn linux_epoll_forget_descriptor(descriptor: u64) {
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         for slot in 0..LINUX_DESCRIPTOR_TABLE_LIMIT as usize {
             if X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[slot].load(Ordering::SeqCst)
-                == descriptor as u32 + 1
+                == (descriptor as u32).wrapping_add(1)
             {
                 X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].store(0, Ordering::SeqCst);
                 X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[slot].store(0, Ordering::SeqCst);
@@ -50982,7 +50983,7 @@ fn linux_epoll_forget_descriptor(descriptor: u64) {
 fn linux_epoll_forget_owner(descriptor: u64) {
     for slot in 0..LINUX_DESCRIPTOR_TABLE_LIMIT as usize {
         if X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].load(Ordering::SeqCst)
-            == descriptor as u32 + 1
+            == (descriptor as u32).wrapping_add(1)
         {
             X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[slot].store(0, Ordering::SeqCst);
             X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[slot].store(0, Ordering::SeqCst);
