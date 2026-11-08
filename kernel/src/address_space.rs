@@ -193,10 +193,10 @@ const LINUX_RUNTIME_SWAP: u64 = 1 << 59;
 /// bits never name a frame lease.
 const LINUX_SWAP_ENTRY_TAG: u64 = 1 << 51;
 const LINUX_INIT_ARGUMENT: [u8; 6] = [b'/', b'i', b'n', b'i', b't', 0];
-const LINUX_INIT_ENVIRONMENT: [u8; 8] = [b'G', b'I', b'N', b'U', b'X', b'=', b'1', 0];
+const LINUX_INIT_ENVIRONMENT: [u8; 8] = *b"LINOX=1\0";
 const LINUX_PLATFORM: [u8; 7] = [b'x', b'8', b'6', b'_', b'6', b'4', 0];
 const LINUX_FIXTURE_RANDOM: [u8; 16] = [
-    0x47, 0x69, 0x6e, 0x75, 0x78, 0x2d, 0x41, 0x42, 0x49, 0x2d, 0x76, 0x30, 0x2d, 0x30, 0x30, 0x31,
+    0x4c, 0x69, 0x6e, 0x6f, 0x78, 0x2d, 0x41, 0x42, 0x49, 0x2d, 0x76, 0x30, 0x2d, 0x30, 0x30, 0x31,
 ];
 pub(crate) const LINUX_TLS_THREAD_POINTER_OFFSET: usize = PAGE_SIZE - 64;
 const LINUX_TLS_TCB_SIZE: usize = 16;
