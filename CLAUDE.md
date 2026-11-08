@@ -39,8 +39,8 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    upstream's final standalone kernel, `bootable-kernel-final`). Upstream
    (gmkurtzer/ginux) ended the standalone kernel on 2026-11-04 and its
    `main` is now a different product, a userspace kernel that runs on a
-   Linux host: never merge `upstream/main`. This fork continues the
-   standalone kernel on its own. New globals go in the runtime owner
+   Linux host: never merge it. Linox continues the standalone kernel on
+   its own, with no upstream remote. New globals go in the runtime owner
    structs and `docs/feedback-hardening/writable-globals.tsv`; new
    `unsafe` blocks also update `tools/architecture/check-kernel-unsafe.sh`.
 2. **Per-thread kernel stacks and a preemptive per-CPU scheduler**
