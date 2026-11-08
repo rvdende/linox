@@ -188,7 +188,7 @@ linox_linux_probe:
     cmp byte ptr [rax], '/'
     require_equal
     mov rax, qword ptr [rsp + 24]
-    cmp byte ptr [rax], 'G'
+    cmp byte ptr [rax], 'L'
     require_equal
     mov rax, qword ptr [rsp + 112]
     test rax, rax

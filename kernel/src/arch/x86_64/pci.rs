@@ -1900,8 +1900,8 @@ pub(crate) fn quiesce_isolated_network_interrupt(
 pub(crate) fn network_service_transmit_is_complete(dma_physical: u64, dma_virtual: usize) -> bool {
     const HEADER_LENGTH: usize = 12;
     const ETHERNET_FRAME: [u8; 19] = [
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'G',
-        b'I', b'N', b'U', b'X',
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'L',
+        b'I', b'N', b'O', b'X',
     ];
     const PAYLOAD_LENGTH: usize = HEADER_LENGTH + ETHERNET_FRAME.len();
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
@@ -2282,8 +2282,8 @@ pub(crate) unsafe fn transmit_network_probe(
 ) -> Option<VirtioNetworkTransmit> {
     const HEADER_LENGTH: usize = 12;
     const ETHERNET_FRAME: [u8; 19] = [
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'G',
-        b'I', b'N', b'U', b'X',
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'L',
+        b'I', b'N', b'O', b'X',
     ];
     const PAYLOAD_LENGTH: usize = HEADER_LENGTH + ETHERNET_FRAME.len();
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)

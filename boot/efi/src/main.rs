@@ -270,10 +270,10 @@ extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable)
     // Keep the firmware-console message as a convenience for UTM's graphical view.
     // Serial is the authoritative interface used by automated tests.
     let message = [
-        b'G' as u16,
+        b'L' as u16,
         b'i' as u16,
         b'n' as u16,
-        b'u' as u16,
+        b'o' as u16,
         b'x' as u16,
         b' ' as u16,
         b'b' as u16,
