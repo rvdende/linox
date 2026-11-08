@@ -541,18 +541,19 @@ linox_linux_interpreter:
     add rcx, r15
     mov rdx, qword ptr [rax + 56]
     shr rdx, 32
-#ifdef LINOX_LINKED
-    cmp edx, dword ptr [r8 + 12]
-#else
+#ifndef LINOX_LINKED
     cmp edx, dword ptr [r8 + 8]
-#endif
     jne .Linvalid_dynamic
+#endif
     cmp edx, dword ptr [r10 + 24]
     jne .Linvalid_dynamic
     lea rdx, [rdx + rdx * 2]
     shl rdx, 3
     mov edi, dword ptr [rsi + rdx]
     add rdi, r13
+#ifdef LINOX_LINKED
+    call .Lsysv_hash_lists_symbol
+#endif
     mov ebp, dword ptr [r9 + rdx]
     add rbp, r14
 .Lcompare_symbol_name:
@@ -584,14 +585,13 @@ linox_linux_interpreter:
     add rcx, r15
     mov rdx, qword ptr [rax + 80]
     shr rdx, 32
-    cmp edx, dword ptr [r8 + 8]
-    jne .Linvalid_dynamic
     cmp edx, 2
     jne .Linvalid_dynamic
     lea rdx, [rdx + rdx * 2]
     shl rdx, 3
     mov edi, dword ptr [rsi + rdx]
     add rdi, r13
+    call .Lsysv_hash_lists_symbol
     mov r9, qword ptr [rip + .Lauxiliary_symbol_table]
     mov r10, qword ptr [rip + .Lauxiliary_hash_table]
     mov r14, qword ptr [rip + .Lauxiliary_string_table]
@@ -647,6 +647,66 @@ linox_linux_interpreter:
     lea rdx, [rsi + rdi * 8 + 8]
     push rax
     call rcx
+    pop rax
+    ret
+#endif
+
+#ifdef LINOX_LINKED
+// Requires the main program's SysV hash table (r8) to list the symbol whose
+// entry is at byte offset rdx of the symbol table along the chain for the
+// name at rdi. Preserves every register.
+.Lsysv_hash_lists_symbol:
+    push rax
+    push rcx
+    push rdx
+    push rdi
+    push r11
+    mov rax, rdx
+    xor edx, edx
+    mov ecx, 24
+    div rcx
+    mov r11d, eax
+    xor eax, eax
+.Lsysv_hash_name:
+    movzx ecx, byte ptr [rdi]
+    test ecx, ecx
+    jz .Lsysv_hash_bucket
+    shl eax, 4
+    add eax, ecx
+    mov ecx, eax
+    and ecx, 0xf0000000
+    mov edx, ecx
+    shr edx, 24
+    xor eax, edx
+    xor eax, ecx
+    inc rdi
+    jmp .Lsysv_hash_name
+.Lsysv_hash_bucket:
+    mov ecx, dword ptr [r8]
+    test ecx, ecx
+    jz .Linvalid_dynamic
+    xor edx, edx
+    div ecx
+    mov eax, dword ptr [r8 + rdx * 4 + 8]
+    lea rcx, [r8 + rcx * 4 + 8]
+    mov edi, dword ptr [r8 + 4]
+    mov edx, edi
+.Lsysv_hash_chain:
+    test eax, eax
+    jz .Linvalid_dynamic
+    cmp eax, edi
+    jae .Linvalid_dynamic
+    cmp eax, r11d
+    je .Lsysv_hash_found
+    mov eax, dword ptr [rcx + rax * 4]
+    dec edx
+    jnz .Lsysv_hash_chain
+    jmp .Linvalid_dynamic
+.Lsysv_hash_found:
+    pop r11
+    pop rdi
+    pop rdx
+    pop rcx
     pop rax
     ret
 #endif
