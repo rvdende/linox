@@ -24646,19 +24646,22 @@ fn verify_linux_cpu_topology_files(mapping: u64) -> bool {
             == prefix.len() as u64
             && copy_from_linux_user(mapping, &mut prefix)
             && prefix.starts_with(b"processor\t: 1\n");
-    let mut expected_stat = [0_u8; 2048];
-    let Some(stat_size) = linux_proc_stat_file(&mut expected_stat) else {
-        return false;
-    };
-    let mut observed_stat = [0_u8; 2048];
-    let stat = linux_proc_stat_read(mapping, stat_size as u64, 0) == stat_size as u64
-        && copy_from_linux_user(mapping, &mut observed_stat[..stat_size])
-        && observed_stat[..stat_size] == expected_stat[..stat_size];
-    first
-        && second
-        && stat
-        && linux_file_size(LINUX_FILE_PROC_CPUINFO) == cpuinfo_size as u64
-        && linux_file_size(LINUX_FILE_PROC_STAT) == stat_size as u64
+    // /proc/stat's CPU times advance with the clock (100 per second), so
+    // a tick between building the expected text and reading the file
+    // changes it: on a slow (emulated) machine that is likely, so the
+    // comparison is tried again, each try still exact.
+    let stat = (0..8).any(|_| {
+        let mut expected_stat = [0_u8; 2048];
+        let Some(stat_size) = linux_proc_stat_file(&mut expected_stat) else {
+            return false;
+        };
+        let mut observed_stat = [0_u8; 2048];
+        linux_proc_stat_read(mapping, stat_size as u64, 0) == stat_size as u64
+            && copy_from_linux_user(mapping, &mut observed_stat[..stat_size])
+            && observed_stat[..stat_size] == expected_stat[..stat_size]
+            && linux_file_size(LINUX_FILE_PROC_STAT) == stat_size as u64
+    });
+    first && second && stat && linux_file_size(LINUX_FILE_PROC_CPUINFO) == cpuinfo_size as u64
 }
 
 fn verify_linux_realtime_queries() -> bool {
