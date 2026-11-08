@@ -35,9 +35,14 @@ through a Linux ABI personality. It is not a rewrite of Linux:
 ## Roadmap (in order)
 
 1. ~~Merge upstream~~ (done 2026-10-31, fb3f793b: SMP, `cpu/` modules,
-   lock ranks, runtime owner structs). Keep merging upstream regularly
-   (`git fetch upstream`); new globals go in upstream's owner structs and
-   `docs/feedback-hardening/writable-globals.tsv`.
+   lock ranks, runtime owner structs; and once more 2026-11-08, 67bba694:
+   upstream's final standalone kernel, `bootable-kernel-final`). Upstream
+   (gmkurtzer/ginux) ended the standalone kernel on 2026-11-04 and its
+   `main` is now a different product, a userspace kernel that runs on a
+   Linux host: never merge `upstream/main`. This fork continues the
+   standalone kernel on its own. New globals go in the runtime owner
+   structs and `docs/feedback-hardening/writable-globals.tsv`; new
+   `unsafe` blocks also update `tools/architecture/check-kernel-unsafe.sh`.
 2. **Per-thread kernel stacks and a preemptive per-CPU scheduler**
    (design and migration steps: `docs/SCHEDULER.md`). Today a
    process runs nested inside the syscall of the process that started it, on
