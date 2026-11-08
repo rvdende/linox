@@ -5,8 +5,8 @@ userspace compatibility.**
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23682548.svg)](https://doi.org/10.5281/zenodo.23682548)
 
-Linox (rvdende/linox) began as a fork of Ginux (gmkurtzer/ginux) and continues
-its standalone bootable kernel. Upstream ended that line on 2026-11-04, froze
+Linox began as a fork of [Ginux](https://github.com/gmkurtzer/ginux) by
+Gregory M. Kurtzer and continues its standalone bootable kernel. Upstream ended that line on 2026-11-04, froze
 it as the `bootable-kernel-final` tag and moved on to a userspace kernel; its
 fixes up to that tag are merged here, without its native controller desktop
 (Linox's desktop runs in a Linux domain).
@@ -500,11 +500,12 @@ production alternative to Linux. The project does not reproduce Linux's broad
 compatibility, hardware enablement, review, vendor ecosystem, community, or
 long-term maintenance.
 
-The technical report documents the method, architecture, evaluation, and
-limitations:
+The technical report on Ginux, the project Linox was forked from, documents
+the method, architecture, evaluation, and limitations (it is published under
+the Ginux name):
 
 - [DOI: 10.5281/zenodo.23682548](https://doi.org/10.5281/zenodo.23682548)
-- [LaTeX source](docs/paper/linox-ai-systems-report.tex)
+- [LaTeX source](docs/paper/ginux-ai-systems-report.tex)
 - [Steering chronology](docs/paper/STEERING-PROVENANCE.md)
 - [Benchmark artifacts](docs/paper/artifact/benchmark-2026-10-23)
 
@@ -518,9 +519,9 @@ checkpoint.
 Please cite the technical report using its Zenodo record:
 
 ```bibtex
-@techreport{kurtzer2026linox,
+@techreport{kurtzer2026ginux,
   author = {Gregory M. Kurtzer},
-  title = {Linox: Building an Independent Kernel That Runs Linux Userspace
+  title = {Ginux: Building an Independent Kernel That Runs Linux Userspace
            through Human-Directed Agentic Engineering},
   year = {2026},
   doi = {10.5281/zenodo.23682548},

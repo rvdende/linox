@@ -1,18 +1,18 @@
 # October 23, 2026 benchmark evidence
 
 This directory preserves the surviving raw output behind the exploratory
-single-vCPU results reported in the Linox paper. It was added after the
+single-vCPU results reported in the Ginux paper. It was added after the
 evaluated code commit so that readers can inspect the measurements; the files
 themselves were produced on October 23, 2026.
 
 Contents:
 
-- `boot-comparison.tsv`, `linox-boot-summary.tsv`, and
+- `boot-comparison.tsv`, `ginux-boot-summary.tsv`, and
   `rocky-linux-summary.tsv`: reported startup-path summaries.
-- `linox-boot-[1-3].log` and `.metrics`: Linox systemd boot runs.
+- `ginux-boot-[1-3].log` and `.metrics`: Ginux systemd boot runs.
 - `rocky-linux-run-[1-3].log`: Rocky Linux systemd boot runs.
 - `rocky-linux-run-[1-3]-results.log`: Rocky Linux sysbench output.
-- `linox-sysbench-{cpu,memory,threads}-[1-9].log`: the three Linox
+- `ginux-sysbench-{cpu,memory,threads}-[1-9].log`: the three Ginux
   workloads retained in the paper.
 - `sysbench-comparison.tsv`: final workload medians.
 - `SHA256SUMS`: integrity digests for the archived evidence.

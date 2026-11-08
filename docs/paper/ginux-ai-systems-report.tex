@@ -10,14 +10,14 @@
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
 \setlist{nosep}
 
-\newcommand{\project}{Linox}
+\newcommand{\project}{Ginux}
 \newcommand{\modelname}{OpenAI Codex with GPT-5.6 Sol}
 \newcommand{\evaluatedcommit}{\texttt{d11c126a048a\allowbreak{}51fe7eb9c410\allowbreak{}5f31760add10\allowbreak{}27ea}}
 \newcommand{\estimatedcost}{approximately USD~8,000}
 \newcommand{\repolink}[2]{\href{https://github.com/gmkurtzer/ginux/blob/d11c126a048a51fe7eb9c4105f31760add1027ea/#1}{\texttt{#2}}}
 \newcommand{\tcell}[1]{{\raggedright #1\par}}
 
-\title{\textbf{Linox: Building an Independent Kernel That Runs Linux Userspace through Human-Directed Agentic Engineering}}
+\title{\textbf{Ginux: Building an Independent Kernel That Runs Linux Userspace through Human-Directed Agentic Engineering}}
 \author{Gregory M. Kurtzer}
 \date{Technical report --- October 2026\\[0.6em]
 {\small
@@ -34,10 +34,10 @@ This paper reports a case study in Human-Directed Agentic Engineering (HDAE):
 combining human-defined architecture, constraints, milestones, and acceptance
 criteria with an autonomous implementation, execution, diagnosis, and revision
 loop. Over eleven days, one persistent OpenAI Codex task using GPT-5.6 Sol
-produced Linox, a Rust-first x86-64 research kernel containing approximately
+produced Ginux, a Rust-first x86-64 research kernel containing approximately
 139,000 retained lines of implementation and test code.
 
-Linox boots through UEFI, supplies its own memory management, scheduler,
+Ginux boots through UEFI, supplies its own memory management, scheduler,
 process model, filesystems, networking, devices, and Linux compatibility layer,
 and runs its controller in ring~3. The evaluated system executes selected
 unmodified Alpine programs and completes a Rocky Linux 10 systemd boot through
@@ -65,7 +65,7 @@ Can Human-Directed Agentic Engineering (HDAE) guide a coding agent to build a
 new kernel that runs selected existing Linux userspace workloads? Kernel mechanisms are extensively
 documented, but integrating them into a coherent system is a long-horizon task:
 architecture, implementation, diagnosis, compatibility, and evaluation must
-remain aligned across thousands of changes. Linox uses that task to study three
+remain aligned across thousands of changes. Ginux uses that task to study three
 questions:
 
 \begin{description}[
@@ -85,15 +85,15 @@ questions:
 \end{description}
 
 The paper contributes the resulting system, the documented HDAE method,
-and an evidence-based account of its capabilities and limits. Linox is
+and an evidence-based account of its capabilities and limits. Ginux is
 an independent kernel; Linux is its userspace compatibility target. A
-Linux-personality domain reports Linox as its kernel. In this paper,
+Linux-personality domain reports Ginux as its kernel. In this paper,
 ``runs Linux userspace'' means only that the named, tested programs observe
 enough of their expected ABI to execute. It does not imply distribution-wide
 support, full syscall conformance, or complete Linux compatibility.
 
 The name is a deliberate joke in the same family as Linux. ``Linux'' combines
-Linus and Unix; ``Linox'' riffs on Linux, GPT, and Greg. For purposes of
+Linus and Unix; ``Ginux'' riffs on Linux, GPT, and Greg. For purposes of
 authorial restraint, the ``G'' is treated as GPT. The experiment is equally
 deliberate about its boundary: it studies whether AI can construct a focused
 research kernel, not whether eleven days of generated code can rival decades of
@@ -132,7 +132,7 @@ and an empty workspace, and reports persistent failures in planning, cross-file
 coherence, and completion over long trajectories~\cite{ding2026nl2repo}. METR's
 time-horizon work similarly measures how task success changes with the time a
 skilled practitioner would need, rather than treating all programming tasks as
-equivalent~\cite{kwa2025timehorizon}. Linox is not a benchmark submission to any
+equivalent~\cite{kwa2025timehorizon}. Ginux is not a benchmark submission to any
 of these suites; it is a longitudinal case study with an evolving human-defined
 target.
 
@@ -141,7 +141,7 @@ parallel Claude agents~\cite{carlini2026compiler}. Nearly 2,000 sessions and
 approximately USD~20,000 produced about 100,000 lines of Rust capable of
 compiling substantial software, including most of a Linux kernel build. Its
 compiler test suites and reference tools supplied unusually strong oracles.
-Linox differs in using one persistent task within an HDAE process and
+Ginux differs in using one persistent task within an HDAE process and
 behavioral gates that had to be created alongside the kernel. Both experiments
 make the harness and acceptance criteria part of the result rather than mere
 supporting machinery.
@@ -149,7 +149,7 @@ supporting machinery.
 LLMs have also been applied within operating-system development. CrashFixer,
 for example, evaluates an agent for Linux-kernel crash repair at repository
 scale~\cite{mathai2025crashfixer}. That work improves an established kernel;
-Linox asks whether an agent can integrate a narrow kernel from an empty starting
+Ginux asks whether an agent can integrate a narrow kernel from an empty starting
 point. The Linux community's guidance for generated contributions emphasizes
 that submitters must understand, review, test, and accept responsibility for the
 result~\cite{linuxGeneratedContent}. Discussion at the 2026 Maintainers Summit
@@ -179,7 +179,7 @@ days. Nearly all implementation occurred in one long-running Codex task, with
 the author setting the architecture, operating the system, interpreting
 results, and making the final acceptance decisions.
 
-Development ran on an Apple Silicon Mac under macOS. Linox targeted x86-64, so
+Development ran on an Apple Silicon Mac under macOS. Ginux targeted x86-64, so
 builds were booted with \texttt{qemu-system-x86\_64} using QEMU's Tiny Code
 Generator rather than native hardware acceleration. This made the complete
 machine reproducible from the development host while also making clear that the
@@ -312,7 +312,7 @@ became production-ready.
 
 Scale changes the size and number of gates, not the loop itself. A small change
 may fit within one bounded issue and regression test; a large program may need
-many architectural milestones like those used for Linox. A greenfield project
+many architectural milestones like those used for Ginux. A greenfield project
 must create its specifications and harness alongside the implementation. An
 existing project can begin with its established interfaces, tests, and review
 practices, then add gates for a bug reproduction, compatibility requirement,
@@ -332,7 +332,7 @@ behavior was wrong, and setting the next verifiable boundary.
 
 \section{System Design and Implementation}
 
-Linox is a monolithic EFI boot artifact containing the privileged kernel,
+Ginux is a monolithic EFI boot artifact containing the privileged kernel,
 boot-critical facilities, and an embedded ring-3 controller. It provides
 workload domains; OCI supplies their initial filesystem content, not runtime
 isolation. This section describes boot, boundaries, management, and Linux
@@ -347,8 +347,8 @@ as a much larger payload instead of growing through a chain of bootstrap
 loaders from a 512-byte boot sector. Firmware quality, available memory,
 filesystem support, and PE/COFF representation still impose practical limits.
 
-Linox uses that freedom for a monolithic boot architecture: one
-\texttt{LINOX.EFI} image contains its Rust-first kernel, required x86-64
+Ginux uses that freedom for a monolithic boot architecture: one
+\texttt{GINUX.EFI} image contains its Rust-first kernel, required x86-64
 assembly, boot-critical facilities, embedded controller, component catalog,
 and recovery metadata. No host distribution, separate bootloader, or separate
 initramfs is required. After leaving UEFI boot services, the kernel initializes
@@ -371,7 +371,7 @@ page tables and address spaces, scheduling, capabilities, IPC, interrupt and
 timer handling, domain ownership, the Linux personality boundary, and the
 trusted side of device and DMA control. The x86-64 implementation does not use
 rings~1 or~2. Ring~3 contains the controller, Linux workloads, and isolated
-native services. Embedding a program in \texttt{LINOX.EFI} controls how its
+native services. Embedding a program in \texttt{GINUX.EFI} controls how its
 bytes arrive; the processor ring still controls its privilege.
 
 Device support is deliberately split. The kernel discovers PCI devices and
@@ -394,7 +394,7 @@ provide ABI probes; policy and most mechanisms remain in Rust.
 
 \subsection{Controller, domains, and personalities}
 
-The controller is compiled into \texttt{LINOX.EFI}, not installed as a separate
+The controller is compiled into \texttt{GINUX.EFI}, not installed as a separate
 host service. At boot, the kernel maps this authenticated, statically linked
 Rust payload into ring~3. It is the primary configuration and administration
 tool for the kernel, devices, and domains, using the Linux ABI for ordinary
@@ -418,11 +418,11 @@ without renaming them. A domain with no explicit attachment can share the host
 network, and every domain receives loopback. Host networking and link lifecycle
 are tested; independent per-domain packet paths and leases remain unfinished.
 
-A \emph{domain} is a native Linox kernel object with a broader role than an OCI
+A \emph{domain} is a native Ginux kernel object with a broader role than an OCI
 container or Linux namespace. It owns or is granted address spaces, a process tree,
 capabilities, IPC objects, filesystem and mount views, networks, devices,
 limits, lifecycle, and failure policy. OCI supplies a domain's initial
-filesystem; Linox supplies its isolation and execution. A single domain can
+filesystem; Ginux supplies its isolation and execution. A single domain can
 look like a conventional computer, with systemd as PID~1 and a distribution
 userspace above it. Multiple domains share one kernel while retaining separate
 kernel-owned identities and resources.
@@ -458,7 +458,7 @@ primarily a source and behavioral contract across libc, processes, files,
 signals, terminals, clocks, synchronization, and IPC. The evaluated musl and
 glibc userspaces exercise fork/exec/wait, path and descriptor operations,
 pipes and FIFOs, signals, clocks, termios, sockets, futex-based threading, and
-selected POSIX and System~V IPC. Linox has only partial coverage and has yet to
+selected POSIX and System~V IPC. Ginux has only partial coverage and has yet to
 run a complete POSIX conformance suite.
 
 Each domain owns a sealed native capability table. A capability names one
@@ -513,7 +513,7 @@ application guarantee.
 
 These gaps define the research boundary. The result demonstrates that AI can
 construct enough of a kernel to carry the tested Linux workloads, not that an
-arbitrary Linux application or distribution will run, and not that Linox can
+arbitrary Linux application or distribution will run, and not that Ginux can
 replace decades of Linux engineering.
 
 \subsection{Performance and benchmarking}
@@ -527,14 +527,14 @@ were run and are reported separately below.
 The startup experiment measured elapsed time from QEMU launch until systemd
 reported that it had reached the multi-user target. Rocky on Linux used the official Rocky
 Linux 10.2 GenericCloud image, booted locally from qcow2 with its stock Rocky
-kernel, version \texttt{6.12.0-211.16.1.el10\_2.0.1} for x86-64. Rocky on Linox used the
+kernel, version \texttt{6.12.0-211.16.1.el10\_2.0.1} for x86-64. Rocky on Ginux used the
 Rocky Linux 10 UBI-init OCI image. These are different userspace, storage, and
 boot profiles. Their common endpoint makes the result operationally
 interesting, but it is not a controlled comparison of kernel boot performance.
 
 The workload experiment ran the same digest-verified Rocky Linux 10 x86-64
 \texttt{sysbench} executable in both guests. The Linux side used the prepared
-GenericCloud system. The Linox side used a deliberately minimal Rocky 10 root
+GenericCloud system. The Ginux side used a deliberately minimal Rocky 10 root
 containing \texttt{/bin/sh}, \texttt{/usr/bin/sysbench}, and their runtime
 dependencies; it did not use the UBI-init systemd root. Workload timing excluded
 guest boot and image preparation. Matching the executable, commands, and QEMU
@@ -560,7 +560,7 @@ than a single generally slow kernel. The thread path repeatedly selected a
 just-preempted supervisory thread and later saved and restored a complete user
 context even when no other thread could run. The memory test was dominated by
 timestamp overhead: its one-kibibyte operations repeatedly crossed into the
-kernel because Linox had no vDSO. Scheduler selection, no-op yields, diagnostic
+kernel because Ginux had no vDSO. Scheduler selection, no-op yields, diagnostic
 tracing, page-table validation, and the guarded clock path were tightened one
 at a time, with regressions rejected by the existing verification suite. A
 Linux-compatible vDSO and read-only vvar page then carried fast timekeeping
@@ -569,7 +569,7 @@ made the vvar snapshot immutable for each execution image and replaced clock
 division with fixed-point conversion and constant-time reciprocal
 normalization. The thread median rose from 0.078 to 309.732 events/s, and
 memory throughput rose from 48.390 to 620.580~MiB/s. An earlier profiling loop had also reduced
-Linox's internal Linux-init-to-console path from 15.344~s to a 4.08--4.45~s
+Ginux's internal Linux-init-to-console path from 15.344~s to a 4.08--4.45~s
 range by removing a polling stall, quadratic frame scans, and eager copying of
 immutable root-filesystem pages. The optimization history is recorded in the
 \repolink{docs/PERFORMANCE.md}{performance record}.
@@ -590,8 +590,8 @@ meaningful comparison.
 \toprule
 Startup path & Samples & Median to target & Observed ratio \\
 \midrule
-GenericCloud on Linux & 3 & 42.579 s & 3.31$\times$ Linox time \\
-UBI-init on Linox & 3 & 12.860 s & baseline \\
+GenericCloud on Linux & 3 & 42.579 s & 3.31$\times$ Ginux time \\
+UBI-init on Ginux & 3 & 12.860 s & baseline \\
 \bottomrule
 \end{tabular}
 \par\medskip
@@ -607,11 +607,11 @@ QEMU TCG on an Apple Silicon host. The startup paths are not equivalent.
 \small
 \begin{tabular}{@{}llrrl@{}}
 \toprule
-Workload & Metric & \shortstack{Rocky on\\Linux} & \shortstack{Rocky on\\Linox} & Observed difference \\
+Workload & Metric & \shortstack{Rocky on\\Linux} & \shortstack{Rocky on\\Ginux} & Observed difference \\
 \midrule
-CPU & events/s & 232.360 & 267.650 & Linox 15.2\% higher \\
-Memory & MiB/s & 679.510 & 620.580 & Linox 8.7\% lower \\
-Threads & events/s & 306.129 & 309.732 & Linox 1.2\% higher \\
+CPU & events/s & 232.360 & 267.650 & Ginux 15.2\% higher \\
+Memory & MiB/s & 679.510 & 620.580 & Ginux 8.7\% lower \\
+Threads & events/s & 306.129 & 309.732 & Ginux 1.2\% higher \\
 \bottomrule
 \end{tabular}
 \par\medskip
@@ -626,18 +626,18 @@ yield reached approximate parity in this translated environment. Read narrowly,
 those numbers show that the worst gaps came from implementation defects that a
 benchmark-driven HDAE loop could find and substantially close. The 15.2 percent
 CPU difference may reflect TCG variation or different background work and is
-not evidence that Linox generally executes CPU workloads faster. Second, adding Linux-compatible
+not evidence that Ginux generally executes CPU workloads faster. Second, adding Linux-compatible
 vDSO/vvar timekeeping raised memory throughput from 48.390 to 620.580~MiB/s,
-leaving Rocky on Linox 8.7 percent below Rocky on Linux for the
+leaving Rocky on Ginux 8.7 percent below Rocky on Linux for the
 one-kibibyte test. Most of the original gap was timestamp overhead rather than
 raw copying; this TCG experiment cannot isolate the cause of the smaller
 remaining difference. Separately, the startup result compares two startup paths.
-Linox restores a cached filesystem and launches a domain directly. Rocky boots
+Ginux restores a cached filesystem and launches a domain directly. Rocky boots
 from a local qcow2 disk through its general-purpose UEFI, kernel, initramfs,
 and device-discovery path. The measured ratio describes those complete paths,
 including work one path omits, rather than overall kernel performance.
 
-These TCG measurements show that Linox can execute the same nontrivial Linux
+These TCG measurements show that Ginux can execute the same nontrivial Linux
 benchmark and that HDAE iteration can turn catastrophic defects into roughly
 similar medians for this narrow suite. They do not establish comparative kernel
 performance. A stronger experiment would require identical userspace profiles,
@@ -649,16 +649,16 @@ security performance remain unmeasured.
 
 The evaluated source is identified by commit \evaluatedcommit{}. The repository
 contains the architecture and decision records, compatibility ledger, QEMU test
-harnesses, benchmark profile, pinned Rocky image URL and digest, Linox sysbench
+harnesses, benchmark profile, pinned Rocky image URL and digest, Ginux sysbench
 root builder, and Make targets used for the reported gates. The principal
 commands fall into three groups:
 
 \begin{itemize}[leftmargin=*,topsep=0.3em,itemsep=0.15em,parsep=0pt]
 \item verification: \texttt{make check} and \texttt{make test-rocky-systemd};
 \item preparation: \texttt{make benchmark-prepare-linux} and
-  \texttt{make benchmark-prepare-linox}; and
+  \texttt{make benchmark-prepare-ginux}; and
 \item measurement: \texttt{make benchmark-boot-comparison},
-  \texttt{make benchmark-linox-sysbench}, and \texttt{make benchmark-compare}.
+  \texttt{make benchmark-ginux-sysbench}, and \texttt{make benchmark-compare}.
 \end{itemize}
 
 At the evaluated checkpoint, \texttt{make check} passed and the Rocky systemd
@@ -692,14 +692,14 @@ benchmark logs.
 \noindent\textbf{Example 1: boot a conventional Linux userspace.}\par\nopagebreak\smallskip
 \begin{quote}\small\hrule\vspace{4pt}
 \begin{verbatim}
-linox> domain new rocky
+ginux> domain new rocky
 rocky: created (image required)
-linox> domain set rocky image=rockylinux/rockylinux:10-ubi-init
-linox> domain set rocky init=/sbin/init memory-mib=2048
+ginux> domain set rocky image=rockylinux/rockylinux:10-ubi-init
+ginux> domain set rocky init=/sbin/init memory-mib=2048
 rocky: settings accepted; configured
-linox> domain start rocky --attach
-linox: OCI cache hit (2 layers)
-linox: starting Linux personality domain
+ginux> domain start rocky --attach
+ginux: OCI cache hit (2 layers)
+ginux: starting Linux personality domain
 systemd: Reached target Multi-User System.
 Rocky Linux 10
 rocky login:
@@ -710,7 +710,7 @@ rocky login:
 \medskip
 
 This single-domain case selects a Linux userspace image and init process while
-Linox remains the kernel. The controller can also manage several domains
+Ginux remains the kernel. The controller can also manage several domains
 without treating any one workload as the host operating system.
 
 \medskip
@@ -718,24 +718,24 @@ without treating any one workload as the host operating system.
 \noindent\textbf{Example 2: reuse content across several domains.}\par\nopagebreak\smallskip
 \begin{quote}\small\hrule\vspace{4pt}
 \begin{verbatim}
-linox> domain new alpine-a
-linox> domain set alpine-a image=alpine:latest init=/bin/sh
+ginux> domain new alpine-a
+ginux> domain set alpine-a image=alpine:latest init=/bin/sh
 alpine-a: settings accepted; configured
-linox> domain start alpine-a
-linox: OCI cache miss; pulling 1 layer
+ginux> domain start alpine-a
+ginux: OCI cache miss; pulling 1 layer
 alpine-a: running (detached)
-linox> domain new alpine-b
-linox> domain set alpine-b image=alpine:latest init=/bin/sh
-linox> domain start alpine-b
-linox: OCI cache hit (1 layer)
+ginux> domain new alpine-b
+ginux> domain set alpine-b image=alpine:latest init=/bin/sh
+ginux> domain start alpine-b
+ginux: OCI cache hit (1 layer)
 alpine-b: running (detached)
-linox> domain list
+ginux> domain list
 NAME       STATE    PERSONALITY  INIT       NETWORK
 rocky      running  linux        /sbin/init host(shared)
 alpine-a   running  linux        /bin/sh    host(shared)
 alpine-b   running  linux        /bin/sh    host(shared)
-linox> shutdown
-linox: local configuration committed
+ginux> shutdown
+ginux: local configuration committed
 \end{verbatim}
 \vspace{2pt}\hrule
 \end{quote}
@@ -748,7 +748,7 @@ at the evaluated checkpoint, so configuration and image caching are persistent
 without implying that every workload mutation is durable.
 
 Taken together, the compound boot, compatibility ledger, workflows, and narrow
-benchmark answer RQ1 and RQ3 only within the evaluated boundary. Linox executes
+benchmark answer RQ1 and RQ3 only within the evaluated boundary. Ginux executes
 the evaluated distribution workloads and demonstrates that several severe performance
 defects were correctable through the same HDAE loop. The partial ledger and
 limited measurements prevent either result from becoming a general Linux
@@ -788,7 +788,7 @@ tested mechanisms remain outside the evidence reported here.
 
 A practical product effort would have had strong reasons to begin with Linux.
 Namespaces, cgroups, KVM, device drivers, filesystems, security modules, and a
-vast compatibility suite already exist. A Linox-like controller could manage
+vast compatibility suite already exist. A Ginux-like controller could manage
 an immutable Linux host, while a domain experiment could initially combine
 those mechanisms and add scheduler, device, and resource-policy changes where
 the existing abstractions proved insufficient. That route would have produced
@@ -838,7 +838,7 @@ repairing defects, coordinating contributors and vendors, and maintaining a
 dependable release cadence. Code is comparatively easy; workflows,
 compatibility, maintenance, and community are hard.
 
-Linox used an author-estimated \estimatedcost{} in API calls. That figure
+Ginux used an author-estimated \estimatedcost{} in API calls. That figure
 describes the experiment but does not measure productivity, equivalent human
 labor, or code quality. The relevant contrast is narrower: a modest direct API
 cost produced a substantial prototype, while compatibility, trust, industry
@@ -853,7 +853,7 @@ that ecosystem.
 
 Linux is the clearest example. Its value extends far beyond the source needed
 to boot a shell. It provides stable expectations across processors, devices,
-filesystems, hypervisors, distributions, vendors, and applications. Linox has
+filesystems, hypervisors, distributions, vendors, and applications. Ginux has
 no comparable hardware matrix, standards body, or community committed to
 keeping yesterday's programs working tomorrow. AI may build technical pieces;
 adoption still requires independent organizations to support the same
@@ -861,7 +861,7 @@ contracts.
 
 \section{Conclusion}
 
-For RQ1, Linox provides a bounded result: an HDAE process centered on one
+For RQ1, Ginux provides a bounded result: an HDAE process centered on one
 persistent coding agent produced an independent kernel that boots selected
 unmodified Alpine programs and the evaluated Rocky Linux systemd userspace. It
 also supports kernel-native domains and ran
@@ -881,7 +881,7 @@ hardware, security, standards, and maintenance requirements were not met.
 AI can build code deep in the systems stack. Core infrastructure derives its
 value from compatibility, hardware support, review, community trust, and
 long-term ownership. Linux earned those qualities through decades of human
-engineering across an enormous workload surface. Linox reproduced a narrow
+engineering across an enormous workload surface. Ginux reproduced a narrow
 portion of the code, not that institution. Cheaper implementation is not, by
 itself, a reason to replace a foundation an ecosystem already trusts.
 

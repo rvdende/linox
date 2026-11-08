@@ -909,7 +909,7 @@ BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
 [[0;32m  OK  [0m] Started [0;1;39mdnf-makecache.timer[0m - dnf makecache --timer.
 [[0;32m  OK  [0m] Started [0;1;39mfstrim.timer[0m - Discard unused filesystem blocks once a week.
 [[0;32m  OK  [0m] Started [0;1;39mfwupd-refresh.timer[0m - Refresh fwupd metadata regularly.
-[[0;32m  OK  [0m] Started [0;1;39mlinox-benchmark.timer[0m - Ru…chmark after normal userspace boot.
+[[0;32m  OK  [0m] Started [0;1;39mginux-benchmark.timer[0m - Ru…chmark after normal userspace boot.
 [[0;32m  OK  [0m] Started [0;1;39mlogrotate.timer[0m - Daily rotation of log files.
 [[0;32m  OK  [0m] Started [0;1;39mraid-check.timer[0m - Weekly RAID setup health check.
 [[0;32m  OK  [0m] Started [0;1;39msystemd-tmpfiles-clean.tim…[0my Cleanup of Temporary Directories.
@@ -976,7 +976,7 @@ BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
 [[0;32m  OK  [0m] Started [0;1;39mrsyslog.service[0m - System Logging Service.
 [[0;32m  OK  [0m] Finished [0;1;39mcockpit-issue.service[0m - Cockpit issue updater service.
 [[0;32m  OK  [0m] Reached target [0;1;39mmulti-user.target[0m - Multi-User System.
-[[0;32m  OK  [0m] Started [0;1;39mlinox-benchmark.service[0m - …nux comparative benchmark workload.
+[[0;32m  OK  [0m] Started [0;1;39mginux-benchmark.service[0m - …nux comparative benchmark workload.
          Starting [0;1;39msystemd-update-utmp-runle…[0m- Record Runlevel Change in UTMP...
 [[0;32m  OK  [0m] Finished [0;1;39msystemd-update-utmp-runle…e[0m - Record Runlevel Change in UTMP.
 [!p]104[?7h[6n[32766;32766H[6n[!p]104[?7h[6n[32766;32766H[6n
@@ -986,7 +986,7 @@ Kernel 6.12.0-211.16.1.el10_2.0.1.x86_64 on x86_64
 Web console: https://rocky-linux-benchmark:9090/
 
 rocky-linux-benchmark login: [   61.028180] block vda: the capability attribute has been deprecated.
-[[0;32m  OK  [0m] Stopped [0;1;39mlinox-benchmark.service[0m - …nux comparative benchmark workload.
+[[0;32m  OK  [0m] Stopped [0;1;39mginux-benchmark.service[0m - …nux comparative benchmark workload.
 [[0;32m  OK  [0m] Removed slice [0;1;39msystem-modprobe.slice[0m - Slice /system/modprobe.
 [[0;32m  OK  [0m] Removed slice [0;1;39msystem-sshd\x2dkeygen.slice[0m - Slice /system/sshd-keygen.
 [[0;32m  OK  [0m] Stopped target [0;1;39mmulti-user.target[0m - Multi-User System.
@@ -998,7 +998,7 @@ rocky-linux-benchmark login: [   61.028180] block vda: the capability attribute 
 [[0;32m  OK  [0m] Stopped [0;1;39mdnf-makecache.timer[0m - dnf makecache --timer.
 [[0;32m  OK  [0m] Stopped [0;1;39mfstrim.timer[0m - Discard unused filesystem blocks once a week.
 [[0;32m  OK  [0m] Stopped [0;1;39mfwupd-refresh.timer[0m - Refresh fwupd metadata regularly.
-[[0;32m  OK  [0m] Stopped [0;1;39mlinox-benchmark.timer[0m - Ru…chmark after normal userspace boot.
+[[0;32m  OK  [0m] Stopped [0;1;39mginux-benchmark.timer[0m - Ru…chmark after normal userspace boot.
 [[0;32m  OK  [0m] Stopped [0;1;39mlogrotate.timer[0m - Daily rotation of log files.
 [[0;32m  OK  [0m] Stopped [0;1;39mraid-check.timer[0m - Weekly RAID setup health check.
 [[0;32m  OK  [0m] Stopped [0;1;39msystemd-tmpfiles-clean.tim…[0my Cleanup of Temporary Directories.
