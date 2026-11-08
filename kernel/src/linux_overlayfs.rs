@@ -709,16 +709,16 @@ fn invalidate_listing() {
 fn rename_upper(from: &[u8], to: &[u8], mode: RenameMode) -> Result<(), Errno> {
     if crate::linux_blockfs::covers(from) {
         let mode = match mode {
-            RenameMode::Replace => ginux_ext2::RenameMode::Replace,
-            RenameMode::NoReplace => ginux_ext2::RenameMode::NoReplace,
-            RenameMode::Exchange => ginux_ext2::RenameMode::Exchange,
+            RenameMode::Replace => linox_ext2::RenameMode::Replace,
+            RenameMode::NoReplace => linox_ext2::RenameMode::NoReplace,
+            RenameMode::Exchange => linox_ext2::RenameMode::Exchange,
         };
         return crate::linux_blockfs::rename_with(from, to, mode).unwrap_or(Err(EXDEV));
     }
     match (mode, overlay::lookup_stored(to)) {
         (RenameMode::Exchange, _) => {
             let mut temporary = copy(from).ok_or(ENOMEM)?;
-            temporary.extend_from_slice(b".ginux-exchange");
+            temporary.extend_from_slice(b".linox-exchange");
             return if overlay::rename_path_stored(from, &temporary)
                 && overlay::rename_path_stored(to, from)
                 && overlay::rename_path_stored(&temporary, to)

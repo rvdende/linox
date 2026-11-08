@@ -44,7 +44,7 @@ kernel stack growth while preserving valid PAX override behavior.
 
 ## Verification plan
 
-- `cargo test --package ginux-oci` -> long-chain and existing OCI tests pass.
+- `cargo test --package linox-oci` -> long-chain and existing OCI tests pass.
 - Source inspection -> no recursive `parse_entry` call remains.
 - `make check` and `make test` -> full static and boot checks pass.
 
@@ -52,14 +52,14 @@ kernel stack growth while preserving valid PAX override behavior.
 
 - Current `parse_entry` recursively enters the next header for every type `x`
   entry, including an empty PAX payload.
-- `cargo test --package ginux-oci` -> all 10 tests passed, including the
+- `cargo test --package linox-oci` -> all 10 tests passed, including the
   4,000-header chain and multi-header override precedence.
-- Warning-denying `ginux-oci` clippy passed; source search confirms the
+- Warning-denying `linox-oci` clippy passed; source search confirms the
   recursive call is absent.
 - `make check` -> passed all static, architecture, unit, and warning-denying
-  checks; all 10 `ginux-oci` tests passed in the complete suite.
+  checks; all 10 `linox-oci` tests passed in the complete suite.
 - `make test` -> the complete two-vCPU QEMU verification boot reached
-  `GINUX_KERNEL_OK` and reported `Boot test passed.`
+  `LINOX_KERNEL_OK` and reported `Boot test passed.`
 - [PR #44](https://github.com/gmkurtzer/ginux/pull/44) contains the dedicated
   remediation branch; issue #17 and the PR contain reciprocal summaries.
 - PR #44 GitHub `static` and `qemu` checks passed on the delivery head.

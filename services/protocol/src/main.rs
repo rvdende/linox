@@ -3,7 +3,7 @@
 
 use core::arch::{asm, global_asm};
 
-use ginux_native_abi::{
+use linox_native_abi::{
     native_control_abi_is_compatible, native_control_abi_supports_packet_handoff,
     NativeControlDescriptorV4, NativePacketRequestV0, NativeProtocolBootV0, NativeProtocolBootV1,
     NativeProtocolBootV2, NativeProtocolBootV3, NativeProtocolBootV4, NativeProtocolBootV5,
@@ -13,12 +13,12 @@ use ginux_native_abi::{
     NATIVE_PACKET_PUBLISH_OPERATION, NATIVE_PACKET_WAIT_OPERATION, NATIVE_SERVICE_EXIT_COMPLETED,
     NATIVE_SERVICE_EXIT_OPERATION,
 };
-use ginux_protocol_state::{
+use linox_protocol_state::{
     build_icmp_echo_reply_v0, parse_arp_reply_v4, parse_icmp_echo_request_v0, parse_ipv4_icmp_v0,
     EndpointV4, NeighborObservation, NeighborStateV4,
 };
 
-static SERVICE_IDENTITY: &[u8] = b"GINUX_PROTOCOL_SERVICE_V0";
+static SERVICE_IDENTITY: &[u8] = b"LINOX_PROTOCOL_SERVICE_V0";
 
 global_asm!(
     r#"
@@ -26,7 +26,7 @@ global_asm!(
     .global _start
 _start:
     mov rdi, rbx
-    call ginux_protocol_service_main
+    call linox_protocol_service_main
     int3
 "#
 );
@@ -37,10 +37,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[no_mangle]
-extern "C" fn ginux_protocol_service_main(info: *const NativeProtocolBootV0) -> ! {
+extern "C" fn linox_protocol_service_main(info: *const NativeProtocolBootV0) -> ! {
     let identity = unsafe { core::ptr::read_volatile(&SERVICE_IDENTITY) };
     let discovery = discover_control_abi();
-    if identity != b"GINUX_PROTOCOL_SERVICE_V0"
+    if identity != b"LINOX_PROTOCOL_SERVICE_V0"
         || !native_control_abi_is_compatible(discovery)
         || !native_control_abi_supports_packet_handoff(discovery)
         || !discover_control_descriptor().is_compatible()

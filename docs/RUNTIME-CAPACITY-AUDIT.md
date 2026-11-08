@@ -1,6 +1,6 @@
 # Runtime Capacity Audit
 
-Ginux must not use compile-time collection sizes as accidental runtime quotas.
+Linox must not use compile-time collection sizes as accidental runtime quotas.
 Runtime collections should allocate pages only when needed, grow transactionally,
 and scrub and return empty pages promptly. Fixed sizes remain valid only when they
 are part of an external ABI, a hardware format, or a deliberately documented

@@ -1,30 +1,30 @@
-#ifndef GINUX_NATIVE_PROTOCOL_BOOTSTRAP_V0_H
-#define GINUX_NATIVE_PROTOCOL_BOOTSTRAP_V0_H
+#ifndef LINOX_NATIVE_PROTOCOL_BOOTSTRAP_V0_H
+#define LINOX_NATIVE_PROTOCOL_BOOTSTRAP_V0_H
 
 #include <stdint.h>
 
-#define GINUX_NATIVE_PROTOCOL_BOOT_MAGIC UINT64_C(0x30425058554e4947)
-#define GINUX_NATIVE_PROTOCOL_BOOT_VERSION UINT16_C(0)
-#define GINUX_NATIVE_PROTOCOL_BOOT_SIZE UINT16_C(56)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_PACKET_CONSUMER UINT32_C(1)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_ETHERNET_ARP UINT32_C(2)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_WAIT_LOOP UINT32_C(4)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_SUPERVISED_LOOP UINT32_C(8)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_IPV4_DISPATCH UINT32_C(16)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_ICMP_ECHO UINT32_C(32)
-#define GINUX_NATIVE_PROTOCOL_FEATURE_PACKET_EGRESS UINT32_C(64)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V1_VERSION UINT16_C(1)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V1_SIZE UINT16_C(56)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V2_VERSION UINT16_C(2)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V2_SIZE UINT16_C(56)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V3_VERSION UINT16_C(3)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V3_SIZE UINT16_C(56)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V4_VERSION UINT16_C(4)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V4_SIZE UINT16_C(56)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V5_VERSION UINT16_C(5)
-#define GINUX_NATIVE_PROTOCOL_BOOT_V5_SIZE UINT16_C(72)
+#define LINOX_NATIVE_PROTOCOL_BOOT_MAGIC UINT64_C(0x304250584f4e494c)
+#define LINOX_NATIVE_PROTOCOL_BOOT_VERSION UINT16_C(0)
+#define LINOX_NATIVE_PROTOCOL_BOOT_SIZE UINT16_C(56)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_PACKET_CONSUMER UINT32_C(1)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_ETHERNET_ARP UINT32_C(2)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_WAIT_LOOP UINT32_C(4)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_SUPERVISED_LOOP UINT32_C(8)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_IPV4_DISPATCH UINT32_C(16)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_ICMP_ECHO UINT32_C(32)
+#define LINOX_NATIVE_PROTOCOL_FEATURE_PACKET_EGRESS UINT32_C(64)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V1_VERSION UINT16_C(1)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V1_SIZE UINT16_C(56)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V2_VERSION UINT16_C(2)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V2_SIZE UINT16_C(56)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V3_VERSION UINT16_C(3)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V3_SIZE UINT16_C(56)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V4_VERSION UINT16_C(4)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V4_SIZE UINT16_C(56)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V5_VERSION UINT16_C(5)
+#define LINOX_NATIVE_PROTOCOL_BOOT_V5_SIZE UINT16_C(72)
 
-struct ginux_native_protocol_boot_v0 {
+struct linox_native_protocol_boot_v0 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -37,10 +37,10 @@ struct ginux_native_protocol_boot_v0 {
     uint64_t reserved;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v0) == 56,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v0) == 56,
                "native protocol bootstrap v0 size");
 
-struct ginux_native_protocol_boot_v1 {
+struct linox_native_protocol_boot_v1 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -54,10 +54,10 @@ struct ginux_native_protocol_boot_v1 {
     uint32_t reserved;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v1) == 56,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v1) == 56,
                "native protocol bootstrap v1 size");
 
-struct ginux_native_protocol_boot_v2 {
+struct linox_native_protocol_boot_v2 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -71,10 +71,10 @@ struct ginux_native_protocol_boot_v2 {
     uint32_t reserved;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v2) == 56,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v2) == 56,
                "native protocol bootstrap v2 size");
 
-struct ginux_native_protocol_boot_v3 {
+struct linox_native_protocol_boot_v3 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -88,10 +88,10 @@ struct ginux_native_protocol_boot_v3 {
     uint32_t reserved;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v3) == 56,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v3) == 56,
                "native protocol bootstrap v3 size");
 
-struct ginux_native_protocol_boot_v4 {
+struct linox_native_protocol_boot_v4 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -105,10 +105,10 @@ struct ginux_native_protocol_boot_v4 {
     uint32_t reserved;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v4) == 56,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v4) == 56,
                "native protocol bootstrap v4 size");
 
-struct ginux_native_protocol_boot_v5 {
+struct linox_native_protocol_boot_v5 {
     uint64_t magic;
     uint16_t version;
     uint16_t size;
@@ -124,7 +124,7 @@ struct ginux_native_protocol_boot_v5 {
     uint64_t expected_egress_sequence;
 };
 
-_Static_assert(sizeof(struct ginux_native_protocol_boot_v5) == 72,
+_Static_assert(sizeof(struct linox_native_protocol_boot_v5) == 72,
                "native protocol bootstrap v5 size");
 
 #endif

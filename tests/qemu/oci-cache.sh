@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ginux-oci-cache.XXXXXX")
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/linox-oci-cache.XXXXXX")
 volume_image="$test_dir/volume.raw"
 qemu_pid_file="$test_dir/qemu.pid"
 qemu_pid=""
@@ -43,8 +43,8 @@ run_boot() {
     : >"$qemu_pid_file"
     {
         for _ in {1..120}; do
-            grep -aFq 'ginux> ' "$output_file" && break
-            grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
+            grep -aFq 'linox> ' "$output_file" && break
+            grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
             sleep 1
         done
         if [[ "$cached" == false ]]; then
@@ -53,29 +53,29 @@ run_boot() {
                 'domain set alpine image=alpine:latest init=/bin/sh' \
                 'domain start alpine --attach'
             for _ in {1..240}; do
-                if grep -aFq 'ginux: OCI cache stored 1 layer' "$output_file" \
-                    && grep -aFq 'ginux: local configuration committed' "$output_file"; then
+                if grep -aFq 'linox: OCI cache stored 1 layer' "$output_file" \
+                    && grep -aFq 'linox: local configuration committed' "$output_file"; then
                     break
                 fi
                 grep -aFq 'alpine: failed' "$output_file" && break
-                grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
+                grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
                 sleep 1
             done
         else
             printf '%s\n' 'domain start alpine --attach'
             for _ in {1..120}; do
-                if grep -aFq 'ginux: OCI cache hit (1 layer)' "$output_file" \
-                    && grep -aFq 'ginux: OCI image ready' "$output_file"; then
+                if grep -aFq 'linox: OCI cache hit (1 layer)' "$output_file" \
+                    && grep -aFq 'linox: OCI image ready' "$output_file"; then
                     break
                 fi
                 grep -aFq 'alpine: failed' "$output_file" && break
-                grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
+                grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file" && exit 0
                 sleep 1
             done
         fi
         stop_qemu
-    } | GINUX_VOLUME_IMAGE="$volume_image" GINUX_VOLUME_SIZE=64M \
-        GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+    } | LINOX_VOLUME_IMAGE="$volume_image" LINOX_VOLUME_SIZE=64M \
+        LINOX_QEMU_PID_FILE="$qemu_pid_file" \
         "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
     qemu_pid=$!
 
@@ -93,7 +93,7 @@ run_boot() {
     fi
     wait "$qemu_pid" || true
     qemu_pid=""
-    if grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         tail -n 160 "$output_file"
         echo "OCI cache test encountered a kernel panic." >&2
         exit 1
@@ -104,16 +104,16 @@ cold_output="$test_dir/cold.log"
 warm_output="$test_dir/warm.log"
 
 run_boot "$cold_output" false
-require_marker "$cold_output" 'ginux: OCI cache miss; pulling image'
-require_marker "$cold_output" 'ginux: OCI cache stored 1 layer \([0-9]+ bytes\)'
-require_marker "$cold_output" 'ginux: OCI image ready'
+require_marker "$cold_output" 'linox: OCI cache miss; pulling image'
+require_marker "$cold_output" 'linox: OCI cache stored 1 layer \([0-9]+ bytes\)'
+require_marker "$cold_output" 'linox: OCI image ready'
 
 run_boot "$warm_output" true
-require_marker "$warm_output" 'ginux: persistent storage recovered'
-require_marker "$warm_output" 'ginux: OCI cache hit \(1 layer\)'
-require_marker "$warm_output" 'ginux: OCI image ready'
-if grep -aFq 'ginux: OCI authenticating with registry' "$warm_output" \
-    || grep -aFq 'ginux: OCI layer 1/1: pulling' "$warm_output"; then
+require_marker "$warm_output" 'linox: persistent storage recovered'
+require_marker "$warm_output" 'linox: OCI cache hit \(1 layer\)'
+require_marker "$warm_output" 'linox: OCI image ready'
+if grep -aFq 'linox: OCI authenticating with registry' "$warm_output" \
+    || grep -aFq 'linox: OCI layer 1/1: pulling' "$warm_output"; then
     tail -n 160 "$warm_output"
     echo "Warm OCI cache boot contacted the registry." >&2
     exit 1

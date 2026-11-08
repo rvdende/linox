@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ginux_gfx::Canvas;
+use linox_gfx::Canvas;
 use wayland_protocols::xdg::{
     decoration::zv1::server::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1},
     shell::server::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base},
@@ -594,7 +594,7 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for State {
             state.width * 254 / 960,
             state.height * 254 / 960,
             wl_output::Subpixel::Unknown,
-            "Ginux".into(),
+            "Linox".into(),
             "framebuffer".into(),
             wl_output::Transform::Normal,
         );

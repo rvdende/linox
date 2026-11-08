@@ -1,5 +1,5 @@
 //! Filesystems on block devices that a domain mounts with mount(2): ext2
-//! (`ginux-ext2`) on a loop device or a RAM disk.
+//! (`linox-ext2`) on a loop device or a RAM disk.
 //!
 //! The overlay's path and handle interface is the kernel's view of files,
 //! and a mounted volume plugs in beneath it: [`crate::linux_overlay`] hands
@@ -38,7 +38,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use ginux_ext2::{
+use linox_ext2::{
     Change, Dquot, DquotChange, Error, ErrorPolicy, Failure, Filesystem, Kind, Options, QuotaInfo,
     QuotaKind, QuotaOptions, RenameMode, Timestamp, XattrMode,
 };
@@ -93,8 +93,8 @@ impl Disk {
     }
 }
 
-impl ginux_ext2::BlockDevice for Disk {
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> ginux_ext2::Result<()> {
+impl linox_ext2::BlockDevice for Disk {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> linox_ext2::Result<()> {
         self.count(false, buffer.len());
         match self.0 {
             Source::Loop {
@@ -119,7 +119,7 @@ impl ginux_ext2::BlockDevice for Disk {
         }
     }
 
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> ginux_ext2::Result<()> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> linox_ext2::Result<()> {
         self.count(true, data.len());
         match self.0 {
             Source::Loop {
@@ -170,7 +170,7 @@ struct Volume {
     point: Vec<u8>,
     source: Source,
     /// The filesystem type it was mounted as.
-    fs_type: ginux_ext2::FsType,
+    fs_type: linox_ext2::FsType,
     filesystem: Filesystem<Disk>,
     /// Generations given out, both ways.
     generations: BTreeMap<u32, u32>,
@@ -501,7 +501,7 @@ impl Volume {
     /// The inode at `relative`, walking from the root: ENOENT for a missing
     /// name, ENOTDIR through a file.
     fn resolve(&mut self, relative: &[u8]) -> Result<u32, Error> {
-        let mut inode = ginux_ext2::ROOT_INODE;
+        let mut inode = linox_ext2::ROOT_INODE;
         for name in relative.split(|byte| *byte == b'/') {
             if name.is_empty() {
                 continue;
@@ -651,7 +651,7 @@ pub(crate) fn linked(handle: Handle) -> bool {
 pub(crate) fn copy_path(handle: Handle, output: &mut [u8]) -> Option<usize> {
     let mut table = VOLUMES.lock();
     let (volume, inode) = table.of(handle)?;
-    let relative = if inode == ginux_ext2::ROOT_INODE {
+    let relative = if inode == linox_ext2::ROOT_INODE {
         &[][..]
     } else {
         volume.paths.get(&inode)?.as_slice()
@@ -809,7 +809,7 @@ pub(crate) fn create_temporary(
     group: u32,
     linkable: bool,
 ) -> Option<Option<Handle>> {
-    const NAME: &[u8] = b".ginux-o-tmpfile";
+    const NAME: &[u8] = b".linox-o-tmpfile";
     let now = now();
     let mut table = VOLUMES.lock();
     let index = volume_index(&table, path)?;
@@ -1720,7 +1720,7 @@ pub(crate) fn mount(
     source: Source,
     io: Option<Arc<crate::linux_loop::IoCounters>>,
     read_only: bool,
-    fs_type: ginux_ext2::FsType,
+    fs_type: linox_ext2::FsType,
     quota: QuotaOptions,
     errors: Option<ErrorPolicy>,
 ) -> Result<(), Errno> {
@@ -1798,7 +1798,7 @@ fn with_quota_volume<T>(which: QuotaVolume, operation: impl FnOnce(&mut Volume) 
 /// user and group; ext4's, for ext3 too: project as well).
 pub(crate) fn quota_kinds(which: QuotaVolume) -> Option<&'static [QuotaKind]> {
     with_quota_volume(which, |volume| match volume.fs_type {
-        ginux_ext2::FsType::Ext2 => &QuotaKind::ALL[..2],
+        linox_ext2::FsType::Ext2 => &QuotaKind::ALL[..2],
         _ => &QuotaKind::ALL[..],
     })
 }
@@ -2043,7 +2043,7 @@ pub(crate) fn sync_all() {
 }
 
 /// Where `handle`'s data from `start` for `length` bytes lies on the disk.
-pub(crate) fn extents(handle: Handle, start: u64, length: u64) -> Option<Vec<ginux_ext2::Extent>> {
+pub(crate) fn extents(handle: Handle, start: u64, length: u64) -> Option<Vec<linox_ext2::Extent>> {
     let mut table = VOLUMES.lock();
     let (volume, inode) = table.of(handle)?;
     volume.filesystem.extents(inode, start, length).ok()
@@ -2100,7 +2100,7 @@ pub(crate) fn note_damage_at(path: &[u8]) {
     if volume.filesystem.has_failures() {
         return;
     }
-    let mut inode = ginux_ext2::ROOT_INODE;
+    let mut inode = linox_ext2::ROOT_INODE;
     for name in relative.split(|byte| *byte == b'/') {
         if name.is_empty() {
             continue;
@@ -2114,10 +2114,10 @@ pub(crate) fn note_damage_at(path: &[u8]) {
             Err(_) => return,
         };
         let fault = match volume.filesystem.damaged_reference(child) {
-            Some(ginux_ext2::Damage::Number) => inode,
-            Some(ginux_ext2::Damage::Inode) => child,
+            Some(linox_ext2::Damage::Number) => inode,
+            Some(linox_ext2::Damage::Inode) => child,
             // Recorded as the inode was read.
-            Some(ginux_ext2::Damage::Checksum) => return,
+            Some(linox_ext2::Damage::Checksum) => return,
             None => {
                 inode = child;
                 continue;
@@ -2157,7 +2157,7 @@ pub(crate) fn take_failures() -> Vec<VolumeFailure> {
         }
         let failures = volume.filesystem.take_failures();
         let fsid = volume.filesystem.id();
-        let notify = volume.fs_type != ginux_ext2::FsType::Ext2;
+        let notify = volume.fs_type != linox_ext2::FsType::Ext2;
         if taken.try_reserve(failures.len()).is_err() {
             continue;
         }
@@ -2180,14 +2180,14 @@ pub(crate) fn take_failures() -> Vec<VolumeFailure> {
 }
 
 /// statfs(2) of the volume mounted at canonical `point`.
-pub(crate) fn statfs_at(point: &[u8]) -> Option<ginux_ext2::Statfs> {
+pub(crate) fn statfs_at(point: &[u8]) -> Option<linox_ext2::Statfs> {
     let mut table = VOLUMES.lock();
     let index = mounted_at(&table, point)?;
     Some(table.volumes[index].filesystem.statfs())
 }
 
 /// statfs(2) of the volume `handle`'s file is on.
-pub(crate) fn statfs_of(handle: Handle) -> Option<ginux_ext2::Statfs> {
+pub(crate) fn statfs_of(handle: Handle) -> Option<linox_ext2::Statfs> {
     let mut table = VOLUMES.lock();
     let (volume, _) = table.of(handle)?;
     Some(volume.filesystem.statfs())

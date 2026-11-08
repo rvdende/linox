@@ -11,10 +11,10 @@
 # --unsound print the underlying rows as tab-separated values.
 #
 # The sites come from the compiler, so they are exact: cargo clippy checks
-# ginux-kernel and ginux-boot with unsafe_code, unsafe_op_in_unsafe_fn,
+# linox-kernel and linox-boot with unsafe_code, unsafe_op_in_unsafe_fn,
 # clippy::multiple_unsafe_ops_per_block and clippy::undocumented_unsafe_blocks
 # raised to warnings, in a target directory of its own (target/unsafe-inventory,
-# or GINUX_UNSAFE_INVENTORY_TARGET) so the normal build cache is untouched. The
+# or LINOX_UNSAFE_INVENTORY_TARGET) so the normal build cache is untouched. The
 # first run checks the dependencies too (about 20 s); later runs replay the
 # cached diagnostics. A lexical pass over the same sources adds what the lints
 # do not report (static mut declarations, asm! invocations, enclosing
@@ -35,14 +35,14 @@ case "$mode" in
     ;;
 esac
 
-target_dir=${GINUX_UNSAFE_INVENTORY_TARGET:-$root/target/unsafe-inventory}
-diagnostics=$(mktemp "${TMPDIR:-/tmp}/ginux-unsafe-inventory.XXXXXX")
+target_dir=${LINOX_UNSAFE_INVENTORY_TARGET:-$root/target/unsafe-inventory}
+diagnostics=$(mktemp "${TMPDIR:-/tmp}/linox-unsafe-inventory.XXXXXX")
 trap 'rm -f "$diagnostics"' EXIT
 
 (
     cd "$root"
     CARGO_TARGET_DIR="$target_dir" cargo clippy --quiet --locked \
-        --package ginux-kernel --package ginux-boot --target x86_64-unknown-uefi \
+        --package linox-kernel --package linox-boot --target x86_64-unknown-uefi \
         --message-format=json -- \
         -W unsafe_code -W unsafe_op_in_unsafe_fn \
         -W clippy::multiple_unsafe_ops_per_block \
@@ -484,7 +484,7 @@ CATEGORY_RULES = [
     ("mmio-pio", None, None, r"\b(inb|outb|inl|outl|in_u8|out_u8)\b|in al, dx|out dx, al"),
     ("firmware", r"boot/efi/src/main\.rs|kernel/src/arch/x86_64/acpi\.rs|kernel/src/manifest\.rs", None, None),
     ("user", None, None,
-     r"raw_copy_(from|to)_user|with_supervisor_user_access|ginux_raw_copy|copy_to_linux_process"),
+     r"raw_copy_(from|to)_user|with_supervisor_user_access|linox_raw_copy|copy_to_linux_process"),
     ("user", None, r"^(write_live_process_u32|copy_live_process_bytes)$", None),
     # A plain-data struct viewed as bytes: a Pod/AsBytes trait does this safely.
     ("convenience", None, None, r"from_raw_parts(_mut)?\(\s*(core::)?ptr::from_(ref|mut)"),
@@ -510,8 +510,8 @@ CATEGORY_RULES = [
      r"|live_process_table|&mut \*table\b|\(\*parent\)|&mut \*manager|&mut \*\*(entry|record)"
      r"|process_runtime\(\)|\(\*record\)|\(\*table\)|&(mut )?\*tmpfs\b|&\*table\b|self\.as_mut_ptr\(\)|claim\.as_mut_ptr\(\)"),
     ("entry", None, None,
-     r"\b(enter_user|enter_linux_process|enter_linux_runtime_process|ginux_process_user_enter|ginux_user_enter"
-     r"|ginux_call_on_stack|enter_on_own_stack|ginux_kernel_stack_entry)\b|frame\.as_(ref|mut)\(\)|&\*frame\b"
+     r"\b(enter_user|enter_linux_process|enter_linux_runtime_process|linox_process_user_enter|linox_user_enter"
+     r"|linox_call_on_stack|enter_on_own_stack|linox_kernel_stack_entry)\b|frame\.as_(ref|mut)\(\)|&\*frame\b"
      r"|\bframe\.add\(|registers\.read\(\)|FS_BASE|xsave|xrstor|fxsave|fxrstor|lgdt|lidt|\bltr\b"
      r"|install_(gdt|idt|interrupt_gate|user_interrupt_gate)|clear_interrupt_gate|idt\.add|gdt\.add|\btss\b"
      r"|current_entry_state|stacks\.cast|STAR_MSR|LSTAR|SFMASK|argument\.cast::<EntryArguments>"),

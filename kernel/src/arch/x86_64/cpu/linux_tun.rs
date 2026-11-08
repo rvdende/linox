@@ -2,7 +2,7 @@
 //!
 //! Each open of /dev/net/tun is an object descriptor of class
 //! `LINUX_TUN_CLASS` naming a file of the network runtime's TUN table
-//! (`linux_socket::tun_*`, `ginux_tun`). TUNSETIFF makes a device or
+//! (`linux_socket::tun_*`, `linox_tun`). TUNSETIFF makes a device or
 //! attaches to one; the device is then an interface of the domain's
 //! network stack: rtnetlink and the SIOCGIF* ioctls list it, `ip link set
 //! up` and `ip addr add` change it, what the stack routes to its subnet
@@ -27,7 +27,7 @@ const TUNSETQUEUE: u32 = 0x4004_54d9;
 /// struct ifreq's size: the name, then the flags (a short) in the union.
 const IFREQ_SIZE: usize = 40;
 /// The largest read or write: a packet and its packet information.
-const TRANSFER_LIMIT: usize = ginux_tun::PACKET_LIMIT + 4;
+const TRANSFER_LIMIT: usize = linox_tun::PACKET_LIMIT + 4;
 
 fn linux_tun_errno(errno: i32) -> u64 {
     (-i64::from(errno)) as u64
@@ -58,18 +58,18 @@ pub(super) fn linux_tun_release(class: u8, id: u64) {
 
 /// Runs `call` with the caller as the device permission checks see it:
 /// its effective ids and groups, and CAP_NET_ADMIN.
-fn with_tun_caller<R>(call: impl FnOnce(&ginux_tun::Caller) -> R) -> R {
+fn with_tun_caller<R>(call: impl FnOnce(&linox_tun::Caller) -> R) -> R {
     let credentials = current_linux_credentials();
     let (user, group) = credentials.map_or((u32::MAX, u32::MAX), |credentials| {
         (credentials.user.effective, credentials.group.effective)
     });
     let administrator = credentials
-        .is_some_and(|credentials| credentials.has(ginux_credentials::capability::NET_ADMIN));
+        .is_some_and(|credentials| credentials.has(linox_credentials::capability::NET_ADMIN));
     let groups = linux_process::with_live_process_groups(current_linux_process_pid(), |groups| {
         groups.to_vec()
     })
     .unwrap_or_default();
-    call(&ginux_tun::Caller {
+    call(&linox_tun::Caller {
         user,
         group,
         groups: &groups,
@@ -84,7 +84,7 @@ fn with_tun_caller<R>(call: impl FnOnce(&ginux_tun::Caller) -> R) -> R {
 pub(super) fn linux_tun_ioctl(id: u64, command: u32, argument: u64) -> u64 {
     let result = match command {
         TUNGETFEATURES => {
-            return if copy_to_linux_user(argument, &ginux_tun::FEATURES.to_ne_bytes()) {
+            return if copy_to_linux_user(argument, &linox_tun::FEATURES.to_ne_bytes()) {
                 0
             } else {
                 LINUX_EFAULT
@@ -142,7 +142,7 @@ pub(super) fn linux_tun_ioctl(id: u64, command: u32, argument: u64) -> u64 {
         // Checksums are not offloaded: nothing to switch off.
         TUNSETNOCSUM => crate::linux_socket::tun_get_iff(id).map(|_| ()),
         _ => match crate::linux_socket::tun_get_iff(id) {
-            Ok(_) => Err(ginux_tun::EINVAL),
+            Ok(_) => Err(linox_tun::EINVAL),
             Err(errno) => Err(errno),
         },
     };
@@ -154,7 +154,7 @@ pub(super) fn linux_tun_ioctl(id: u64, command: u32, argument: u64) -> u64 {
 fn linux_tun_write_ifreq(
     address: u64,
     ifreq: &mut [u8; IFREQ_SIZE],
-    name: ginux_tun::Name,
+    name: linox_tun::Name,
     flags: u16,
 ) -> Result<(), i32> {
     const EFAULT: i32 = 14;

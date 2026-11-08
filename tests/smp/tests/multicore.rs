@@ -1,6 +1,6 @@
 //! A domain given four CPUs runs four CPU-bound processes at once.
 //!
-//! Boots the ESP in `GINUX_ESP_DIR` (default `build/esp`) under QEMU with
+//! Boots the ESP in `LINOX_ESP_DIR` (default `build/esp`) under QEMU with
 //! four CPUs and a fresh volume, starts a domain on the built-in Rust image
 //! with `cpu=4`, and times one CPU-bound job (`seq` into /dev/null) against
 //! four at once. Four processes on four CPUs take about as long as one; on one CPU
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 /// Console lines that mean the kernel or the domain has failed.
 const FAILURES: &[&str] = &[
-    "GINUX_KERNEL_PANIC",
+    "LINOX_KERNEL_PANIC",
     "application processor run failed",
     "Linux runtime exceeded",
     "domain marked failed",
@@ -42,15 +42,15 @@ impl Guest {
         File::create(&volume).unwrap().set_len(8 << 30).unwrap();
         let pid_file = work.join("qemu.pid");
         let log = work.join("serial.log");
-        let esp = std::env::var_os("GINUX_ESP_DIR")
+        let esp = std::env::var_os("LINOX_ESP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| repo.join("build/esp"));
         let mut qemu = Command::new(repo.join("tools/qemu/run.sh"))
-            .env("GINUX_ESP_DIR", &esp)
-            .env("GINUX_CPUS", cpus.to_string())
-            .env("GINUX_MEMORY", "8G")
-            .env("GINUX_VOLUME_IMAGE", &volume)
-            .env("GINUX_QEMU_PID_FILE", &pid_file)
+            .env("LINOX_ESP_DIR", &esp)
+            .env("LINOX_CPUS", cpus.to_string())
+            .env("LINOX_MEMORY", "8G")
+            .env("LINOX_VOLUME_IMAGE", &volume)
+            .env("LINOX_QEMU_PID_FILE", &pid_file)
             .env(
                 "OVMF_CODE",
                 std::env::var("OVMF_CODE")
@@ -163,15 +163,15 @@ fn elapsed_ms(text: &str, label: &str) -> u64 {
 fn multicore() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repo = repo.canonicalize().unwrap();
-    // GINUX_SMP_TEST_CPUS=1 runs the same steps on one CPU, for comparison.
-    let cpus: u32 = std::env::var("GINUX_SMP_TEST_CPUS")
+    // LINOX_SMP_TEST_CPUS=1 runs the same steps on one CPU, for comparison.
+    let cpus: u32 = std::env::var("LINOX_SMP_TEST_CPUS")
         .ok()
         .and_then(|cpus| cpus.parse().ok())
         .unwrap_or(4);
     let mut guest = Guest::boot(&repo, &repo.join("target/smp-test"), cpus);
-    let mut at = guest.wait_for("ginux> ", 0, Duration::from_secs(90));
+    let mut at = guest.wait_for("linox> ", 0, Duration::from_secs(90));
     guest.send("domain new smp");
-    at = guest.wait_for("ginux> ", at, Duration::from_secs(20));
+    at = guest.wait_for("linox> ", at, Duration::from_secs(20));
     guest.send(&format!(
         "domain set smp image=builtin://rust init=/sbin/init cpu={cpus}"
     ));
@@ -198,8 +198,8 @@ fn multicore() {
          cat /tmp/report-*.toml 2>/dev/null | head -60; echo DONE''MARK",
     );
     let end = guest.wait_for("DONEMARK", at, Duration::from_secs(120));
-    // GINUX_SMP_TEST_PROBE: a command whose output (and kernel log) to show.
-    if let Ok(probe) = std::env::var("GINUX_SMP_TEST_PROBE") {
+    // LINOX_SMP_TEST_PROBE: a command whose output (and kernel log) to show.
+    if let Ok(probe) = std::env::var("LINOX_SMP_TEST_PROBE") {
         guest.send(&format!("{probe}; echo PROBE''MARK"));
         let probe_end = guest.wait_for("PROBEMARK", end, Duration::from_secs(120));
         eprintln!("{}", guest.text(end, probe_end));
@@ -238,7 +238,7 @@ fn multicore() {
             );
         }
     }
-    for line in text.lines().filter(|line| line.starts_with("ginux: cpu ")) {
+    for line in text.lines().filter(|line| line.starts_with("linox: cpu ")) {
         eprintln!("multicore: {line} (ms user/kernel/idle/lock-wait since boot, processes run)");
     }
     // On one CPU four take four times as long as one; on four CPUs about as

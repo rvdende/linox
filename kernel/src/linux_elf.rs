@@ -88,25 +88,25 @@ const DEPENDENCY_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-d
 const LINKED_PROBE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-probe.elf"));
 const LINKED_DYNAMIC_GRAPH_MAIN: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/linux-linked-graph-main.elf"));
-const LINKED_DYNAMIC_DEPENDENCY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libginux.so"));
+const LINKED_DYNAMIC_DEPENDENCY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/liblinox.so"));
 const LINKED_DYNAMIC_AUXILIARY: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/libginux-aux.so"));
-const LINKED_DYNAMIC_INTERPRETER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ld-ginux.so"));
+    include_bytes!(concat!(env!("OUT_DIR"), "/liblinox-aux.so"));
+const LINKED_DYNAMIC_INTERPRETER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ld-linox.so"));
 const LINUX_VDSO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-vdso.so"));
 pub(crate) fn verify_dependency_list_metadata() -> bool {
-    const INTERPRETER_PATH: &[u8] = b"/lib64/ld-ginux.so";
-    const PRIMARY: &[u8] = b"libginux.so";
-    const AUXILIARY: &[u8] = b"libginux-aux.so";
+    const INTERPRETER_PATH: &[u8] = b"/lib64/ld-linox.so";
+    const PRIMARY: &[u8] = b"liblinox.so";
+    const AUXILIARY: &[u8] = b"liblinox-aux.so";
     let Some(mut main) = parse(LINKED_DYNAMIC_GRAPH_MAIN) else {
-        crate::serial_write_bytes(b"\r\nginux: dependency-list main parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency-list main parse failed");
         return false;
     };
     let Some(primary) = parse(LINKED_DYNAMIC_DEPENDENCY) else {
-        crate::serial_write_bytes(b"\r\nginux: primary dependency parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: primary dependency parse failed");
         return false;
     };
     let Some(auxiliary) = parse(LINKED_DYNAMIC_AUXILIARY) else {
-        crate::serial_write_bytes(b"\r\nginux: auxiliary dependency parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: auxiliary dependency parse failed");
         return false;
     };
     let interpreter_authority = InterpreterAuthority {
@@ -134,7 +134,7 @@ pub(crate) fn verify_dependency_list_metadata() -> bool {
         &dependency_authorities,
         [LINKED_DYNAMIC_DEPENDENCY, LINKED_DYNAMIC_AUXILIARY],
     ) else {
-        crate::serial_write_bytes(b"\r\nginux: dependency graph authentication failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency graph authentication failed");
         return false;
     };
     let mut wrong_digest_authorities = dependency_authorities;
@@ -161,8 +161,8 @@ pub(crate) fn verify_dependency_list_metadata() -> bool {
     main.dynamic_relocations = main_dynamic;
     let primary_tls = primary.tls;
     let valid = main.needed_libraries == [Some(PRIMARY), Some(AUXILIARY)]
-        && main.dynamic_symbol == Some(b"ginux_dependency_symbol")
-        && main.secondary_dynamic_symbol == Some(b"ginux_auxiliary_symbol")
+        && main.dynamic_symbol == Some(b"linox_dependency_symbol")
+        && main.secondary_dynamic_symbol == Some(b"linox_auxiliary_symbol")
         && main.dynamic_relocations.is_some_and(|dynamic| {
             dynamic.relocation_count == 6
                 && !dynamic.symbol_defined
@@ -224,7 +224,7 @@ pub(crate) fn verify_dependency_list_metadata() -> bool {
                 })
         })
         && auxiliary.needed_libraries == [None; 2]
-        && auxiliary.dynamic_symbol == Some(b"ginux_auxiliary_symbol")
+        && auxiliary.dynamic_symbol == Some(b"linox_auxiliary_symbol")
         && auxiliary.dynamic_relocations.is_some_and(|dynamic| {
             dynamic.relocation_count == 4
                 && dynamic.symbol_defined
@@ -271,7 +271,7 @@ pub(crate) fn verify_dependency_list_metadata() -> bool {
         )
         .is_none();
     if !valid {
-        crate::serial_write_bytes(b"\r\nginux: auxiliary dependency metadata mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: auxiliary dependency metadata mismatch");
     }
     valid
 }
@@ -317,9 +317,9 @@ pub(crate) fn measured_interpreted_exec_plan<'root>(
     interpreter_bytes: &'root [u8],
     dependency_bytes: [&'root [u8]; 2],
 ) -> Option<DependencyGraphLoadPlan<'root, 'root, 'root>> {
-    const INTERPRETER_PATH: &[u8] = b"/lib64/ld-ginux.so";
-    const PRIMARY: &[u8] = b"libginux.so";
-    const AUXILIARY: &[u8] = b"libginux-aux.so";
+    const INTERPRETER_PATH: &[u8] = b"/lib64/ld-linox.so";
+    const PRIMARY: &[u8] = b"liblinox.so";
+    const AUXILIARY: &[u8] = b"liblinox-aux.so";
     let main = parse(main_bytes)?;
     let interpreter_authority = InterpreterAuthority {
         path: INTERPRETER_PATH,
@@ -372,7 +372,7 @@ pub(crate) fn verify_tls_template_metadata() -> bool {
         });
 
     let mut header = [0_u8; 80];
-    header[64..72].copy_from_slice(b"GINUXTLS");
+    header[64..72].copy_from_slice(b"LINOXTLS");
     write_u32(&mut header, 0, PT_TLS);
     write_u32(&mut header, 4, PF_READ);
     write_u64(&mut header, 8, 64);
@@ -929,7 +929,7 @@ pub(crate) fn vdso_image() -> &'static [u8] {
     LINUX_VDSO
 }
 
-/// The bytes of the vDSO's preemption entry (`__ginux_preempt` in
+/// The bytes of the vDSO's preemption entry (`__linox_preempt` in
 /// linux-vdso.S): `mov eax, 0x4750; syscall; ud2`.
 const VDSO_PREEMPT_ENTRY: [u8; 9] = [0xb8, 0x50, 0x47, 0x00, 0x00, 0x0f, 0x05, 0x0f, 0x0b];
 
@@ -942,7 +942,7 @@ pub(crate) fn vdso_preempt_entry() -> Option<u64> {
     VDSO_ADDRESS.checked_add(u64::try_from(offset).ok()?)
 }
 
-/// The bytes of the vDSO's signal return (`__ginux_sigreturn` in
+/// The bytes of the vDSO's signal return (`__linox_sigreturn` in
 /// linux-vdso.S): `mov eax, 15; syscall; ud2`.
 const VDSO_SIGRETURN_ENTRY: [u8; 9] = [0xb8, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x0f, 0x0b];
 
@@ -3380,15 +3380,15 @@ pub(crate) fn verify_load_plan() -> bool {
         return false;
     }
     if !verify_oversized_writable_plan_rejected() {
-        crate::serial_write_bytes(b"\r\nginux: oversized load rejection invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: oversized load rejection invariant failed");
         return false;
     }
     if !verify_page_aliasing_plan_rejected() {
-        crate::serial_write_bytes(b"\r\nginux: aliased load rejection invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: aliased load rejection invariant failed");
         return false;
     }
     if !verify_position_independent_plan() {
-        crate::serial_write_bytes(b"\r\nginux: position-independent load invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: position-independent load invariant failed");
         return false;
     }
     true
@@ -3398,15 +3398,15 @@ pub(crate) fn verify_load_plan() -> bool {
 fn verify_static_load_plan() -> bool {
     let image = fixture();
     let Some(parsed) = parse(&image) else {
-        crate::serial_write_bytes(b"\r\nginux: static load fixture parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: static load fixture parse failed");
         return false;
     };
     let Some(current_plan) = plan(&parsed) else {
-        crate::serial_write_bytes(b"\r\nginux: static load fixture planning failed");
+        crate::serial_write_bytes(b"\r\nlinox: static load fixture planning failed");
         return false;
     };
     if current_plan.entry != 0x40_0100 {
-        crate::serial_write_bytes(b"\r\nginux: static load entry invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: static load entry invariant failed");
         return false;
     }
     if current_plan.program_headers != 0x40_0040
@@ -3426,7 +3426,7 @@ fn verify_static_load_plan() -> bool {
         || !current_plan.writable.writable
         || current_plan.writable.executable
     {
-        crate::serial_write_bytes(b"\r\nginux: static load metadata invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: static load metadata invariant failed");
         return false;
     }
 
@@ -3463,7 +3463,7 @@ fn verify_static_load_plan() -> bool {
         || !materialize_page(current_plan.writable, 1, &mut page)
         || page.iter().any(|byte| *byte != 0)
     {
-        crate::serial_write_bytes(b"\r\nginux: static load materialization invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: static load materialization invariant failed");
         return false;
     }
     true
@@ -3506,13 +3506,13 @@ fn verify_position_independent_plan() -> bool {
 
 #[inline(never)]
 pub(crate) fn verify_interpreted_plan() -> bool {
-    const PATH: &[u8] = b"/lib64/ld-ginux.so";
-    const DEPENDENCY: &[u8] = b"libginux.so";
+    const PATH: &[u8] = b"/lib64/ld-linox.so";
+    const DEPENDENCY: &[u8] = b"liblinox.so";
     let main_bytes = interpreted_main_fixture();
     let interpreter_bytes = compact_position_independent_fixture();
     let dependency_bytes = compact_dependency_fixture();
     let Some(main) = parse(&main_bytes) else {
-        crate::serial_write_bytes(b"\r\nginux: interpreted main fixture parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: interpreted main fixture parse failed");
         return false;
     };
     let authority = InterpreterAuthority {
@@ -3525,7 +3525,7 @@ pub(crate) fn verify_interpreted_plan() -> bool {
         load_bias: 0x61_0000,
     };
     if parse(&dependency_bytes).is_none() {
-        crate::serial_write_bytes(b"\r\nginux: dependency fixture parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency fixture parse failed");
         return false;
     }
     let Some(combined_plan) = plan_authenticated_dependency(
@@ -3536,14 +3536,14 @@ pub(crate) fn verify_interpreted_plan() -> bool {
         &dependency_authority,
         &dependency_bytes,
     ) else {
-        crate::serial_write_bytes(b"\r\nginux: authenticated dependency plan failed");
+        crate::serial_write_bytes(b"\r\nlinox: authenticated dependency plan failed");
         return false;
     };
     let combined = &combined_plan.process;
     let startup = interpreted_startup(combined);
     let auxiliary = auxiliary_vector(startup, 0x70_1000, 0x70_2000, 0x70_3000, 0);
     if combined_plan.dependency.entry != 0x61_0100 {
-        crate::serial_write_bytes(b"\r\nginux: dependency entry plan mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: dependency entry plan mismatch");
     }
     if !combined_plan
         .dependency
@@ -3555,7 +3555,7 @@ pub(crate) fn verify_interpreted_plan() -> bool {
                     .is_some_and(|relocation| relocation.symbol_value == 0x61_0100)
         })
     {
-        crate::serial_write_bytes(b"\r\nginux: dependency symbol plan mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: dependency symbol plan mismatch");
     }
     let startup_valid = startup.initial_entry == 0x60_0100
         && startup.program_headers == 0x3f_f040
@@ -3658,19 +3658,19 @@ pub(crate) fn verify_interpreted_plan() -> bool {
         &dependency_authority,
     );
     if !startup_valid {
-        crate::serial_write_bytes(b"\r\nginux: dependency startup invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency startup invariant failed");
     }
     if !main_valid {
-        crate::serial_write_bytes(b"\r\nginux: dependency main invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency main invariant failed");
     }
     if !interpreter_valid {
-        crate::serial_write_bytes(b"\r\nginux: dependency interpreter invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency interpreter invariant failed");
     }
     if !dependency_valid {
-        crate::serial_write_bytes(b"\r\nginux: dependency image invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency image invariant failed");
     }
     if !rejections_valid {
-        crate::serial_write_bytes(b"\r\nginux: dependency rejection invariant failed");
+        crate::serial_write_bytes(b"\r\nlinox: dependency rejection invariant failed");
     }
     startup_valid && main_valid && interpreter_valid && dependency_valid && rejections_valid
 }
@@ -3708,8 +3708,8 @@ fn verify_dependency_authentication_rejections(
     }
     mismatched_symbol_dependency.copy_from_slice(dependency_bytes);
     let Some(symbol_name) = mismatched_symbol_dependency
-        .windows(b"ginux_probe".len())
-        .position(|candidate| candidate == b"ginux_probe")
+        .windows(b"linox_probe".len())
+        .position(|candidate| candidate == b"linox_probe")
     else {
         return false;
     };
@@ -3721,8 +3721,8 @@ fn verify_dependency_authentication_rejections(
     let mut mismatched_soname_dependency = [0_u8; 1024];
     mismatched_soname_dependency.copy_from_slice(dependency_bytes);
     let Some(soname) = mismatched_soname_dependency
-        .windows(b"libginux.so".len())
-        .position(|candidate| candidate == b"libginux.so")
+        .windows(b"liblinox.so".len())
+        .position(|candidate| candidate == b"liblinox.so")
     else {
         return false;
     };
@@ -3969,7 +3969,7 @@ fn verify_oversized_writable_plan_rejected() -> bool {
 fn verify_page_aliasing_plan_rejected() -> bool {
     let static_bytes = fixture();
     let Some(mut static_image) = parse(&static_bytes) else {
-        crate::serial_write_bytes(b"\r\nginux: page alias static fixture parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: page alias static fixture parse failed");
         return false;
     };
     static_image.read_only = Some(Segment {
@@ -3983,7 +3983,7 @@ fn verify_page_aliasing_plan_rejected() -> bool {
 
     let dynamic_bytes = compact_position_independent_fixture();
     let Some(mut dynamic_image) = parse(&dynamic_bytes) else {
-        crate::serial_write_bytes(b"\r\nginux: page alias dynamic fixture parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: page alias dynamic fixture parse failed");
         return false;
     };
     dynamic_image.read_only = Some(Segment {
@@ -3995,10 +3995,10 @@ fn verify_page_aliasing_plan_rejected() -> bool {
     });
     let dynamic_rejected = plan_position_independent(&dynamic_image, 0x60_0000).is_none();
     if !static_rejected {
-        crate::serial_write_bytes(b"\r\nginux: static page alias accepted");
+        crate::serial_write_bytes(b"\r\nlinox: static page alias accepted");
     }
     if !dynamic_rejected {
-        crate::serial_write_bytes(b"\r\nginux: dynamic page alias accepted");
+        crate::serial_write_bytes(b"\r\nlinox: dynamic page alias accepted");
     }
     static_rejected && dynamic_rejected
 }
@@ -4149,31 +4149,31 @@ pub(crate) fn verify_mapped_system_init_plan(protected_start: u64, protected_siz
 
 #[inline(never)]
 fn verify_interpreted_fixture_inputs() -> bool {
-    const PATH: &[u8] = b"/lib64/ld-ginux.so";
-    const DEPENDENCY: &[u8] = b"libginux.so";
-    const AUXILIARY: &[u8] = b"libginux-aux.so";
+    const PATH: &[u8] = b"/lib64/ld-linox.so";
+    const DEPENDENCY: &[u8] = b"liblinox.so";
+    const AUXILIARY: &[u8] = b"liblinox-aux.so";
     let interpreter_bytes = LINKED_DYNAMIC_INTERPRETER;
     let Some(main) = parse(LINKED_DYNAMIC_GRAPH_MAIN) else {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic main parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic main parse failed");
         return false;
     };
     let Some(dependency) = parse(LINKED_DYNAMIC_DEPENDENCY) else {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic dependency parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic dependency parse failed");
         return false;
     };
     let Some(interpreter) = parse(interpreter_bytes) else {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic interpreter parse failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic interpreter parse failed");
         return false;
     };
     if main.dynamic_symbol != dependency.dynamic_symbol {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic symbol mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic symbol mismatch");
         return false;
     }
     if main.interpreter != Some(PATH)
         || main.needed_libraries != [Some(DEPENDENCY), Some(AUXILIARY)]
         || dependency.soname != Some(DEPENDENCY)
     {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic identity mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic identity mismatch");
         return false;
     }
     if interpreter.entry != 0x200
@@ -4193,15 +4193,15 @@ fn verify_interpreted_fixture_inputs() -> bool {
                 && !dynamic.symbol_defined
         })
     {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic interpreter metadata mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic interpreter metadata mismatch");
         return false;
     }
     if plan_position_independent_at(&main, 0x3f_f000, true).is_none() {
-        crate::serial_write_bytes(b"\r\nginux: linked PIE main planning failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked PIE main planning failed");
         return false;
     }
     if plan_position_independent(&dependency, 0x61_0000).is_none() {
-        crate::serial_write_bytes(b"\r\nginux: linked DSO planning failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked DSO planning failed");
         return false;
     }
     true
@@ -4217,7 +4217,7 @@ pub(crate) fn verify_mapped_interpreted_plan(protected_start: u64, protected_siz
         interpreter_bytes,
         [LINKED_DYNAMIC_DEPENDENCY, LINKED_DYNAMIC_AUXILIARY],
     ) else {
-        crate::serial_write_bytes(b"\r\nginux: linked dynamic dependency plan failed");
+        crate::serial_write_bytes(b"\r\nlinox: linked dynamic dependency plan failed");
         return false;
     };
     if plan.process.interpreter.executable.page_count != 2
@@ -4234,7 +4234,7 @@ pub(crate) fn verify_mapped_interpreted_plan(protected_start: u64, protected_siz
                 .is_none_or(|dynamic| dynamic.init_array != Some(dynamic.relocation_target))
         })
     {
-        crate::serial_write_bytes(b"\r\nginux: linked DSO page-contract fixture mismatch");
+        crate::serial_write_bytes(b"\r\nlinox: linked DSO page-contract fixture mismatch");
         return false;
     }
     let main_symbols_unresolved = plan
@@ -4259,7 +4259,7 @@ pub(crate) fn verify_mapped_interpreted_plan(protected_start: u64, protected_siz
         });
     if !main_symbols_unresolved {
         crate::serial_write_bytes(
-            b"\r\nginux: linked PIE symbols resolved before dependency binding",
+            b"\r\nlinox: linked PIE symbols resolved before dependency binding",
         );
         return false;
     }
@@ -4267,10 +4267,10 @@ pub(crate) fn verify_mapped_interpreted_plan(protected_start: u64, protected_siz
 }
 
 fn interpreted_main_fixture() -> [u8; INTERPRETED_FIXTURE_SIZE] {
-    const PATH: &[u8] = b"/lib64/ld-ginux.so\0";
+    const PATH: &[u8] = b"/lib64/ld-linox.so\0";
     const EXECUTABLE_OFFSET: usize = 0x200;
     const RELA_OFFSET: usize = ELF_HEADER_SIZE + 6 * PROGRAM_HEADER_SIZE;
-    const STRING_TABLE: &[u8] = b"\0ginux_probe\0libginux.so\0";
+    const STRING_TABLE: &[u8] = b"\0linox_probe\0liblinox.so\0";
     const PATH_OFFSET: usize = 0x1e0;
     const DYNAMIC_OFFSET: usize = INTERPRETED_DATA_OFFSET + 8;
     const SYMTAB_OFFSET: usize = DYNAMIC_OFFSET + 13 * DYNAMIC_ENTRY_SIZE;
@@ -4517,7 +4517,7 @@ fn compact_dependency_fixture() -> [u8; 1024] {
     const DYNAMIC_OFFSET: usize = DATA_OFFSET + 8;
     const SYMTAB_OFFSET: usize = DYNAMIC_OFFSET + 13 * DYNAMIC_ENTRY_SIZE;
     const STRTAB_OFFSET: usize = SYMTAB_OFFSET + 2 * SYMBOL_ENTRY_SIZE;
-    const STRING_TABLE: &[u8] = b"\0ginux_probe\0libginux.so\0";
+    const STRING_TABLE: &[u8] = b"\0linox_probe\0liblinox.so\0";
     const HASH_OFFSET: usize = (STRTAB_OFFSET + STRING_TABLE.len() + 3) & !3;
     const RELA_OFFSET: usize = (HASH_OFFSET + 32 + 7) & !7;
     let mut bytes = [0_u8; 1024];
@@ -4585,7 +4585,7 @@ fn compact_dependency_fixture() -> [u8; 1024] {
         DEPENDENCY_CODE.len() as u64,
     );
     bytes[STRTAB_OFFSET..STRTAB_OFFSET + STRING_TABLE.len()].copy_from_slice(STRING_TABLE);
-    let symbol_hash = gnu_hash(b"ginux_probe");
+    let symbol_hash = gnu_hash(b"linox_probe");
     let bloom = (1_u64 << (symbol_hash % 64)) | (1_u64 << ((symbol_hash >> 5) % 64));
     write_u32(&mut bytes, HASH_OFFSET, 1);
     write_u32(&mut bytes, HASH_OFFSET + 4, 1);

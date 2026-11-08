@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Boots Ginux in a QEMU window with USB keyboard and tablet, starts a domain
+# Boots Linox in a QEMU window with USB keyboard and tablet, starts a domain
 # on the boot image's all-Rust root filesystem (image=builtin://rust:
-# ginux-init, the brush shell, uutils coreutils and the desktop programs) and
+# linox-init, the brush shell, uutils coreutils and the desktop programs) and
 # launches the Rust Wayland desktop in it. The VM runs in the tmux session
-# "ginux" (its serial console), which this script replaces if it exists.
+# "linox" (its serial console), which this script replaces if it exists.
 #
 # Usage: tools/qemu/desktop.sh [--no-build]
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-session=ginux
+session=linox
 domain=rust
 
 if [[ "${1:-}" != "--no-build" ]]; then
@@ -45,14 +45,14 @@ ovmf_code="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 ovmf_vars="${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 tmux new-session -d -s "$session" -x 200 -y 50 "
     cd '$repo_root'
-    OVMF_CODE='$ovmf_code' OVMF_VARS='$ovmf_vars' GINUX_QEMU_DISPLAY=\${GINUX_QEMU_DISPLAY:-gtk} \
-        GINUX_QEMU_USB_INPUT=1 GINUX_MEMORY=\${GINUX_MEMORY:-4G} \
+    OVMF_CODE='$ovmf_code' OVMF_VARS='$ovmf_vars' LINOX_QEMU_DISPLAY=\${LINOX_QEMU_DISPLAY:-gtk} \
+        LINOX_QEMU_USB_INPUT=1 LINOX_MEMORY=\${LINOX_MEMORY:-4G} \
         DISPLAY='${DISPLAY:-}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}' XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-}' \
         make run
     exec bash"
 
-echo "Booting Ginux (console: tmux attach -t $session)."
-wait_for_prompt 'ginux>' 180
+echo "Booting Linox (console: tmux attach -t $session)."
+wait_for_prompt 'linox>' 180
 # Creating the domain fails harmlessly when it already exists.
 for command in "domain new $domain" "domain set $domain image=builtin://rust init=/sbin/init"; do
     tmux send-keys -t "$session" "$command" Enter
@@ -61,6 +61,6 @@ done
 tmux send-keys -t "$session" "domain start $domain --attach" Enter
 echo "Starting the '$domain' domain (all-Rust userland)."
 wait_for_prompt '# ?$' 120
-tmux send-keys -t "$session" "ginux-wm --terminal ginux-term --spawn ginux-term &" Enter
+tmux send-keys -t "$session" "linox-wm --terminal linox-term --spawn linox-term &" Enter
 echo "Desktop starting in the QEMU window: Alt+Enter terminal, Alt+Tab switch, Alt+M maximize, Alt+Q close."
 echo "Serial console: tmux attach -t $session (detach with Ctrl-b d); stop with: just stop"

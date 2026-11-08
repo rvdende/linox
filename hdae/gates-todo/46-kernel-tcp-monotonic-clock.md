@@ -63,7 +63,7 @@ traffic cannot accelerate protocol timers and idle wall time is not discarded.
 - `make check` -> passed all formatting, lint, architecture, unsafe-inventory,
   and host-side checks.
 - `make test` -> passed the complete deterministic QEMU and Linux runtime suite;
-  the boot harness required `ginux: kernel network monotonic clock verified`
+  the boot harness required `linox: kernel network monotonic clock verified`
   and ended with `Boot test passed`.
 
 ## Decisions and limitations

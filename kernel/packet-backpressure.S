@@ -1,11 +1,11 @@
 .text
 .balign 16
-.global ginux_packet_backpressure_producer_start
-.global ginux_packet_backpressure_producer_end
-.global ginux_packet_backpressure_consumer_start
-.global ginux_packet_backpressure_consumer_end
+.global linox_packet_backpressure_producer_start
+.global linox_packet_backpressure_producer_end
+.global linox_packet_backpressure_consumer_start
+.global linox_packet_backpressure_consumer_end
 
-ginux_packet_backpressure_producer_start:
+linox_packet_backpressure_producer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x80
@@ -68,10 +68,10 @@ ginux_packet_backpressure_producer_start:
     mov eax, 2
     int 0x80
     int3
-ginux_packet_backpressure_producer_end:
+linox_packet_backpressure_producer_end:
 
 .balign 16
-ginux_packet_backpressure_consumer_start:
+linox_packet_backpressure_consumer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x80
@@ -135,4 +135,4 @@ ginux_packet_backpressure_consumer_start:
     mov eax, 2
     int 0x80
     int3
-ginux_packet_backpressure_consumer_end:
+linox_packet_backpressure_consumer_end:

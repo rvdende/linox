@@ -80,7 +80,7 @@ The Linux v6.12 x86-64 table deliberately maps `uselib`, `_sysctl`,
 `create_module`, `get_kernel_syms`, `query_module`, `nfsservctl`, `getpmsg`,
 `putpmsg`, `afs_syscall`, `tuxcall`, `security`, `set_thread_area`,
 `get_thread_area`, `lookup_dcookie`, `epoll_ctl_old`, `epoll_wait_old`, and
-`vserver` to the not-implemented entry. Ginux dispatches each of those numbers
+`vserver` to the not-implemented entry. Linox dispatches each of those numbers
 explicitly to `-ENOSYS`, independently of its unknown-syscall fallback. The
 measured ELF probe calls every entry and requires `-ENOSYS`; Linux's
 not-implemented entry does not inspect the argument registers.
@@ -109,7 +109,7 @@ copy-out never accepts an RX page.
 a fixed 390-byte Linux `utsname`. The kernel zero-initializes every byte, fills
 all six 65-byte fields, and enables supervisor access to user memory only for
 the copy-out, which is subject to the same declared-extent check. The probe
-checks success and the `Ginux` system name.
+checks success and the `Linox` system name.
 `rax = 20` (`__NR_writev`) accepts one through four 16-byte x86-64 iovec
 records for descriptor 1, with a nonzero aggregate of at most 256 bytes. The
 kernel copies the complete vector table and every referenced range into a
@@ -467,7 +467,7 @@ selected access mode; duplication remains outside this bounded node profile.
 `rax = 436` (`__NR_close_range`) closes every open descriptor in an inclusive
 range while ignoring holes, or marks each open descriptor with
 `CLOSE_RANGE_CLOEXEC`. `CLOSE_RANGE_UNSHARE` is accepted independently or with
-`CLOEXEC`; Ginux process descriptor tables are already private, so no table
+`CLOEXEC`; Linox process descriptor tables are already private, so no table
 copy is necessary. Reversed ranges and unknown flags return `-EINVAL`; ranges
 wholly beyond the table are successful no-ops. Arguments use their Linux
 32-bit widths. Runtime probes cover closure, close-on-exec marking, unsharing,
@@ -539,14 +539,14 @@ initial namespace's root filesystem device `0:1`, using the native x86-64
 copy.
 
 The immutable runtime namespace also recognizes `/init`,
-`/lib64/ld-ginux.so`, `/lib64/libginux.so`, `/lib64/libginux-aux.so`,
+`/lib64/ld-linox.so`, `/lib64/liblinox.so`, `/lib64/liblinox-aux.so`,
 `/etc/hostname`, `/etc/os-release`, and `/etc/motd`. These resolve through the retained, independently measured
 initramfs index. The first four are aliases for internal `linux/*` entries that
 must byte-match the build-authenticated ELF artifacts used by the bounded
 execution plan; they are no longer served directly from the kernel's embedded
-fixture slices. `/etc/hostname` resolves to exact `ginux\n` bytes and
-`/etc/os-release` to exact `NAME=Ginux\nID=ginux\n` bytes; `/etc/motd` contains
-exact `Welcome to Ginux\n` bytes. Each descriptor
+fixture slices. `/etc/hostname` resolves to exact `linox\n` bytes and
+`/etc/os-release` to exact `NAME=Linox\nID=linox\n` bytes; `/etc/motd` contains
+exact `Welcome to Linox\n` bytes. Each descriptor
 stores a bounded one-based measured-root node selector separately from its
 file role; reads and metadata recover the indexed immutable bytes instead of
 dispatching content through a per-file kernel case. `openat`
@@ -619,7 +619,7 @@ regular files `status`, `mountinfo`, `uid_map`, `gid_map`, and `setgroups`.
 directories, validates their child records, reads all 45 bytes, and copies the
 snapshot to the measured console before readiness. `/proc/1/mountinfo` has
 fixed mode `0444` and exposes the exact 51-byte record
-`1 0 0:1 / / ro,nosuid,nodev - ginux-root rootfs ro\n` while the namespace is
+`1 0 0:1 / / ro,nosuid,nodev - linox-root rootfs ro\n` while the namespace is
 active. The three user-namespace records have the exact contents specified in
 [Linux User Namespace v0](linux-user-namespace-v0.md). Writes, execute access,
 and file mapping are denied for all five records. This is a boot-state identity,
@@ -634,7 +634,7 @@ procfs: arbitrary process counts and metadata, threads, fd links, sysctl, and
 retained post-reap records remain absent.
 
 The measured `/tmp` directory anchors one synthetic mutable regular file,
-`/tmp/ginux-ready`. The directory begins empty. Absolute `openat` with
+`/tmp/linox-ready`. The directory begins empty. Absolute `openat` with
 `O_CREAT | O_EXCL` creates the one admitted file with mode `0600`, zero length,
 and a new nonzero generation.
 Descriptors retain that generation and have independent offsets. Scalar
@@ -669,7 +669,7 @@ through eight, each terminated by a null pointer. Each string is limited to 63
 bytes plus its terminator, and the complete rebuilt initial stack is limited to
 512 bytes. The proof supplies
 `["/bin/signal-probe", "signal-probe", NULL]` and
-`["GINUX_EXEC=1", NULL]`, while also rejecting an empty argument vector and a
+`["LINOX_EXEC=1", NULL]`, while also rejecting an empty argument vector and a
 ninth argument. Unknown paths return `-ENOENT`, non-regular or non-executable
 nodes return `-EACCES`, executable files outside the admitted ELF profile return
 `-ENOEXEC`, inaccessible input returns `-EFAULT`, and count, string, or
@@ -706,8 +706,8 @@ The same syscall admits one interpreted target: Linux-visible `/init`, backed
 by measured-root `linux/init`. It accepts one through eight arguments and zero
 through eight environment entries under the same 63-byte per-string and
 512-byte aggregate-stack limits as static replacement. The replacement proof
-passes `/init` plus `dynamic-exec` and the two entries `GINUX=1` and
-`GINUX_MODE=exec` through the interpreter to the main and both DSO
+passes `/init` plus `dynamic-exec` and the two entries `LINOX=1` and
+`LINOX_MODE=exec` through the interpreter to the main and both DSO
 constructors. It authenticates the fixed interpreter/main/two-DSO graph,
 atomically installs fresh interpreter pages, and retires the complete previous
 graph with exact generation-tagged leases. It then resets the main and DSO
@@ -883,7 +883,7 @@ scheduler handoff, APIC expiry, signal interruption, and optional remainder
 transaction as `nanosleep`. An absolute request names the private monotonic
 epoch directly; an elapsed deadline returns immediately, while a future
 deadline uses the same sleep wait. Linux ignores the remainder argument for an
-absolute request, including on signal interruption, so Ginux neither validates
+absolute request, including on signal interruption, so Linox neither validates
 nor writes it. Other clocks or flag bits return `-EINVAL`. The measured graph
 proves a relative APIC expiry and an already elapsed absolute request with an
 invalid ignored remainder pointer. Realtime clocks remain unsupported.
@@ -920,7 +920,7 @@ Linux 32-bit widths; getters zero supported extensions and setters accept only
 zero-filled extensions. The conformance probe covers current and retired
 processes, negative PIDs, short structures, bad pointers, unknown and
 privileged policies, nonzero nice values, and invalid flags.
-Because Ginux has no swap or page reclaim path, every current and future
+Because Linox has no swap or page reclaim path, every current and future
 userspace mapping is resident. `mlock`, `mlock2`, `munlock`, `mlockall`, and
 `munlockall` therefore implement the complete Linux-visible contract without
 additional residency state. They validate mapped ranges, Linux integer
@@ -1092,8 +1092,8 @@ leaves as one bounded transaction, publishes reservation metadata, and then
 scrubs and releases the displaced leases. It therefore discards mapped
 contents rather than preserving them as a future `mprotect` transition would.
 The immutable-file form requires `PROT_READ`, `MAP_PRIVATE`, a readable
-descriptor for `/init`, `/lib64/ld-ginux.so`, `/lib64/libginux.so`, or
-`/lib64/libginux-aux.so`, and a
+descriptor for `/init`, `/lib64/ld-linox.so`, `/lib64/liblinox.so`, or
+`/lib64/liblinox-aux.so`, and a
 page-aligned offset. Its complete one- through four-page window must fit within
 the file length rounded up to a page; offsets at or beyond EOF are rejected rather
 than deferred to a `SIGBUS` path. The kernel copies the authenticated bytes
@@ -1104,19 +1104,19 @@ non-file descriptor returns `-ENODEV`, an invalid descriptor returns `-EBADF`,
 and a first-fit request without enough contiguous free entries returns
 `-ENOMEM`. A fixed request outside the window returns `-EINVAL`.
 The executable-install profile accepts only open `/init`,
-`/lib64/libginux.so`, or `/lib64/libginux-aux.so` descriptors and exact one-page
+`/lib64/liblinox.so`, or `/lib64/liblinox-aux.so` descriptors and exact one-page
 `MAP_PRIVATE | MAP_FIXED_NOREPLACE` requests already authenticated by the kernel plan. For
 `/init`, those contracts are offset `0` at `0x3ff000` with `PROT_READ`, offsets
 `0x1000..0x5000` at `0x400000..0x404000` with `PROT_READ | PROT_EXEC`, and
 offsets `0x6000..0x7000` at `0x405000..0x406000` with `PROT_READ |
-PROT_WRITE`. For `libginux.so`, the kernel admits a page-aligned base in the
+PROT_WRITE`. For `liblinox.so`, the kernel admits a page-aligned base in the
 half-open range `0x610000..0x620000`. Offset `0x1000` must be RX at relative
 address zero, offset `0x2000` must be RX at relative address `0x1000`, and
 offset `0x3000` must be R/NX at relative address `0x2000`; offset `0x4000` must
 be RW/NX at relative address `0x3000`. The current
 interpreter selects base `0x618000`, producing mappings at `0x618000`,
 `0x619000`, `0x61a000`, and `0x61b000`.
-For `libginux-aux.so`, the independent half-open base range is
+For `liblinox-aux.so`, the independent half-open base range is
 `0x630000..0x640000`. Offset `0x1000` must be RX at relative address zero and
 offset `0x2000` must be RW/NX at relative address `0x3000`. The interpreter
 selects base `0x638000`, producing mappings at `0x638000` and `0x63b000`.
@@ -1276,7 +1276,7 @@ ring and releases queued records. Work currently completes synchronously, so
 vectored and poll requests, eventfd signaling, and userspace ring consumption
 remain unsupported.
 `rax = 459`, `460`, and `461` expose the Linux v6.12 LSM userspace query
-surface without conflating it with Ginux's native domain security boundary.
+surface without conflating it with Linox's native domain security boundary.
 `lsm_list_modules` validates its flags and size pointer, writes a required size
 of zero, and returns zero because no Linux LSM module is active.
 `lsm_get_self_attr` validates Linux attribute IDs, `LSM_FLAG_SINGLE`, and the
@@ -1284,7 +1284,7 @@ size record, resets the required size to zero, then returns `EOPNOTSUPP` because
 there is no Linux security context provider. `lsm_set_self_attr` similarly
 validates its selector and reserved flags before returning `EOPNOTSUPP`.
 Native domain policy is neither enumerated nor mutable through this ABI.
-`rax = 453` (`__NR_map_shadow_stack`) reports `EOPNOTSUPP` because Ginux does
+`rax = 453` (`__NR_map_shadow_stack`) reports `EOPNOTSUPP` because Linox does
 not yet enable x86 userspace CET shadow stacks. This matches Linux x86's first
 operation check when shadow stacks are unavailable, including its precedence
 over address, length, and flag validation. CET enable/status controls,
@@ -1373,7 +1373,7 @@ remote-address-space release paths are implemented.
 (`__NR_process_vm_writev`) transfer bytes between the caller and a live process
 in the same domain. The target must share the caller's user namespace, remain
 dumpable, and have real/effective/saved IDs matching the caller's real UID and
-GID; Ginux currently exposes no capability override. Remote ranges are resolved
+GID; Linox currently exposes no capability override. Remote ranges are resolved
 against the target's generation-bound page mappings and write operations require
 writable target mappings. Every remote iovec is validated before that element is
 modified, while a failure in a later element preserves the successfully copied
@@ -1992,7 +1992,7 @@ runs it again, and child exit clears its word, wakes the blocked parent, and
 resumes that wait with zero. This handshake repeats for a second monotonic TID
 through the scrubbed slot. There is no general TID allocation, arbitrary or
 parallel thread creation, general futex queue, or robust futex recovery yet.
-`rax = 335` (`__NR_uretprobe`) follows Linux's direct-call boundary. Ginux does
+`rax = 335` (`__NR_uretprobe`) follows Linux's direct-call boundary. Linox does
 not install return uprobes yet, so a userspace invocation generates `SIGILL`
 with `SI_KERNEL`; a registered Linux signal action can receive it, and the
 default action terminates the domain init process. The kernel-only trampoline
@@ -2008,7 +2008,7 @@ unsupported and fail explicitly rather than silently weakening a filter.
 
 `rax = 216` (`__NR_remap_file_pages`) recognizes Linux's deprecated nonlinear
 file-remapping ABI and validates its address, size, protection, and page-index
-contract. All VMAs Ginux currently creates are ineligible: file mappings are
+contract. All VMAs Linox currently creates are ineligible: file mappings are
 private and shared mappings are anonymous, so Linux-compatible `EINVAL` is
 returned. Successful nonlinear `MAP_SHARED` file remapping remains pending.
 
@@ -2040,7 +2040,7 @@ FID reporting, unlimited queues/marks, and other event classes remain pending.
 `rax = 444..446` (`landlock_create_ruleset`, `landlock_add_rule`, and
 `landlock_restrict_self`) expose Linux's disabled-LSM boundary and return
 `EOPNOTSUPP`, including the ABI-version query. This matches Linux when the
-optional Landlock security module is not enabled at boot. Ginux does not
+optional Landlock security module is not enabled at boot. Linox does not
 advertise a Landlock ABI until every access right in that ABI can be enforced;
 security-module selection remains an explicit host policy decision.
 

@@ -80,7 +80,7 @@ impl Devices {
                     .is_some_and(|name| name.starts_with("event"))
             })
             .collect();
-        // Ginux does not list /dev/input yet, so fall back to probing.
+        // Linox does not list /dev/input yet, so fall back to probing.
         if paths.is_empty() {
             paths = (0..8)
                 .map(|index| directory.join(format!("event{index}")))
@@ -96,7 +96,7 @@ impl Devices {
                     .open(path)
                     .ok()?;
                 let ranges = [absolute_range(&file, ABS_X), absolute_range(&file, ABS_Y)];
-                eprintln!("ginux-wm: input {}", path.display());
+                eprintln!("linox-wm: input {}", path.display());
                 Some(Device { file, ranges })
             })
             .collect();

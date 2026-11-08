@@ -1,7 +1,7 @@
 # Gate 11 Reduced Evidence
 
-- `topology-comparison.tsv`: Linux and Ginux medians and the favorable-direction
-  Ginux/Linux ratio for every fixed and scaled sysbench cell.
+- `topology-comparison.tsv`: Linux and Linox medians and the favorable-direction
+  Linox/Linux ratio for every fixed and scaled sysbench cell.
 - `topology-scaling.tsv`: each system's median relative to its own one-vCPU
   result.
 - `boot-topology-comparison.tsv`: three-sample boot distributions at one, two,

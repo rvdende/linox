@@ -17,7 +17,7 @@ header followed by this fixed 19-byte Ethernet frame:
 - broadcast destination `ff:ff:ff:ff:ff:ff`;
 - source `52:54:00:12:34:56`;
 - experimental EtherType `0x88b5`; and
-- payload `GINUX`.
+- payload `LINOX`.
 
 The service publishes available index one with descriptor ID zero, executes a
 full compiler fence, writes queue index one to the exact transmit notification

@@ -3,7 +3,7 @@
 **Status:** Experimental; internal to the unified EFI image.
 
 Version 5 retains the complete v4 handoff and appends a pointer and exact byte
-size for the resident controller ELF embedded in `GINUX.EFI`.
+size for the resident controller ELF embedded in `LINOX.EFI`.
 
 Manifest version 4 binds the controller's nonzero size and SHA-256 digest.
 Before ELF inspection or execution, the kernel bounds the complete range in

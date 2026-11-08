@@ -3,7 +3,7 @@
 ## Goal
 
 Replace the proof-of-function controller screen with a coherent, readable,
-responsive, and operational native Ginux GUI while preserving the accepted
+responsive, and operational native Linox GUI while preserving the accepted
 architecture and serial recovery path.
 
 ## Approved scope
@@ -148,7 +148,7 @@ architecture and serial recovery path.
 - `docs/images/controller-desktop-concept-v2.png` -> human-accepted 800 by 600
   visual reference containing Overview, Domains, Network, Storage, Devices, and
   Events navigation destinations.
-- `cargo test -p ginux-windowing -p ginux-controller-ui` -> 8 deterministic
+- `cargo test -p linox-windowing -p linox-controller-ui` -> 8 deterministic
   renderer and controller tests passed.
 - `make test-controller-desktop-visible` -> actual QEMU framebuffer rendered;
   injected keyboard and pointer input each changed the frame; PNG evidence was
@@ -170,7 +170,7 @@ architecture and serial recovery path.
 - `make test-controller-desktop-performance` -> startup 1 us,
   input-to-frame p95 426 us, steady-frame p95 282 us, recovery-cycle p95 0 us,
   and modeled working set 1,950,000 bytes; all budgets passed.
-- `cargo test -p ginux-windowing -p ginux-controller-ui` -> 13 tests passed,
+- `cargo test -p linox-windowing -p linox-controller-ui` -> 13 tests passed,
   including exact pixels, click navigation, configurable theme/layout, power
   confirmation, and live-state frame changes.
 - `make test-controller-desktop-visible` -> real QEMU interaction passed on
@@ -194,7 +194,7 @@ architecture and serial recovery path.
 - `make test-controller-desktop-performance` -> presentation startup 0 us,
   input-to-frame p95 321 us, steady-frame p95 244 us, recovery-cycle p95 0 us,
   and modeled working set 1,950,000 bytes; all budgets passed.
-- `cargo test -p ginux-windowing -p ginux-controller-ui` -> 14 tests passed,
+- `cargo test -p linox-windowing -p linox-controller-ui` -> 14 tests passed,
   including deterministic proof that the embedded Inter atlas produces partial
   antialias coverage.
 - `make test-controller-desktop-latency` -> exact 1920 by 1080 real-QEMU frames,

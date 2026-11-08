@@ -27,8 +27,8 @@ def value(workload: str, text: str) -> float:
 def linux_samples(directory: Path, workload: str) -> list[float]:
     samples = []
     pattern = re.compile(
-        rf"GINUX_BENCH_WORKLOAD_BEGIN {workload} \d+(.*?)"
-        rf"GINUX_BENCH_WORKLOAD_END {workload} \d+ 0",
+        rf"LINOX_BENCH_WORKLOAD_BEGIN {workload} \d+(.*?)"
+        rf"LINOX_BENCH_WORKLOAD_END {workload} \d+ 0",
         re.DOTALL,
     )
     for path in sorted(directory.glob("rocky-linux-run-*-results.log")):
@@ -36,14 +36,14 @@ def linux_samples(directory: Path, workload: str) -> list[float]:
     return samples
 
 
-def ginux_samples(directory: Path, workload: str) -> list[float]:
+def linox_samples(directory: Path, workload: str) -> list[float]:
     samples = []
-    paths = sorted(directory.glob("ginux-sysbench-batch-*.log"))
+    paths = sorted(directory.glob("linox-sysbench-batch-*.log"))
     if not paths:
-        paths = sorted(directory.glob(f"ginux-sysbench-{workload}-*.log"))
+        paths = sorted(directory.glob(f"linox-sysbench-{workload}-*.log"))
     pattern = re.compile(
-        rf"GINUX_BENCH_WORKLOAD_BEGIN_{workload}_[0-9]+(.*?)"
-        rf"GINUX_BENCH_WORKLOAD_END_{workload}_[0-9]+=0",
+        rf"LINOX_BENCH_WORKLOAD_BEGIN_{workload}_[0-9]+(.*?)"
+        rf"LINOX_BENCH_WORKLOAD_END_{workload}_[0-9]+=0",
         re.DOTALL,
     )
     for path in paths:
@@ -64,19 +64,19 @@ def main() -> int:
         "mutex": ("Mutex", "s/event", False),
     }
     output = directory / "sysbench-comparison.tsv"
-    rows = ["workload\tmetric\tlinux_n\tlinux_median\tginux_n\tginux_median\tginux_result"]
+    rows = ["workload\tmetric\tlinux_n\tlinux_median\tlinox_n\tlinox_median\tlinox_result"]
     for workload, (label, metric, higher_is_better) in labels.items():
         linux = linux_samples(directory, workload)
-        ginux = ginux_samples(directory, workload)
-        if not linux or not ginux:
+        linox = linox_samples(directory, workload)
+        if not linux or not linox:
             raise ValueError(f"missing matched samples for {workload}")
         linux_median = statistics.median(linux)
-        ginux_median = statistics.median(ginux)
-        ratio = ginux_median / linux_median if higher_is_better else linux_median / ginux_median
+        linox_median = statistics.median(linox)
+        ratio = linox_median / linux_median if higher_is_better else linux_median / linox_median
         result = f"{ratio:.3f}x faster" if ratio >= 1 else f"{1 / ratio:.3f}x slower"
         rows.append(
             f"{label}\t{metric}\t{len(linux)}\t{linux_median:.3f}\t"
-            f"{len(ginux)}\t{ginux_median:.3f}\t{result}"
+            f"{len(linox)}\t{linox_median:.3f}\t{result}"
         )
     output.write_text("\n".join(rows) + "\n")
     print(output.read_text(), end="")

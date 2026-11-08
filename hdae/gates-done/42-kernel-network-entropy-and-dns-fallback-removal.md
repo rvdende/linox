@@ -45,7 +45,7 @@ image.
   bytes before the issue #63 changes.
 - `make check` passed, including manifest generation at the unchanged 160-page
   capacity and the 1,032-block unsafe baseline.
-- `make test` passed with `GINUX_KERNEL_OK` and `Boot test passed`.
+- `make test` passed with `LINOX_KERNEL_OK` and `Boot test passed`.
 
 ## Delivery strategy
 

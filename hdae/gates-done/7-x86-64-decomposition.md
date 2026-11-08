@@ -73,7 +73,7 @@ boundaries established by earlier gates without changing behavior.
 - The descriptor and entry-state extraction passed formatting,
   `make architecture-check`, `make check`, and
   `make build-verification && bash tests/qemu/boot.sh`; the inventory remained
-  at 450 classified globals and QEMU reached `GINUX_KERNEL_OK` and shut down.
+  at 450 classified globals and QEMU reached `LINOX_KERNEL_OK` and shut down.
 - The extended execution-state extraction passed the same complete regression
   sequence, including Linux ELF/runtime compatibility and a clean QEMU boot.
 - The Linux syscall-dispatch extraction passed the same complete regression
@@ -85,7 +85,7 @@ boundaries established by earlier gates without changing behavior.
 - The Linux signal extraction passed formatting, architecture checks,
   `make check`, and the full deterministic QEMU verification boot, including
   signal delivery, Linux ELF/runtime compatibility, clean shutdown,
-  `GINUX_KERNEL_OK`, and `Boot test passed`.
+  `LINOX_KERNEL_OK`, and `Boot test passed`.
 - `make benchmark-compare` confirmed the pinned single-vCPU comparison inputs
   and preserved the recorded medians: CPU 1.152x faster, memory 1.095x slower,
   threads 1.012x faster, and mutex 1.089x faster than the matched Rocky/Linux
@@ -99,7 +99,7 @@ file size alone is not.
 An attempted extraction of the raw user-copy wrappers, verifier, SMAP helper,
 and copy-loop assembly compiled and passed static and unit checks but failed the
 full deterministic QEMU boot twice with widespread Linux verification errors
-and `GINUX_KERNEL_PANIC`. Keeping the assembly co-located with exception entry
+and `LINOX_KERNEL_PANIC`. Keeping the assembly co-located with exception entry
 did not restore behavior while the Rust wrappers lived in a child module. The
 attempt was reverted completely. User-copy and exception-fixup code therefore
 remain together pending a later change with explicit emitted-code comparison;

@@ -334,7 +334,7 @@ The runtime execution proof replaces the synthetic interpreter, main, and
 dependency containers with LLD outputs. LLD links a five-header interpreter,
 a nine-header `ET_DYN` PIE main with SysV hashing and one `PT_TLS`, and
 header-unmapped
-`libginux.so` and `libginux-aux.so` providers with GNU hashing. The main is
+`liblinox.so` and `liblinox-aux.so` providers with GNU hashing. The main is
 loaded with bias `0x3ff000`; the providers are authenticated against canonical
 biases `0x610000` and `0x630000` and loaded at userspace-selected biases
 `0x618000` and `0x638000`. Their
@@ -347,7 +347,7 @@ linker metadata used here: an in-range 32-byte `DT_PLTGOT`, zero `DT_DEBUG`,
 interpreter but is intentionally outside the workload's bounded syscall-copy
 extent, preserving the existing `0x405000..0x406200` data contract.
 The executable LLD-produced main carries ordered `DT_NEEDED` entries for
-`libginux.so` and `libginux-aux.so`. The parser validates both names and the
+`liblinox.so` and `liblinox-aux.so`. The parser validates both names and the
 auxiliary DSO's matching `DT_SONAME`, bounded GNU hash, symbol, and relocation
 metadata. Two independent authority records bind the ordered names to exact
 SHA-256 digests and page-aligned canonical biases. Planning authenticates both
@@ -375,8 +375,8 @@ constructor, which runs before the main entry. The interpreter retains the
 original stack pointer and invokes the preinitializer and all three constructors
 with `argc`, `argv`, and `envp` in the System V argument registers. Each
 constructor validates the initial one-argument, one-environment-entry launch
-or the replacement launch containing `/init`, `dynamic-exec`, `GINUX=1`, and
-`GINUX_MODE=exec`, including both null terminators, before publishing
+or the replacement launch containing `/init`, `dynamic-exec`, `LINOX=1`, and
+`LINOX_MODE=exec`, including both null terminators, before publishing
 initialized state. The
 main then calls both providers through its
 linker-produced PLT, after the interpreter matches both complete names through
@@ -731,7 +731,7 @@ offset `0x1000` RX at `0x638000` and offset `0x2000` RW/NX at `0x63b000`.
 The main preinitializer runs before either dependency is discovered. Only after
 that does the interpreter apply both dependencies' remaining relocations and
 the main's remaining relocations. The
-executable namespace admits exactly `libginux.so` and `libginux-aux.so`, so an
+executable namespace admits exactly `liblinox.so` and `liblinox-aux.so`, so an
 altered, reordered, or unterminated name fails closed. Syscall return
 validation accepts only the declared main and interpreter RX extents. The
 kernel authenticates and plans all images. Main and dependency payload frames
@@ -859,7 +859,7 @@ root retains supervisor-only low identity leaves around the ELF pages so the
 current low-linked kernel can survive the proof transition. The initial stack
 pointer is 16-byte aligned and names `argc = 1`, an `argv[0]` pointer to the
 NUL-terminated `/init` string, a null `argv` terminator, an `envp[0]` pointer
-to `GINUX=1`, a null `envp` terminator,
+to `LINOX=1`, a null `envp` terminator,
 `AT_PHDR` pointing at the mapped program-header table, `AT_PHENT = 56`,
 `AT_PHNUM` matching the parsed header count, `AT_PAGESZ = 4096`, `AT_BASE = 0`
 for the static image, `AT_FLAGS = 0`, `AT_UID = 0`, `AT_EUID = 0`, `AT_GID = 0`,

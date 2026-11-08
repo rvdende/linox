@@ -52,7 +52,7 @@ terminating NUL without indexing beyond the kernel's fixed output buffer.
   258, making `&output[..required]` panic.
 - `make check` -> passed, including architecture checks, warning-denying
   clippy, formatting, and unit tests.
-- `make test` on QEMU 10.1.2/TCG -> `GINUX_KERNEL_OK`; `Boot test passed.`
+- `make test` on QEMU 10.1.2/TCG -> `LINOX_KERNEL_OK`; `Boot test passed.`
 - Delivery: [PR #38](https://github.com/gmkurtzer/ginux/pull/38).
 - Source response: [issue #21 comment](https://github.com/gmkurtzer/ginux/issues/21#issuecomment-6562025264).
 - Reciprocal response: [PR #38 comment](https://github.com/gmkurtzer/ginux/pull/38#issuecomment-6562025026).

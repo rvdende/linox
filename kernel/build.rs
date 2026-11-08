@@ -39,8 +39,8 @@ fn main() {
     println!("cargo:rerun-if-changed=linux-vdso.map");
     println!("cargo:rerun-if-env-changed=CLANG");
     println!("cargo:rerun-if-env-changed=LLD");
-    println!("cargo:rerun-if-env-changed=GINUX_LINUX_PROBE_EXPORT");
-    println!("cargo:rerun-if-env-changed=GINUX_LINUX_DYNAMIC_EXPORT_DIR");
+    println!("cargo:rerun-if-env-changed=LINOX_LINUX_PROBE_EXPORT");
+    println!("cargo:rerun-if-env-changed=LINOX_LINUX_DYNAMIC_EXPORT_DIR");
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     build_linux_vdso(&output);
@@ -73,7 +73,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_EXEC_SECOND",
+            "-DLINOX_EXEC_SECOND",
             "-c",
             "linux-probe.S",
             "-o",
@@ -102,7 +102,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_CONFORMANCE_EXEC",
+            "-DLINOX_CONFORMANCE_EXEC",
             "-c",
             "linux-probe.S",
             "-o",
@@ -133,7 +133,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_SYSTEM_INIT_EXEC",
+            "-DLINOX_SYSTEM_INIT_EXEC",
             "-c",
             "linux-probe.S",
             "-o",
@@ -240,7 +240,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_LINKED",
+            "-DLINOX_LINKED",
             "-c",
             "linux-probe.S",
             "-o",
@@ -257,8 +257,8 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_LINKED",
-            "-DGINUX_GRAPH",
+            "-DLINOX_LINKED",
+            "-DLINOX_GRAPH",
             "-c",
             "linux-probe.S",
             "-o",
@@ -283,7 +283,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_LINKED",
+            "-DLINOX_LINKED",
             "-c",
             "linux-dependency.S",
             "-o",
@@ -332,7 +332,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_LINKED",
+            "-DLINOX_LINKED",
             "-c",
             "linux-interpreter.S",
             "-o",
@@ -350,7 +350,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_EXEC_SECOND",
+            "-DLINOX_EXEC_SECOND",
             "-c",
             "linux-exec-target.S",
             "-o",
@@ -367,7 +367,7 @@ fn main() {
         .args([
             "-target",
             "x86_64-none-elf",
-            "-DGINUX_SIGNAL_PROBE",
+            "-DLINOX_SIGNAL_PROBE",
             "-c",
             "linux-exec-target.S",
             "-o",
@@ -412,7 +412,7 @@ fn main() {
         "clang failed to assemble minimal Linux system init"
     );
 
-    let linked_dependency = output.join("libginux.so");
+    let linked_dependency = output.join("liblinox.so");
     let linked_dependency_script =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"))
             .join("linux-linked-dependency.ld");
@@ -427,9 +427,9 @@ fn main() {
             "-shared",
             "-nostdlib",
             "--soname",
-            "libginux.so",
+            "liblinox.so",
             "--hash-style=gnu",
-            "--init=ginux_dependency_init",
+            "--init=linox_dependency_init",
             "-T",
         ])
         .arg(&linked_dependency_script)
@@ -442,7 +442,7 @@ fn main() {
         .expect("failed to link Linux dependency");
     assert!(status.success(), "LLD failed to link Linux dependency");
 
-    let linked_auxiliary = output.join("libginux-aux.so");
+    let linked_auxiliary = output.join("liblinox-aux.so");
     let linked_auxiliary_script =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"))
             .join("linux-linked-auxiliary.ld");
@@ -456,9 +456,9 @@ fn main() {
             "-shared",
             "-nostdlib",
             "--soname",
-            "libginux-aux.so",
+            "liblinox-aux.so",
             "--hash-style=gnu",
-            "--init=ginux_auxiliary_init",
+            "--init=linox_auxiliary_init",
             "-T",
         ])
         .arg(&linked_auxiliary_script)
@@ -474,7 +474,7 @@ fn main() {
         "LLD failed to link Linux auxiliary dependency"
     );
 
-    let linked_interpreter = output.join("ld-ginux.so");
+    let linked_interpreter = output.join("ld-linox.so");
     let linked_interpreter_script =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"))
             .join("linux-linked-interpreter.ld");
@@ -514,7 +514,7 @@ fn main() {
             "-static",
             "-nostdlib",
             "-e",
-            "ginux_linux_exec_target",
+            "linox_linux_exec_target",
             "-T",
         ])
         .arg(&exec_second_script)
@@ -544,7 +544,7 @@ fn main() {
             "-static",
             "-nostdlib",
             "-e",
-            "ginux_linux_exec_target",
+            "linox_linux_exec_target",
             "-T",
         ])
         .arg(&signal_probe_script)
@@ -571,7 +571,7 @@ fn main() {
             "-static",
             "-nostdlib",
             "-e",
-            "ginux_linux_conformance",
+            "linox_linux_conformance",
             "-T",
         ])
         .arg(&conformance_script)
@@ -601,7 +601,7 @@ fn main() {
             "-static",
             "-nostdlib",
             "-e",
-            "ginux_linux_system_init",
+            "linox_linux_system_init",
             "-T",
         ])
         .arg(&system_init_script)
@@ -631,7 +631,7 @@ fn main() {
             "-pie",
             "-nostdlib",
             "--dynamic-linker",
-            "/lib64/ld-ginux.so",
+            "/lib64/ld-linox.so",
             "--hash-style=sysv",
             "-T",
         ])
@@ -655,9 +655,9 @@ fn main() {
             "-pie",
             "-nostdlib",
             "--dynamic-linker",
-            "/lib64/ld-ginux.so",
+            "/lib64/ld-linox.so",
             "--hash-style=sysv",
-            "--init=ginux_linux_init",
+            "--init=linox_linux_init",
             "-T",
         ])
         .arg(&linked_main_script)
@@ -708,7 +708,7 @@ fn main() {
         true,
         false,
     );
-    if let Some(directory) = env::var_os("GINUX_LINUX_DYNAMIC_EXPORT_DIR") {
+    if let Some(directory) = env::var_os("LINOX_LINUX_DYNAMIC_EXPORT_DIR") {
         let directory = PathBuf::from(directory);
         fs::create_dir_all(&directory).expect("failed to create Linux dynamic export directory");
         fs::copy(&linked_main, directory.join("linux-linked-main.elf"))
@@ -718,11 +718,11 @@ fn main() {
             directory.join("linux-linked-graph-main.elf"),
         )
         .expect("failed to export linked Linux dependency-graph main");
-        fs::copy(&linked_dependency, directory.join("libginux.so"))
+        fs::copy(&linked_dependency, directory.join("liblinox.so"))
             .expect("failed to export linked Linux dependency");
-        fs::copy(&linked_auxiliary, directory.join("libginux-aux.so"))
+        fs::copy(&linked_auxiliary, directory.join("liblinox-aux.so"))
             .expect("failed to export linked Linux auxiliary dependency");
-        fs::copy(&linked_interpreter, directory.join("ld-ginux.so"))
+        fs::copy(&linked_interpreter, directory.join("ld-linox.so"))
             .expect("failed to export linked Linux interpreter");
         fs::copy(&exec_second, directory.join("linux-exec-second.elf"))
             .expect("failed to export second Linux exec target");
@@ -747,7 +747,7 @@ fn main() {
         "-static",
         "-nostdlib",
         "-e",
-        "ginux_linux_probe",
+        "linox_linux_probe",
         "-T",
     ])
     .arg(&link_script)
@@ -763,7 +763,7 @@ fn main() {
     let status = link.status().expect("failed to run LLD for Linux probe");
     assert!(status.success(), "LLD failed to link Linux probe");
     assert_linux_elf_fixture(&linked, "static Linux probe", 2, false, false, false);
-    if let Some(destination) = env::var_os("GINUX_LINUX_PROBE_EXPORT") {
+    if let Some(destination) = env::var_os("LINOX_LINUX_PROBE_EXPORT") {
         fs::copy(&linked, destination).expect("failed to export linked Linux probe");
     }
 }

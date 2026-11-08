@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{compiler_fence, Ordering},
 };
 
-use ginux_native_abi::{
+use linox_native_abi::{
     native_control_abi_is_compatible, NativeControlDescriptorV4, NativeServiceBootV0,
     NATIVE_BLOCK_WAIT_CANCELLED, NATIVE_BLOCK_WAIT_FAILED, NATIVE_BLOCK_WAIT_NOTIFIED,
     NATIVE_BLOCK_WAIT_OPERATION, NATIVE_BLOCK_WAIT_PREPARED, NATIVE_CONTROL_DESCRIPTOR_OPERATION,
@@ -15,8 +15,8 @@ use ginux_native_abi::{
     NATIVE_SERVICE_EXIT_COMPLETED, NATIVE_SERVICE_EXIT_OPERATION, NATIVE_SERVICE_EXIT_REJECTED,
     NATIVE_SERVICE_EXIT_RESTART_REQUIRED,
 };
-use ginux_volume_format::SECTOR_SIZE;
-use ginux_volume_service::{commit, recover_with_slot, BlockDevice, CommitError, ScanError};
+use linox_volume_format::SECTOR_SIZE;
+use linox_volume_service::{commit, recover_with_slot, BlockDevice, CommitError, ScanError};
 
 const QUEUE_SIZE: u16 = 8;
 const DESC_NEXT: u16 = 1;
@@ -47,7 +47,7 @@ const FEATURE_FLUSH: u32 = 1 << 9;
 const FEATURE_VERSION_1: u32 = 1;
 const FEATURE_ACCESS_PLATFORM: u32 = 1 << 1;
 const VOLUME_SECTOR_BASE: usize = 4;
-const PAYLOAD: &[u8] = b"ginux-isolated-volume\n";
+const PAYLOAD: &[u8] = b"linox-isolated-volume\n";
 
 global_asm!(
     r#"
@@ -55,7 +55,7 @@ global_asm!(
     .global _start
 _start:
     mov rdi, rbx
-    call ginux_volume_service_main
+    call linox_volume_service_main
     int3
 "#
 );
@@ -66,7 +66,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[no_mangle]
-extern "C" fn ginux_volume_service_main(info: *const NativeServiceBootV0) -> ! {
+extern "C" fn linox_volume_service_main(info: *const NativeServiceBootV0) -> ! {
     if !native_control_abi_is_compatible(discover_control_abi()) {
         fail();
     }

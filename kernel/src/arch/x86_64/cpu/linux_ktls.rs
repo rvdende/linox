@@ -1,6 +1,6 @@
 //! Kernel TLS's socket options and control messages: setsockopt and
 //! getsockopt of TCP_ULP and SOL_TLS, sendmsg's TLS_SET_RECORD_TYPE and
-//! recvmsg's TLS_GET_RECORD_TYPE (`linux_socket::tls`, `ginux_ktls`).
+//! recvmsg's TLS_GET_RECORD_TYPE (`linux_socket::tls`, `linox_ktls`).
 
 use super::*;
 
@@ -69,8 +69,8 @@ pub(super) fn linux_tls_setsockopt(
     length: u64,
 ) -> u64 {
     match option {
-        ginux_ktls::TLS_TX | ginux_ktls::TLS_RX => {
-            if value == 0 || length < ginux_ktls::CRYPTO_INFO_HEADER as u64 {
+        linox_ktls::TLS_TX | linox_ktls::TLS_RX => {
+            if value == 0 || length < linox_ktls::CRYPTO_INFO_HEADER as u64 {
                 return LINUX_EINVAL;
             }
             // Longer than any structure offered is EINVAL anyway; read no
@@ -84,12 +84,12 @@ pub(super) fn linux_tls_setsockopt(
             }
             crate::linux_socket::set_tls_crypto(
                 slot,
-                option == ginux_ktls::TLS_RX,
+                option == linox_ktls::TLS_RX,
                 &bytes[..length],
             )
             .map_or_else(linux_ktls_errno, |()| 0)
         }
-        ginux_ktls::TLS_TX_ZEROCOPY_RO | ginux_ktls::TLS_RX_EXPECT_NO_PAD => {
+        linox_ktls::TLS_TX_ZEROCOPY_RO | linox_ktls::TLS_RX_EXPECT_NO_PAD => {
             if value == 0 || length != 4 {
                 return LINUX_EINVAL;
             }
@@ -97,7 +97,7 @@ pub(super) fn linux_tls_setsockopt(
             if !copy_from_linux_user(value, &mut supplied) {
                 return LINUX_EFAULT;
             }
-            let flag = if option == ginux_ktls::TLS_TX_ZEROCOPY_RO {
+            let flag = if option == linox_ktls::TLS_TX_ZEROCOPY_RO {
                 crate::linux_socket::TlsFlag::ZerocopyReadOnly
             } else {
                 crate::linux_socket::TlsFlag::ExpectNoPad
@@ -124,16 +124,16 @@ pub(super) fn linux_tls_getsockopt(
     }
     let supplied = i32::from_ne_bytes(supplied);
     match option {
-        ginux_ktls::TLS_TX | ginux_ktls::TLS_RX => {
-            if value == 0 || supplied < ginux_ktls::CRYPTO_INFO_HEADER as i32 {
+        linox_ktls::TLS_TX | linox_ktls::TLS_RX => {
+            if value == 0 || supplied < linox_ktls::CRYPTO_INFO_HEADER as i32 {
                 return LINUX_EINVAL;
             }
-            let info = match crate::linux_socket::tls_crypto(slot, option == ginux_ktls::TLS_RX) {
+            let info = match crate::linux_socket::tls_crypto(slot, option == linox_ktls::TLS_RX) {
                 Ok(info) => info,
                 Err(errno) => return linux_ktls_errno(errno),
             };
             let wanted = supplied as usize;
-            if wanted != ginux_ktls::CRYPTO_INFO_HEADER && wanted != info.len() {
+            if wanted != linox_ktls::CRYPTO_INFO_HEADER && wanted != info.len() {
                 return LINUX_EINVAL;
             }
             if copy_to_linux_user(value, &info[..wanted]) {
@@ -142,11 +142,11 @@ pub(super) fn linux_tls_getsockopt(
                 LINUX_EFAULT
             }
         }
-        ginux_ktls::TLS_TX_ZEROCOPY_RO | ginux_ktls::TLS_RX_EXPECT_NO_PAD => {
+        linox_ktls::TLS_TX_ZEROCOPY_RO | linox_ktls::TLS_RX_EXPECT_NO_PAD => {
             if supplied != 4 {
                 return LINUX_EINVAL;
             }
-            let flag = if option == ginux_ktls::TLS_TX_ZEROCOPY_RO {
+            let flag = if option == linox_ktls::TLS_TX_ZEROCOPY_RO {
                 crate::linux_socket::TlsFlag::ZerocopyReadOnly
             } else {
                 crate::linux_socket::TlsFlag::ExpectNoPad
@@ -188,8 +188,8 @@ pub(super) fn linux_tls_send_control(
         if message_length < 16 || at + message_length > length {
             return Some(LINUX_EINVAL);
         }
-        if u64::try_from(level).ok() == Some(ginux_ktls::SOL_TLS) {
-            if kind != ginux_ktls::TLS_SET_RECORD_TYPE
+        if u64::try_from(level).ok() == Some(linox_ktls::SOL_TLS) {
+            if kind != linox_ktls::TLS_SET_RECORD_TYPE
                 || message_length != RECORD_TYPE_MESSAGE
                 || more
             {
@@ -229,8 +229,8 @@ pub(super) fn linux_tls_record_type_message(
     }
     let mut message = [0_u8; 24];
     message[..8].copy_from_slice(&(RECORD_TYPE_MESSAGE as u64).to_ne_bytes());
-    message[8..12].copy_from_slice(&(ginux_ktls::SOL_TLS as i32).to_ne_bytes());
-    message[12..16].copy_from_slice(&ginux_ktls::TLS_GET_RECORD_TYPE.to_ne_bytes());
+    message[8..12].copy_from_slice(&(linox_ktls::SOL_TLS as i32).to_ne_bytes());
+    message[12..16].copy_from_slice(&linox_ktls::TLS_GET_RECORD_TYPE.to_ne_bytes());
     message[16] = kind;
     let space = (room as usize).min(message.len());
     Some(if copy_to_linux_user(address, &message[..space]) {

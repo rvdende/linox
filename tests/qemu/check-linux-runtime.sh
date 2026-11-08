@@ -17,7 +17,7 @@ check_category() {
     local missing=0
 
     for marker in "$@"; do
-        if ! grep -Fq "ginux: ${marker}" "$boot_output"; then
+        if ! grep -Fq "linox: ${marker}" "$boot_output"; then
             echo "Linux runtime regression: ${category}: missing '${marker}'." >&2
             missing=1
         fi
@@ -83,7 +83,7 @@ check_category "Exec lifecycle" \
     "static Linux mmap registry empty across exec" \
     "interpreted Linux mmap registry empty across exec"
 
-if [[ "$(grep -Fc 'ginux: measured Linux exec image replaced atomically' "$boot_output")" -ne 5 ]]; then
+if [[ "$(grep -Fc 'linox: measured Linux exec image replaced atomically' "$boot_output")" -ne 5 ]]; then
     echo "Linux runtime regression: Exec lifecycle: expected five atomic image replacements." >&2
     failed=1
 fi

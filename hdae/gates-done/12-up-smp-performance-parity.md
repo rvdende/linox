@@ -2,13 +2,13 @@
 
 ## Goal
 
-Make Rocky-on-Ginux meet or beat matched Rocky-on-Linux performance across the
+Make Rocky-on-Linox meet or beat matched Rocky-on-Linux performance across the
 complete fixed-thread and scaled-thread benchmark matrix. A result within four
 percent of Linux is acceptable; the target is faster than Linux in every cell.
 
 ## Approved scope
 
-- Reproduce and freeze fresh merged-`main` Linux and Ginux baselines.
+- Reproduce and freeze fresh merged-`main` Linux and Linox baselines.
 - Profile scheduler, yield, futex, context-switch, timer, IPI, memory, and
   related kernel paths with bounded diagnostics that are disabled by default.
 - Optimize general kernel mechanisms in order of measured impact.
@@ -23,7 +23,7 @@ percent of Linux is acceptable; the target is faster than Linux in every cell.
 
 - Sysbench-specific kernel behavior, benchmark detection, or workload changes.
 - Different QEMU resources, binaries, sample counts, or durations for Linux and
-  Ginux.
+  Linox.
 - Native-hardware or broad production-performance claims.
 - Treating boot timing as a kernel-speed comparison or a passage criterion.
 - Unrelated feature, compatibility, UI, storage, or networking work.
@@ -58,8 +58,8 @@ percent of Linux is acceptable; the target is faster than Linux in every cell.
 - Scaled-mode workloads use one, two, and four threads at the corresponding
   vCPU counts.
 - Every CPU, memory, thread-yield, and mutex cell contains nine successful
-  Linux samples and nine successful Ginux samples.
-- Every favorable-direction Ginux/Linux median ratio is at least 0.96x. The
+  Linux samples and nine successful Linox samples.
+- Every favorable-direction Linox/Linux median ratio is at least 0.96x. The
   optimization target is greater than 1.00x in every cell.
 - Both systems use the identical pinned x86-64 sysbench binary, Q35 machine,
   CPU model, 2 GiB memory, workload duration, and topology.
@@ -112,7 +112,7 @@ percent of Linux is acceptable; the target is faster than Linux in every cell.
   2,540 MiB/s memory median and 1.061-second mutex median, versus matched Linux
   medians of 2,496 MiB/s and 1.096 seconds. Thread yield also remained above
   Linux.
-- The final matrix contains nine matched Linux and Ginux samples in every cell.
+- The final matrix contains nine matched Linux and Linox samples in every cell.
   Every favorable-direction ratio is at least `0.970x`; eighteen of twenty
   unique cells beat Linux. Fixed 2-vCPU CPU throughput is `0.982x`, and scaled
   4-vCPU mutex is `0.970x`.

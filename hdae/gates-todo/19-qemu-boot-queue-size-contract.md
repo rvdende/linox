@@ -52,7 +52,7 @@ sizes remain rejected.
 - Feed representative valid, invalid, and CR-terminated lines to the exact
   regular expression -> 256 and 1024 pass; invalid sizes fail.
 - `make check` -> all static, architecture, lint, and unit checks pass.
-- `make test` -> the complete QEMU verification boot emits `GINUX_KERNEL_OK`
+- `make test` -> the complete QEMU verification boot emits `LINOX_KERNEL_OK`
   and `Boot test passed.`
 
 ## Evidence
@@ -63,7 +63,7 @@ sizes remain rejected.
   1024 line; rejected 0, 7, 255, 1000, and 65536.
 - `make check` -> passed all builds, static checks, architecture checks,
   warning-denying lints, and unit tests.
-- `make test` on QEMU 10.1.2 under TCG -> emitted `GINUX_KERNEL_OK` and
+- `make test` on QEMU 10.1.2 under TCG -> emitted `LINOX_KERNEL_OK` and
   `Boot test passed.`
 - Pull request: https://github.com/gmkurtzer/ginux/pull/13
 - Issue response:

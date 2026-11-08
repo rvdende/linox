@@ -1,5 +1,5 @@
 /*
- * ltp-runner: runs LTP tests one at a time inside a Ginux domain and
+ * ltp-runner: runs LTP tests one at a time inside a Linox domain and
  * reports each on the console for tests/qemu/ltp.sh.
  *
  *   ltp-runner RUNLIST FIRST
@@ -20,7 +20,7 @@
  * LEFTOVER, so they cannot disturb the next test.
  *
  * This replaces busybox timeout, whose vfork-and-daemonize watcher takes the
- * whole domain down on Ginux today. On Ginux the alarm does not fire while
+ * whole domain down on Linox today. On Linox the alarm does not fire while
  * another process spins on the CPU, so the host (tests/ltp/driver.py) keeps
  * its own watchdog as well.
  */

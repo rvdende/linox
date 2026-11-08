@@ -14,7 +14,7 @@ use generated_boot::{
     BOOT_MANIFEST, BOOT_MANIFEST_SHA256, BOOT_MANIFEST_SIGNATURE, CONTROLLER_RUNTIME,
     CONTROL_PLANE_BUNDLE, ROOT_IMAGE,
 };
-use ginux_kernel::{
+use linox_kernel::{
     kernel_entry, BootFramebuffer, BootInfo, ResetSystem, BOOT_INFO_MAGIC, BOOT_INFO_VERSION,
     FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_NONE, FRAMEBUFFER_FORMAT_RGBX,
 };
@@ -312,7 +312,7 @@ extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable)
         let (image_base, image_size) = loaded_image_bounds(image, boot_services);
         // tests/qemu/efi-load-above-4g.sh reads where the image was loaded
         // and where it continues.
-        serial_write("ginux: EFI image loaded at ");
+        serial_write("linox: EFI image loaded at ");
         serial_write_hex(image_base as u64);
         serial_write(" size ");
         serial_write_hex(image_size as u64);
@@ -323,7 +323,7 @@ extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable)
         // Firmware placed the image above 4 GiB, which the kernel's initial
         // identity map does not reach. Continue in a relocated copy.
         let relocated = relocate_below_limit(boot_services, image_base, image_size);
-        serial_write("ginux: EFI image relocated below 4 GiB to ");
+        serial_write("linox: EFI image relocated below 4 GiB to ");
         serial_write_hex(relocated as u64);
         serial_write("\r\n");
         let offset = continue_boot as *const () as usize - image_base as usize;
@@ -341,7 +341,7 @@ unsafe extern "efiapi" fn continue_boot(
     image_size: usize,
 ) -> EfiStatus {
     if loaded_image_bounds(image, (*system_table).boot_services).0 != image_base {
-        serial_write("ginux: EFI image entered at relocated base ");
+        serial_write("linox: EFI image entered at relocated base ");
         serial_write_hex(running_image_base() as u64);
         serial_write("\r\n");
     }
@@ -512,7 +512,7 @@ unsafe fn exit_boot_services(
 }
 
 /// Describes the framebuffer of the active Graphics Output Protocol mode, or
-/// returns an empty description when there is none Ginux can draw on.
+/// returns an empty description when there is none Linox can draw on.
 unsafe fn graphics_framebuffer(boot_services: *mut EfiBootServices) -> BootFramebuffer {
     let none = BootFramebuffer {
         base: 0,
@@ -635,7 +635,7 @@ unsafe fn loaded_image_bounds(
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    serial_write("GINUX_BOOT_PANIC\r\n");
+    serial_write("LINOX_BOOT_PANIC\r\n");
     if let Some(location) = info.location() {
         serial_write(location.file());
         serial_write(":");

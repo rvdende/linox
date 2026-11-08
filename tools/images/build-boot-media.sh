@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Package the unified Ginux EFI image as removable boot media.
+# Package the unified Linox EFI image as removable boot media.
 #
 # Produces, under build/media/:
-#   ginux.iso      UEFI-bootable hybrid ISO. Its El Torito EFI image is also
+#   linox.iso      UEFI-bootable hybrid ISO. Its El Torito EFI image is also
 #                  exposed as a GPT EFI system partition, so the same file can
 #                  be burned to optical media or written to a USB stick.
-#   ginux-usb.img  Raw GPT disk image with a single EFI system partition, for
+#   linox-usb.img  Raw GPT disk image with a single EFI system partition, for
 #                  firmware that does not boot hybrid ISOs from USB.
 #
 # Neither image needs root to build: the FAT filesystem is written with mtools
@@ -14,8 +14,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-efi_image="${GINUX_EFI_IMAGE:-$repo_root/build/esp/EFI/BOOT/BOOTX64.EFI}"
-output_dir="${GINUX_MEDIA_DIR:-$repo_root/build/media}"
+efi_image="${LINOX_EFI_IMAGE:-$repo_root/build/esp/EFI/BOOT/BOOTX64.EFI}"
+output_dir="${LINOX_MEDIA_DIR:-$repo_root/build/media}"
 mebibyte=$((1024 * 1024))
 
 for command in mkfs.vfat mmd mcopy sgdisk xorriso; do
@@ -38,7 +38,7 @@ efi_bytes=$(stat -c '%s' "$efi_image")
 fat_mib=$(((efi_bytes + mebibyte - 1) / mebibyte + 4))
 fat_image="$work_dir/efiboot.img"
 truncate -s "${fat_mib}M" "$fat_image"
-mkfs.vfat -n GINUX "$fat_image" >/dev/null
+mkfs.vfat -n LINOX "$fat_image" >/dev/null
 mmd -i "$fat_image" ::/EFI ::/EFI/BOOT
 mcopy -i "$fat_image" "$efi_image" ::/EFI/BOOT/BOOTX64.EFI
 
@@ -46,13 +46,13 @@ mcopy -i "$fat_image" "$efi_image" ::/EFI/BOOT/BOOTX64.EFI
 # the El Torito EFI boot entry at the same bytes.
 iso_root="$work_dir/iso"
 mkdir -p "$iso_root"
-printf 'Ginux UEFI boot media\n' >"$iso_root/README.TXT"
-iso="$output_dir/ginux.iso"
+printf 'Linox UEFI boot media\n' >"$iso_root/README.TXT"
+iso="$output_dir/linox.iso"
 rm -f "$iso"
 xorriso -as mkisofs \
     -quiet \
     -o "$iso" \
-    -V GINUX \
+    -V LINOX \
     -R -J \
     -append_partition 2 0xef "$fat_image" \
     -appended_part_as_gpt \
@@ -62,13 +62,13 @@ xorriso -as mkisofs \
 
 # Raw USB image: 1 MiB for the protective MBR and primary GPT, the EFI
 # system partition, and 1 MiB for the backup GPT.
-usb="$output_dir/ginux-usb.img"
+usb="$output_dir/linox-usb.img"
 rm -f "$usb"
 truncate -s "$((fat_mib + 2))M" "$usb"
 sgdisk --clear \
     --new=1:2048:+"${fat_mib}M" \
     --typecode=1:ef00 \
-    --change-name=1:"Ginux EFI" \
+    --change-name=1:"Linox EFI" \
     "$usb" >/dev/null
 dd if="$fat_image" of="$usb" bs=1M seek=1 conv=notrunc status=none
 

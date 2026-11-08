@@ -25,7 +25,7 @@ reject_text() {
     fi
 }
 
-require_text "$architecture" 'One authenticated `GINUX.EFI`'
+require_text "$architecture" 'One authenticated `LINOX.EFI`'
 require_text "$architecture" 'executes in ring 3'
 require_text "$architecture" 'Rocky Linux 10 x86-64'
 require_text "$architecture" 'stable kABI'
@@ -38,7 +38,7 @@ for checkpoint in C0 C1 C2 C3 C4 C5 C6 C7; do
     require_text "$roadmap" "## ${checkpoint}:"
 done
 
-reject_text "$architecture" 'Ginux does not expose Linux kernel internals or load unmodified Linux `.ko` files into its kernel'
+reject_text "$architecture" 'Linox does not expose Linux kernel internals or load unmodified Linux `.ko` files into its kernel'
 reject_text "$architecture" 'No third-party code executes in the kernel address space'
 reject_text "$architecture" 'their implementations do not execute in the kernel'
 reject_text "$architecture" 'The first proof of concept may unpack a CPIO/initramfs'

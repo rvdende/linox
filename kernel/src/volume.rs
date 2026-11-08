@@ -4,10 +4,10 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ginux_volume_format::{encode, PAYLOAD_CAPACITY, SECTOR_SIZE, SLOT_COUNT};
-use ginux_volume_service::{commit_through, recover_with_slot, CommitStage, ScanError};
+use linox_volume_format::{encode, PAYLOAD_CAPACITY, SECTOR_SIZE, SLOT_COUNT};
+use linox_volume_service::{commit_through, recover_with_slot, CommitStage, ScanError};
 
-pub(crate) use ginux_volume_service::{
+pub(crate) use linox_volume_service::{
     commit, commit_local_config, commit_oci_catalog, open_host_volume, recover,
     recover_local_config, recover_oci_catalog, BlockDevice, CommitError, HostVolumeDisposition,
     LocalConfigRecord,

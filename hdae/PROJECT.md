@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This Ginux research iteration adds a native graphical controller environment
+This Linox research iteration adds a native graphical controller environment
 without turning the controller into a Linux desktop or adopting Wayland as the
-host display server. Ginux will own the physical display and input seat, render
+host display server. Linox will own the physical display and input seat, render
 its own trusted desktop in ring 3, and present Linux domain desktops as
 revocable surfaces within that environment.
 
-The work is informed by GitHub issue #12, but it is a clean Ginux design rather
+The work is informed by GitHub issue #12, but it is a clean Linox design rather
 than a merge of the contributor prototype.
 
 ## Intended outcome
@@ -27,9 +27,9 @@ than a merge of the contributor prototype.
 
 ## Users
 
-- Operators who configure Ginux, devices, networks, storage, and domains.
-- Linux desktop users running an unmodified userspace inside a Ginux domain.
-- Developers building native Ginux controller applications.
+- Operators who configure Linox, devices, networks, storage, and domains.
+- Linux desktop users running an unmodified userspace inside a Linox domain.
+- Developers building native Linox controller applications.
 
 ## Scope
 
@@ -56,7 +56,7 @@ and domain bridge are one inseparable vertical feature.
 
 ## Success
 
-The batch succeeds when Ginux boots a responsive native controller desktop,
+The batch succeeds when Linox boots a responsive native controller desktop,
 manages domains through a native graphical application, runs an unmodified
 Wayland demonstration inside a Linux domain, presents that desktop windowed and
 full screen, safely recovers focus and resources on failure, and passes its

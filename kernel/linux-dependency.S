@@ -1,14 +1,14 @@
 .intel_syntax noprefix
 .section .text
-.global ginux_dependency_symbol
-.type ginux_dependency_symbol,@function
-.Lginux_dependency_local:
-ginux_dependency_symbol:
-#ifdef GINUX_LINKED
+.global linox_dependency_symbol
+.type linox_dependency_symbol,@function
+.Llinox_dependency_local:
+linox_dependency_symbol:
+#ifdef LINOX_LINKED
     cmp qword ptr [rip + .Ldependency_initialized], 0x4758
     jne .Ldependency_invalid
 #endif
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
     mov edx, 0x610100
     cmp qword ptr [0x6131c0], rdx
     jne .Ldependency_invalid
@@ -24,14 +24,14 @@ ginux_dependency_symbol:
     xor eax, eax
     ret
 
-#ifdef GINUX_LINKED
-.global ginux_dependency_init
-.hidden ginux_dependency_init
-.type ginux_dependency_init,@function
-ginux_dependency_init:
+#ifdef LINOX_LINKED
+.global linox_dependency_init
+.hidden linox_dependency_init
+.type linox_dependency_init,@function
+linox_dependency_init:
     cmp qword ptr [0x405008], 1
     jne .Ldependency_init_done
-    mov rdx, qword ptr [rip + ginux_dependency_tls_template@GOTTPOFF]
+    mov rdx, qword ptr [rip + linox_dependency_tls_template@GOTTPOFF]
     movabs rax, 0x0a21534c544f5344
     cmp qword ptr fs:[rdx], rax
     jne .Ldependency_init_done
@@ -42,8 +42,8 @@ ginux_dependency_init:
     ret
 
 .Ldependency_anchor:
-    mov rax, qword ptr [rip + ginux_dependency_symbol@GOTPCREL]
-    call ginux_dependency_symbol@PLT
+    mov rax, qword ptr [rip + linox_dependency_symbol@GOTPCREL]
+    call linox_dependency_symbol@PLT
     ret
 
 .Ldependency_initialize:
@@ -66,11 +66,11 @@ ginux_dependency_init:
     cmp byte ptr [rax + 12], 0
     jne .Ldependency_initialize_done
     mov rax, qword ptr [rdx]
-    movabs rcx, 0x00313d58554e4947
+    movabs rcx, 0x00313d584f4e494c
     cmp qword ptr [rax], rcx
     jne .Ldependency_initialize_done
     mov rax, qword ptr [rdx + 8]
-    movabs rcx, 0x4f4d5f58554e4947
+    movabs rcx, 0x4f4d5f584f4e494c
     cmp qword ptr [rax], rcx
     jne .Ldependency_initialize_done
     movabs rcx, 0x00636578653d4544
@@ -89,7 +89,7 @@ ginux_dependency_init:
     cmp word ptr [rax + 4], 0x74
     jne .Ldependency_initialize_done
     mov rax, qword ptr [rdx]
-    movabs rcx, 0x00313d58554e4947
+    movabs rcx, 0x00313d584f4e494c
     cmp qword ptr [rax], rcx
     jne .Ldependency_initialize_done
     mov qword ptr [rip + .Ldependency_initialized], 0x4758
@@ -114,15 +114,15 @@ ginux_dependency_init:
 
 .section .tdata,"awT",@progbits
 .balign 8
-.global ginux_dependency_tls_template
-.hidden ginux_dependency_tls_template
-ginux_dependency_tls_template:
+.global linox_dependency_tls_template
+.hidden linox_dependency_tls_template
+linox_dependency_tls_template:
     .ascii "DSOTLS!\n"
 
 .section .tbss,"awT",@nobits
 .balign 8
-.global ginux_dependency_tls_zero
-.hidden ginux_dependency_tls_zero
-ginux_dependency_tls_zero:
+.global linox_dependency_tls_zero
+.hidden linox_dependency_tls_zero
+linox_dependency_tls_zero:
     .space 8
 #endif

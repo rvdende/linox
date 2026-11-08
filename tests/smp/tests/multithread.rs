@@ -1,8 +1,8 @@
 //! One process's threads run on all the CPUs of a domain given four.
 //!
-//! Boots the ESP in `GINUX_ESP_DIR` (default `build/esp`) under QEMU with
+//! Boots the ESP in `LINOX_ESP_DIR` (default `build/esp`) under QEMU with
 //! four CPUs, starts a domain on the built-in Rust image with `cpu=4`, and
-//! in its shell runs `ginux-threadtest` (userland/threadtest):
+//! in its shell runs `linox-threadtest` (userland/threadtest):
 //!
 //! 1. `spin 1` and `spin 4`: the same fixed work per thread; four threads
 //!    on four CPUs must finish in less than 2.5 times the one thread's
@@ -16,9 +16,9 @@
 //!    CPUs, which must end them;
 //! 7. `segv`: a thread faults while others spin; the process dies (139).
 //!    Steps 6 and 7 run `EXIT_ROUNDS` times.
-//! 8. `ginux-memtest returns` (userland/memtest): memory comes back after
+//! 8. `linox-memtest returns` (userland/memtest): memory comes back after
 //!    bursts of processes, fork-and-exec children and shared mappings of
-//!    removed files; `ginux-memtest slab`: the kernel heap's slabs come
+//!    removed files; `linox-memtest slab`: the kernel heap's slabs come
 //!    back after thousands of files with long paths are made and removed.
 //!
 //! Every wait fails at once on a kernel failure line, a wrong status, or a
@@ -63,7 +63,7 @@ impl Shell {
         text
     }
 
-    /// The `ms=` figure a `ginux-threadtest` run printed.
+    /// The `ms=` figure a `linox-threadtest` run printed.
     fn milliseconds(text: &str) -> u64 {
         text.lines()
             .find_map(|line| {
@@ -81,14 +81,14 @@ const EXIT_ROUNDS: u32 = 5;
 fn multithread() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repo = repo.canonicalize().unwrap();
-    let cpus: u32 = std::env::var("GINUX_SMP_TEST_CPUS")
+    let cpus: u32 = std::env::var("LINOX_SMP_TEST_CPUS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(4);
     let mut guest = Guest::boot(&repo, &repo.join("target/multithread-test"), cpus, "2G");
-    let mut at = guest.wait_for("ginux> ", 0, Duration::from_secs(90));
+    let mut at = guest.wait_for("linox> ", 0, Duration::from_secs(90));
     guest.send("domain new threads");
-    at = guest.wait_for("ginux> ", at, Duration::from_secs(20));
+    at = guest.wait_for("linox> ", at, Duration::from_secs(20));
     guest.send(&format!(
         "domain set threads image=builtin://rust init=/sbin/init memory-mib=1024 cpu={cpus}"
     ));
@@ -101,13 +101,13 @@ fn multithread() {
 
     let one = Shell::milliseconds(&shell.expect(
         "SPIN1",
-        "ginux-threadtest spin 1",
+        "linox-threadtest spin 1",
         0,
         Some("THREADTEST OK spin"),
     ));
     let four = Shell::milliseconds(&shell.expect(
         "SPIN4",
-        "ginux-threadtest spin 4",
+        "linox-threadtest spin 4",
         0,
         Some("THREADTEST OK spin"),
     ));
@@ -117,26 +117,26 @@ fn multithread() {
         "four threads took {four} ms, one {one} ms: not running on several CPUs; see {}",
         shell.guest.log().display()
     );
-    shell.expect("PINGPONG", "ginux-threadtest pingpong 20000", 0, Some("THREADTEST OK pingpong"));
-    shell.expect("SLEEP", "ginux-threadtest sleep", 0, Some("THREADTEST OK sleep"));
-    shell.expect("QUEUE", "ginux-threadtest queue", 0, Some("THREADTEST OK queue"));
-    shell.expect("SPAWN", "ginux-threadtest spawn 10", 0, Some("THREADTEST OK spawn"));
+    shell.expect("PINGPONG", "linox-threadtest pingpong 20000", 0, Some("THREADTEST OK pingpong"));
+    shell.expect("SLEEP", "linox-threadtest sleep", 0, Some("THREADTEST OK sleep"));
+    shell.expect("QUEUE", "linox-threadtest queue", 0, Some("THREADTEST OK queue"));
+    shell.expect("SPAWN", "linox-threadtest spawn 10", 0, Some("THREADTEST OK spawn"));
     // A process pinned to a CPU moves there at once, and its sleeps end
     // there: pinned to another CPU, one ran on in place and, asleep, was
     // never resumed.
-    shell.expect("PIN", "ginux-threadtest pin", 0, Some("THREADTEST OK pin"));
+    shell.expect("PIN", "linox-threadtest pin", 0, Some("THREADTEST OK pin"));
     // A few rounds: the process ends while its threads run elsewhere, and
     // the race that lets one of them outlive its memory takes a few tries
     // to show on a quiet host.
     for round in 0..EXIT_ROUNDS {
-        shell.expect(&format!("EXIT{round}"), "ginux-threadtest exit", 7, Some("THREADTEST OK exit"));
-        shell.expect(&format!("SEGV{round}"), "ginux-threadtest segv", 139, None);
+        shell.expect(&format!("EXIT{round}"), "linox-threadtest exit", 7, Some("THREADTEST OK exit"));
+        shell.expect(&format!("SEGV{round}"), "linox-threadtest segv", 139, None);
     }
-    let returns = shell.expect("RETURNS", "ginux-memtest returns", 0, Some("RETURNS OK"));
+    let returns = shell.expect("RETURNS", "linox-memtest returns", 0, Some("RETURNS OK"));
     for line in returns.lines().filter(|line| line.starts_with("RETURNS ")) {
         eprintln!("multithread: {line}");
     }
-    let slab = shell.expect("SLAB", "ginux-memtest slab", 0, Some("SLAB OK"));
+    let slab = shell.expect("SLAB", "linox-memtest slab", 0, Some("SLAB OK"));
     for line in slab.lines().filter(|line| line.starts_with("SLAB ")) {
         eprintln!("multithread: {line}");
     }

@@ -205,13 +205,13 @@ pub(crate) fn times(cpu: usize) -> Option<[u64; 4]> {
 /// milliseconds.
 pub(crate) fn report() {
     let frequency = timer::monotonic_frequency().unwrap_or(1).max(1);
-    crate::serial_write("ginux: sysrq: cpu time (ms) cpu/user/kernel/idle/lock-wait, runs:\r\n");
+    crate::serial_write("linox: sysrq: cpu time (ms) cpu/user/kernel/idle/lock-wait, runs:\r\n");
     for (cpu, runs) in RUNS.iter().enumerate() {
         let Some([total, user, idle, lock]) = times(cpu) else {
             continue;
         };
         let kernel = total.saturating_sub(user).saturating_sub(idle);
-        crate::serial_write("ginux: cpu ");
+        crate::serial_write("linox: cpu ");
         crate::serial_write_u64(cpu as u64);
         for value in [user, kernel, idle, lock] {
             crate::serial_write(" ");

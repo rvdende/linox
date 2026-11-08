@@ -1,6 +1,6 @@
 # Host Storage
 
-Ginux uses one host-owned block volume for durable system objects. Under QEMU,
+Linox uses one host-owned block volume for durable system objects. Under QEMU,
 `make run` creates `build/qemu/volume.raw` as a sparse 64 GiB file. The volume
 size is not a runtime allocation cap: sparse backing storage grows as sectors
 are written, and workload memory remains independently configured per domain.
@@ -44,7 +44,7 @@ not silently reformatted.
 ## Development lifecycle
 
 - `make run` creates the volume if it is absent and recovers it otherwise.
-- `GINUX_VOLUME_SIZE=SIZE make run` selects the initial sparse size.
+- `LINOX_VOLUME_SIZE=SIZE make run` selects the initial sparse size.
 - `make reset-storage` deletes only the default development volume.
 - The next `make run` recreates a clean volume.
 - `make test-storage` proves initialization, reboot recovery, deletion,

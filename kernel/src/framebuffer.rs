@@ -16,7 +16,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use font8x8::legacy::BASIC_LEGACY;
-use ginux_virtio_gpu::Rect;
+use linox_virtio_gpu::Rect;
 
 use crate::{BootFramebuffer, FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_RGBX};
 

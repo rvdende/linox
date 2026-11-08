@@ -101,7 +101,7 @@ Look for clusters, not isolated words.
 - Do not let implementation, test authorship, and success judgment collapse
   into one unqualified claim.
 
-## Audit of the Ginux report before tightening
+## Audit of the Linox report before tightening
 
 | Pattern | Finding | Edit |
 |---|---|---|

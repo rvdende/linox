@@ -1567,8 +1567,8 @@ io_uring04 io_uring04  # auto: budget=120
 perf_event_open03 perf_event_open03  # auto: budget=90
 
 # Tests from outside runtest/syscalls, curated by hand.
-ginux_swap01 ginux_swap01  # budget=300 Ginux's own (tools/ltp/tests): a memory cgroup oversubscribed with swap
-ginux_stack01 ginux_stack01  # Ginux's own (tools/ltp/tests): the main stack grows to RLIMIT_STACK
+linox_swap01 linox_swap01  # budget=300 Linox's own (tools/ltp/tests): a memory cgroup oversubscribed with swap
+linox_stack01 linox_stack01  # Linox's own (tools/ltp/tests): the main stack grows to RLIMIT_STACK
 memcontrol01 memcontrol01  # runtest/controllers: the memory controller
 memcontrol02 memcontrol02  # runtest/controllers: the memory controller
 !memcontrol03 memcontrol03  # runtest/controllers: passes alone, but late in a full run its children's 50 MiB page-cache writes outlast the test's 10 s checkpoint

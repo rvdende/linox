@@ -2,9 +2,9 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rocky-shell.XXXXXX")
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-rocky-shell-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rocky-shell-pid.XXXXXX")
+output_file=$(mktemp "${TMPDIR:-/tmp}/linox-rocky-shell.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-rocky-shell-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-rocky-shell-pid.XXXXXX")
 qemu_pid=""
 
 stop_qemu() {
@@ -39,7 +39,7 @@ wait_for() {
     local limit=${2:-120}
     for ((attempt = 0; attempt < limit; attempt++)); do
         grep -Fq "$marker" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -49,13 +49,13 @@ wait_for() {
 
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
-    wait_for 'ginux> '
+    wait_for 'linox> '
     printf '%s\n' \
         'domain new rocky' \
         'domain set rocky image=rockylinux/rockylinux:10 init=/bin/sh' \
         'domain start rocky --attach'
-    wait_for 'ginux: OCI image ready' 240
-    wait_for 'ginux: entering configured Linux init' 30
+    wait_for 'linox: OCI image ready' 240
+    wait_for 'linox: entering configured Linux init' 30
     printf '%s\n' \
         "printf 'ROCKY_GLIBC_SHELL_OK\\n'" \
         "test -f /etc/os-release && printf 'ROCKY_STAT_OK\\n'" \
@@ -67,12 +67,12 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     wait_for 'NAME="Rocky Linux"' 30
     wait_for 'rocky: stopped' 120
     printf '%s\n' 'shutdown'
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..420}; do
-    if grep -Fq 'GINUX_KERNEL_OK' "$output_file" || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -Fq 'LINOX_KERNEL_OK' "$output_file" || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         break
     fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
@@ -91,8 +91,8 @@ fi
 wait "$qemu_pid" || true
 qemu_pid=""
 
-if ! grep -Fq 'GINUX_KERNEL_OK' "$output_file" \
-    || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status 127' "$output_file"; then
+if ! grep -Fq 'LINOX_KERNEL_OK' "$output_file" \
+    || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status 127' "$output_file"; then
     fail 'clean Rocky shell lifecycle was not observed'
 fi
 

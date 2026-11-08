@@ -4,7 +4,7 @@
 //! libtest's arguments select trials as usual (a name filter, `--exact`,
 //! `--skip`, `--ignored`, `--list`, `-q`); only the selected tests run in
 //! the guest. The harness's own settings come from the environment
-//! (`LTP_LIST`, `LTP_TESTS`, `LTP_FILTER`, `LTP_VARIANT`, `GINUX_ESP_DIR`,
+//! (`LTP_LIST`, `LTP_TESTS`, `LTP_FILTER`, `LTP_VARIANT`, `LINOX_ESP_DIR`,
 //! ...; `src/config.rs`), plus two switches: `--strict` (report every
 //! failure, ignoring the baseline) and `--update-baseline`.
 
@@ -18,12 +18,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use ginux_ltp::baseline::{outcome, Baseline, Outcome, Report};
-use ginux_ltp::config::Config;
-use ginux_ltp::list::{parse_list, select, Test};
-use ginux_ltp::progress::{Format, Progress};
-use ginux_ltp::session::{new_volume, serve_guest_files, Run};
-use ginux_ltp::Verdict;
+use linox_ltp::baseline::{outcome, Baseline, Outcome, Report};
+use linox_ltp::config::Config;
+use linox_ltp::list::{parse_list, select, Test};
+use linox_ltp::progress::{Format, Progress};
+use linox_ltp::session::{new_volume, serve_guest_files, Run};
+use linox_ltp::Verdict;
 use libtest_mimic::{Arguments, Completion, Failed, FormatSetting, Trial};
 
 fn main() -> ExitCode {

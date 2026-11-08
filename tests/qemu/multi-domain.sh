@@ -2,16 +2,16 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file="${GINUX_MULTI_DOMAIN_LOG:-}"
+output_file="${LINOX_MULTI_DOMAIN_LOG:-}"
 output_file_is_temporary=0
 if [[ -z "$output_file" ]]; then
-    output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain.XXXXXX")
+    output_file=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain.XXXXXX")
     output_file_is_temporary=1
 fi
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain-pid.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain-pid.XXXXXX")
 qemu_pid=""
-base_volume="${GINUX_MULTI_DOMAIN_BASE_VOLUME:-$repo_root/build/qemu/rocky-systemd-volume.raw}"
+base_volume="${LINOX_MULTI_DOMAIN_BASE_VOLUME:-$repo_root/build/qemu/rocky-systemd-volume.raw}"
 
 stop_qemu() {
     local pid=""
@@ -39,7 +39,7 @@ wait_for() {
     local limit=${2:-120}
     for ((attempt = 0; attempt < limit; attempt++)); do
         grep -Fq "$marker" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -58,7 +58,7 @@ wait_for_count() {
         local observed
         observed=$(grep -Fc "$marker" "$output_file" || true)
         [[ "$observed" -ge "$expected" ]] && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -71,7 +71,7 @@ wait_for_count() {
 
 if [[ ! -f "$base_volume" ]]; then
     echo "Multi-domain test requires a cached Rocky volume: $base_volume" >&2
-    echo "Run 'make test-rocky-systemd' first or set GINUX_MULTI_DOMAIN_BASE_VOLUME." >&2
+    echo "Run 'make test-rocky-systemd' first or set LINOX_MULTI_DOMAIN_BASE_VOLUME." >&2
     exit 1
 fi
 if ! cp -c "$base_volume" "$volume_image" 2>/dev/null; then
@@ -81,24 +81,24 @@ if ! cp -c "$base_volume" "$volume_image" 2>/dev/null; then
 fi
 : >"$output_file"
 {
-    wait_for 'ginux> '
+    wait_for 'linox> '
     printf '%s\n' \
         'domain new rocky' \
         'domain set rocky image=rockylinux/rockylinux:10-ubi-init init=/sbin/init memory-mib=768' \
         'domain start rocky --attach'
-    wait_for 'ginux: OCI image ready' 300
-    wait_for 'ginux login:' 180
+    wait_for 'linox: OCI image ready' 300
+    wait_for 'linox login:' 180
     printf '\035'
     wait_for "[detached from domain; use 'domain attach NAME' to return]" 10
     printf '%s\n' \
         'domain new rocky2' \
         'domain set rocky2 image=rockylinux/rockylinux:10-ubi-init init=/sbin/init memory-mib=768' \
         'domain start rocky2 --attach'
-    wait_for_count 'ginux login:' 2 180
+    wait_for_count 'linox login:' 2 180
     printf '\035'
     wait_for_count "[detached from domain; use 'domain attach NAME' to return]" 2 10
-    wait_for_count 'ginux: OCI image ready' 2 300
-    wait_for_count 'ginux: entering configured Linux init' 2 30
+    wait_for_count 'linox: OCI image ready' 2 300
+    wait_for_count 'linox: entering configured Linux init' 2 30
     printf '%s\n' 'domain list'
     wait_for 'rocky           running     linux'
     wait_for 'rocky2          running     linux'
@@ -115,12 +115,12 @@ fi
     printf '%s\n' \
         'domain list' \
         'shutdown'
-} | GINUX_MEMORY="${GINUX_MEMORY:-2G}" GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_MEMORY="${LINOX_MEMORY:-2G}" LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..600}; do
-    if grep -Fq 'GINUX_KERNEL_OK' "$output_file" || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -Fq 'LINOX_KERNEL_OK' "$output_file" || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         break
     fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
@@ -142,7 +142,7 @@ fi
 wait "$qemu_pid" || true
 qemu_pid=""
 
-for expected in 'GINUX_KERNEL_OK'; do
+for expected in 'LINOX_KERNEL_OK'; do
     if ! grep -Fq "$expected" "$output_file"; then
         tail -n 160 "$output_file"
         echo "Multi-domain test failed: missing '$expected'." >&2
@@ -150,7 +150,7 @@ for expected in 'GINUX_KERNEL_OK'; do
     fi
 done
 
-if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|live registry refresh snapshot failed' "$output_file"; then
+if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|live registry refresh snapshot failed' "$output_file"; then
     tail -n 160 "$output_file"
     echo "Multi-domain test failed: kernel or process-registry failure detected." >&2
     exit 1

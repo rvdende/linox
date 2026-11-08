@@ -15,7 +15,7 @@ pub(super) fn linux_swapon(path_address: u64, flags: u64) -> u64 {
     if flags & !SWAP_FLAGS_VALID != 0 {
         return LINUX_EINVAL;
     }
-    if !linux_has_capability(ginux_credentials::capability::SYS_ADMIN) {
+    if !linux_has_capability(linox_credentials::capability::SYS_ADMIN) {
         return LINUX_EPERM;
     }
     let instance = linux_execution_instance();
@@ -86,7 +86,7 @@ pub(super) fn linux_swapon(path_address: u64, flags: u64) -> u64 {
 
 /// swapoff(path).
 pub(super) fn linux_swapoff(path_address: u64) -> u64 {
-    if !linux_has_capability(ginux_credentials::capability::SYS_ADMIN) {
+    if !linux_has_capability(linox_credentials::capability::SYS_ADMIN) {
         return LINUX_EPERM;
     }
     let (target, _, _) = match linux_swap_target(path_address) {

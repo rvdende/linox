@@ -1,12 +1,12 @@
 .text
 .balign 16
-.global ginux_volume_writer_start
-.global ginux_volume_writer_fault
-.global ginux_volume_writer_end
-.global ginux_volume_reader_start
-.global ginux_volume_reader_end
+.global linox_volume_writer_start
+.global linox_volume_writer_fault
+.global linox_volume_writer_end
+.global linox_volume_reader_start
+.global linox_volume_reader_end
 
-ginux_volume_writer_start:
+linox_volume_writer_start:
     mov rdi, rcx
     sub rsp, 0x70
 
@@ -55,14 +55,14 @@ ginux_volume_writer_start:
     jne .writer_failed
 
     # Deliberately fault after the durable commit.
-ginux_volume_writer_fault:
+linox_volume_writer_fault:
     ud2
 .writer_failed:
     int3
-ginux_volume_writer_end:
+linox_volume_writer_end:
 
 .balign 16
-ginux_volume_reader_start:
+linox_volume_reader_start:
     mov rdi, rcx
     sub rsp, 0x70
 
@@ -123,4 +123,4 @@ ginux_volume_reader_start:
     int 0x80
 .reader_failed:
     int3
-ginux_volume_reader_end:
+linox_volume_reader_end:

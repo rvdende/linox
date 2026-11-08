@@ -1,4 +1,4 @@
-//! ginux-threadtest: threads for Ginux tests (tests/smp/tests/multithread.rs).
+//! linox-threadtest: threads for Linox tests (tests/smp/tests/multithread.rs).
 //!
 //! - `spin N`: N threads each do the same fixed amount of arithmetic; prints
 //!   `SPIN n=N ms=T`. On N CPUs they take about as long as one.
@@ -81,7 +81,10 @@ fn pingpong(rounds: u64) -> ExitCode {
         }
     }
     other.join().unwrap();
-    println!("PINGPONG rounds={rounds} ms={}", started.elapsed().as_millis());
+    println!(
+        "PINGPONG rounds={rounds} ms={}",
+        started.elapsed().as_millis()
+    );
     println!("THREADTEST OK pingpong");
     ExitCode::SUCCESS
 }
@@ -97,9 +100,8 @@ fn sleep() -> ExitCode {
                     let (flag, ready) = &*waited;
                     let guard = flag.lock().unwrap();
                     // Nothing signals: the wait must end by its timeout.
-                    let (_guard, result) = ready
-                        .wait_timeout(guard, Duration::from_millis(5))
-                        .unwrap();
+                    let (_guard, result) =
+                        ready.wait_timeout(guard, Duration::from_millis(5)).unwrap();
                     assert!(result.timed_out(), "round {round}: woke without a timeout");
                 }
             })
@@ -319,7 +321,7 @@ fn main() -> ExitCode {
         Some("pin") => pin(),
         _ => {
             eprintln!(
-                "usage: ginux-threadtest spin N | pingpong N | sleep | queue | spawn N | exit | segv | pin"
+                "usage: linox-threadtest spin N | pingpong N | sleep | queue | spawn N | exit | segv | pin"
             );
             ExitCode::FAILURE
         }

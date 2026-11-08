@@ -155,7 +155,7 @@ fn profile_linux_futex_operation(operation: u64) {
         .compare_exchange(u64::MAX, operation, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        serial_write("ginux: profile futex operation: ");
+        serial_write("linox: profile futex operation: ");
         serial_write_u64(operation);
         serial_write("\r\n");
     }
@@ -176,7 +176,7 @@ pub(super) fn write_linux_futex_profile() {
         if count == 0 {
             continue;
         }
-        serial_write("ginux: profile futex operation/count: ");
+        serial_write("linox: profile futex operation/count: ");
         serial_write_u64(operation as u64);
         serial_write("/");
         serial_write_u64(count);

@@ -1,6 +1,6 @@
 # Linux ELF and Runtime Compatibility Tests
 
-Ginux treats Linux executable loading and process startup as a tested compatibility
+Linox treats Linux executable loading and process startup as a tested compatibility
 contract. Run the contract with:
 
 ```sh

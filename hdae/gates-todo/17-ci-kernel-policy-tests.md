@@ -26,7 +26,7 @@ pure kernel policy behind a host-testable boundary.
 ## Completed work
 
 - [x] Added read-only GitHub Actions jobs for static and QEMU verification.
-- [x] Added `ginux-kernel-policy` and wired the kernel to its validators.
+- [x] Added `linox-kernel-policy` and wired the kernel to its validators.
 - [x] Added four host-side tests covering positive and negative inputs.
 - [x] Added the crate's lint and tests to `make check`.
 - [x] Made the VT-d fault-policy check accept the no-PASID encodings emitted
@@ -47,16 +47,16 @@ pure kernel policy behind a host-testable boundary.
 
 ## Verification plan
 
-- `cargo test --package ginux-kernel-policy` -> four tests pass.
+- `cargo test --package linox-kernel-policy` -> four tests pass.
 - `make check` -> includes kernel-policy lint/tests and passes.
 - `make test` -> complete QEMU verification boot passes.
 - GitHub Actions -> both jobs pass after the branch is pushed.
 
 ## Evidence
 
-- `cargo test --package ginux-kernel-policy` -> 4 passed, 0 failed.
+- `cargo test --package linox-kernel-policy` -> 4 passed, 0 failed.
 - `make check` -> passed.
-- `make test` -> passed with `GINUX_KERNEL_OK` and `Boot test passed.`
+- `make test` -> passed with `LINOX_KERNEL_OK` and `Boot test passed.`
 - GitHub Actions run `41178529192` reached the verification kernel on QEMU
   11.1.2 and exposed a no-PASID encoding change from `0xffff` to `0`; the new
   policy test covers both encodings and the complete local QEMU boot passes.

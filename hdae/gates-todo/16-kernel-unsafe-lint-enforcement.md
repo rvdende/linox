@@ -11,7 +11,7 @@ unsafe-boundary baseline while the existing unsafe code is reduced over time.
 
 ## Approved scope
 
-- Add direct warning-denying clippy coverage for `ginux-kernel`.
+- Add direct warning-denying clippy coverage for `linox-kernel`.
 - Add deterministic ratchets for unsafe blocks, SAFETY comments, and top-level
   `static mut` declarations.
 - Include the ratchet in the architecture check.
@@ -42,7 +42,7 @@ unsafe-boundary baseline while the existing unsafe code is reduced over time.
 
 ## Verification plan
 
-- `cargo clippy --package ginux-kernel --target x86_64-unknown-none -- -D warnings` -> passes.
+- `cargo clippy --package linox-kernel --target x86_64-unknown-none -- -D warnings` -> passes.
 - `make architecture-check` -> reports the kernel unsafe baseline and passes.
 - `make check` -> passes.
 

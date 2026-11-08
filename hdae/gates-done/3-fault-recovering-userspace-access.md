@@ -52,13 +52,13 @@ None.
   copy migration.
 - `make test` -> passed; both copy directions recovered at the mapped/guard
   boundary with one byte remaining, wholly unmapped copies returned the full
-  length, AC was clear afterward, and QEMU exited with `GINUX_KERNEL_OK`.
+  length, AC was clear afterward, and QEMU exited with `LINOX_KERNEL_OK`.
 - `make check` -> passed after the complete subsystem migration; the new
   user-access architecture check passed and found no syscall-side SMAP opening
   or direct cast-pointer scalar dereference.
 - `bash tests/qemu/boot.sh` -> passed after the final teardown correction;
   verification, reboot, corruption, Linux runtime, and native-service lifecycle
-  checks completed with `GINUX_KERNEL_OK` and no surviving QEMU process.
+  checks completed with `LINOX_KERNEL_OK` and no surviving QEMU process.
 - `make test-linux-abi` -> passed the controller report for 23 interfaces and
   375 syscalls (398 classified rows).
 - `make test-rocky-systemd` -> passed two attached Rocky Linux 10 systemd boots

@@ -1,9 +1,9 @@
 .text
 .balign 16
-.global ginux_packet_ipv4_producer_start
-.global ginux_packet_ipv4_producer_end
+.global linox_packet_ipv4_producer_start
+.global linox_packet_ipv4_producer_end
 
-ginux_packet_ipv4_producer_start:
+linox_packet_ipv4_producer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x90
@@ -80,4 +80,4 @@ ginux_packet_ipv4_producer_start:
     .byte 0x40, 0x01, 0x10, 0x9d, 10, 0, 2, 2, 10, 0, 2, 15
     .byte 0x08, 0x00, 0x39, 0x0f, 0xbe, 0xef, 0x00, 0x01
 
-ginux_packet_ipv4_producer_end:
+linox_packet_ipv4_producer_end:

@@ -13,7 +13,7 @@ Status: **Configuration and verified OCI layer persistence complete**
 The QEMU development host now uses a sparse, self-initializing persistent
 volume with a versioned, geometry-bound header committed through the existing
 two-slot transactional format. Reopening the same volume recovers its committed
-generation without rewriting it. Deleting it and running Ginux again creates a
+generation without rewriting it. Deleting it and running Linox again creates a
 clean volume. `make test-storage` verifies all three boots and guarantees QEMU
 cleanup. `make reset-storage` performs the explicit development reset.
 

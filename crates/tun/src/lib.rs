@@ -8,7 +8,7 @@
 //! process writes the stack receives. A TAP device is the same at the
 //! Ethernet layer: whole frames.
 //!
-//! Ginux's stack (smoltcp) runs one Ethernet interface, so a device here is
+//! Linox's stack (smoltcp) runs one Ethernet interface, so a device here is
 //! a part of its traffic: the addresses given to a device join the
 //! interface's, and [`Tun::egress`] takes the frames the stack sends that
 //! belong to an up device, an IPv4 destination in one of its subnets or an

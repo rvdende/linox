@@ -5,7 +5,7 @@
 1. **Kernel.** Owns physical framebuffer, keyboard, pointer, scheduling,
    isolation, memory, and capability enforcement. It does not implement window
    policy or graphical widgets.
-2. **Controller services.** Trusted ring-3 Ginux processes own the physical seat
+2. **Controller services.** Trusted ring-3 Linox processes own the physical seat
    and provide composition, window policy, resource leasing, and the existing
    versioned system-management interface.
 3. **Controller clients.** The CLI and native graphical controller are separate
@@ -35,7 +35,7 @@
 ## Display model
 
 The native controller compositor manages a tree of surfaces. Native clients use
-the Ginux display protocol directly. A Linux domain contributes one logical
+the Linox display protocol directly. A Linux domain contributes one logical
 desktop surface produced by its own compositor. That surface can be resized,
 focused, minimized, or made full screen without changing domain identity.
 
@@ -55,8 +55,8 @@ lease, not permanent device transfer. Raw-device passthrough is deferred.
 
 The domain bridge exposes a virtual display and virtual input device. Inside the
 domain, a small Wayland compositor or bridge accepts ordinary Wayland clients,
-composes them, and publishes the result through the native Ginux protocol. This
-keeps Linux application compatibility inside the domain while Ginux retains the
+composes them, and publishes the result through the native Linox protocol. This
+keeps Linux application compatibility inside the domain while Linox retains the
 host trust boundary and desktop policy.
 
 ## Failure model

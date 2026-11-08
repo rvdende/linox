@@ -5,23 +5,23 @@ set -euo pipefail
 # shellcheck source=tools/benchmarks/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-matrix_root="${GINUX_BENCHMARK_MATRIX_DIR:-$benchmark_root/build/benchmark/rocky10-topology-matrix}"
-asset_dir="${GINUX_BENCHMARK_ASSET_DIR:-$benchmark_root/build/benchmark/rocky10-single-vcpu}"
-force="${GINUX_BENCHMARK_FORCE:-0}"
+matrix_root="${LINOX_BENCHMARK_MATRIX_DIR:-$benchmark_root/build/benchmark/rocky10-topology-matrix}"
+asset_dir="${LINOX_BENCHMARK_ASSET_DIR:-$benchmark_root/build/benchmark/rocky10-single-vcpu}"
+force="${LINOX_BENCHMARK_FORCE:-0}"
 
 mkdir -p "$matrix_root" "$asset_dir"
 
 if [[ ! -s "$asset_dir/rocky-linux-prepared-v2.qcow2" ]]; then
-    GINUX_BENCHMARK_DIR="$asset_dir" \
-    GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+    LINOX_BENCHMARK_DIR="$asset_dir" \
+    LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
     BENCHMARK_VCPUS=1 BENCHMARK_THREADS=1 \
         "$benchmark_root/tools/benchmarks/prepare-rocky-linux.sh"
 fi
 
-if [[ ! -s "$asset_dir/sysbench-minimal-rootfs.tar" || ! -s "$asset_dir/ginux-volume.raw" ]]; then
-    GINUX_BENCHMARK_DIR="$asset_dir" \
-    GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
-        "$benchmark_root/tools/benchmarks/prepare-ginux-sysbench.sh"
+if [[ ! -s "$asset_dir/sysbench-minimal-rootfs.tar" || ! -s "$asset_dir/linox-volume.raw" ]]; then
+    LINOX_BENCHMARK_DIR="$asset_dir" \
+    LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
+        "$benchmark_root/tools/benchmarks/prepare-linox-sysbench.sh"
 fi
 
 run_configuration() {
@@ -41,36 +41,36 @@ run_configuration() {
     echo "Benchmarking $mode mode: $cpus vCPU(s), $threads thread(s)"
 
     if [[ "$force" == 1 || ! -s "$result_dir/.linux-complete" ]]; then
-        GINUX_BENCHMARK_DIR="$result_dir" \
-        GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+        LINOX_BENCHMARK_DIR="$result_dir" \
+        LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
         BENCHMARK_VCPUS="$cpus" BENCHMARK_THREADS="$threads" \
             "$benchmark_root/tools/benchmarks/run-rocky-linux.sh"
         printf 'complete\n' >"$result_dir/.linux-complete"
     fi
 
-    if [[ "$include_boot" == 1 && ( "$force" == 1 || ! -s "$result_dir/.ginux-boot-complete" ) ]]; then
-        GINUX_BENCHMARK_DIR="$result_dir" \
-        GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+    if [[ "$include_boot" == 1 && ( "$force" == 1 || ! -s "$result_dir/.linox-boot-complete" ) ]]; then
+        LINOX_BENCHMARK_DIR="$result_dir" \
+        LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
         BENCHMARK_VCPUS="$cpus" BENCHMARK_THREADS="$threads" \
-            "$benchmark_root/tools/benchmarks/run-ginux-boot.sh"
-        GINUX_BENCHMARK_DIR="$result_dir" \
-        GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+            "$benchmark_root/tools/benchmarks/run-linox-boot.sh"
+        LINOX_BENCHMARK_DIR="$result_dir" \
+        LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
         BENCHMARK_VCPUS="$cpus" BENCHMARK_THREADS="$threads" \
             "$benchmark_root/tools/benchmarks/summarize-boot.sh" >"$result_dir/boot-summary.txt"
-        printf 'complete\n' >"$result_dir/.ginux-boot-complete"
+        printf 'complete\n' >"$result_dir/.linox-boot-complete"
     fi
 
-    if [[ "$force" == 1 || ! -s "$result_dir/.ginux-sysbench-complete" ]]; then
-        GINUX_BENCHMARK_DIR="$result_dir" \
-        GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+    if [[ "$force" == 1 || ! -s "$result_dir/.linox-sysbench-complete" ]]; then
+        LINOX_BENCHMARK_DIR="$result_dir" \
+        LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
         BENCHMARK_VCPUS="$cpus" BENCHMARK_THREADS="$threads" \
-        GINUX_BENCHMARK_BATCHED=1 \
-            "$benchmark_root/tools/benchmarks/run-ginux.sh"
-        printf 'complete\n' >"$result_dir/.ginux-sysbench-complete"
+        LINOX_BENCHMARK_BATCHED=1 \
+            "$benchmark_root/tools/benchmarks/run-linox.sh"
+        printf 'complete\n' >"$result_dir/.linox-sysbench-complete"
     fi
 
-    GINUX_BENCHMARK_DIR="$result_dir" \
-    GINUX_BENCHMARK_ASSET_DIR="$asset_dir" \
+    LINOX_BENCHMARK_DIR="$result_dir" \
+    LINOX_BENCHMARK_ASSET_DIR="$asset_dir" \
     BENCHMARK_VCPUS="$cpus" BENCHMARK_THREADS="$threads" \
         "$benchmark_root/tools/benchmarks/compare.sh" >"$result_dir/comparison.txt"
 
@@ -86,13 +86,13 @@ run_configuration fixed 4 1 1
 run_configuration scaled 2 2 0
 run_configuration scaled 4 4 0
 
-GINUX_BENCHMARK_MATRIX_DIR="$matrix_root" \
+LINOX_BENCHMARK_MATRIX_DIR="$matrix_root" \
     "$benchmark_root/tools/benchmarks/summarize-topology-matrix.py"
 
 if command -v lsof >/dev/null 2>&1; then
-    if lsof "$asset_dir/ginux-volume.raw" >"$matrix_root/open-volume-check.log" 2>&1; then
+    if lsof "$asset_dir/linox-volume.raw" >"$matrix_root/open-volume-check.log" 2>&1; then
         cat "$matrix_root/open-volume-check.log" >&2
-        echo "benchmark: Ginux benchmark volume remains open" >&2
+        echo "benchmark: Linox benchmark volume remains open" >&2
         exit 1
     fi
 fi

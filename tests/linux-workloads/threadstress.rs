@@ -1,4 +1,4 @@
-// Thread churn stress test for Ginux: generations of short-lived threads,
+// Thread churn stress test for Linox: generations of short-lived threads,
 // joined and detached, allocate and verify memory while long-lived threads
 // do the same, so thread creation, exit, join and stack reuse run under load.
 use std::sync::atomic::{AtomicU64, Ordering};

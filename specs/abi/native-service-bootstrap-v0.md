@@ -7,7 +7,7 @@ are verified by the clean build and QEMU gate.
 
 The x86-64 kernel enters a measured native service at its authenticated static
 PIE entrypoint in ring 3. `RBX` contains the user virtual address of a
-read-only, NX `ginux_native_service_boot_v0` record. The initial stack is
+read-only, NX `linox_native_service_boot_v0` record. The initial stack is
 16-byte aligned, writable, NX, bounded to two pages, and isolated from the
 image and bootstrap record by absent guard pages. All other register contents
 are outside this version's contract.
@@ -17,7 +17,7 @@ fixed-width integers:
 
 | Offset | Width | Field |
 |---:|---:|---|
-| 0 | 8 | magic `0x30425358554e4947` (`GINUXSB0` in memory) |
+| 0 | 8 | magic `0x304253584f4e494c` (`LINOXSB0` in memory) |
 | 8 | 2 | version `0` |
 | 10 | 2 | structure size `64` |
 | 12 | 4 | exact feature bitmap |
@@ -42,7 +42,7 @@ address under the same field semantics.
 
 ## Sources and compatibility
 
-`ginux-native-abi` is the canonical `no_std` Rust definition and contains
+`linox-native-abi` is the canonical `no_std` Rust definition and contains
 compile-time size/alignment assertions plus layout and malformed-header tests.
 `native-service-bootstrap-v0.h` is the language-neutral C binding. Both are
 release contract artifacts; neither exposes Rust layout, kernel pointers, page

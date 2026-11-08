@@ -44,9 +44,9 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use ginux_drm::{Blob, Cache, Errno, Features, Mapping};
+use linox_drm::{Blob, Cache, Errno, Features, Mapping};
 
-use ginux_virtio_gpu::{self as protocol, Command, Damage, DisplayInfo, Mode, Rect};
+use linox_virtio_gpu::{self as protocol, Command, Damage, DisplayInfo, Mode, Rect};
 
 use super::device_memory::{DmaBuffer, Mmio};
 use super::virtio::{self, Probe, Segment, SplitQueue, Transport};
@@ -559,7 +559,7 @@ impl ThreeD {
             .device_u32(protocol::CONFIG_NUM_CAPSETS)
             .min(16);
         if count == 0 {
-            say!("ginux: virtio-gpu 3D: the device reports no capsets\n");
+            say!("linox: virtio-gpu 3D: the device reports no capsets\n");
         }
         let mut capsets = Vec::new();
         for index in 0..count {
@@ -579,7 +579,7 @@ impl ThreeD {
                     }
                 }
                 reply => say!(
-                    "ginux: virtio-gpu 3D: capset {} of {}: {:?}\n",
+                    "linox: virtio-gpu 3D: capset {} of {}: {:?}\n",
                     index,
                     count,
                     reply
@@ -722,7 +722,7 @@ pub(crate) fn fence_signaled(fence: u64) -> bool {
 /// The GPU as the DRM layer sees it.
 pub(crate) struct VirtioGpu;
 
-impl ginux_drm::Gpu for VirtioGpu {
+impl linox_drm::Gpu for VirtioGpu {
     fn features(&self) -> Features {
         let capsets = THREE_D_CAPSETS.load(Ordering::Acquire);
         Features {
@@ -841,7 +841,7 @@ impl ginux_drm::Gpu for VirtioGpu {
             };
             if MAPS_LOGGED.fetch_add(1, Ordering::Relaxed) < 48 {
                 say!(
-                    "ginux: virtio-gpu 3D: blob {} mapped, {} bytes, {:?}\n",
+                    "linox: virtio-gpu 3D: blob {} mapped, {} bytes, {:?}\n",
                     resource,
                     size,
                     cache
@@ -1048,7 +1048,7 @@ impl ScanoutOwner {
             // output, which comes back here.
             if let Some(Err(error)) = outcome {
                 if !self.failure_reported.swap(true, Ordering::Relaxed) {
-                    say!("ginux: virtio-gpu flush failed: {:?}\n", error);
+                    say!("linox: virtio-gpu flush failed: {:?}\n", error);
                 }
             }
             if wait_ms.is_none() || self.damage.load(Ordering::Acquire) == 0 {
@@ -1105,7 +1105,7 @@ pub(crate) unsafe fn prepare(probe: &Probe, registers: usize) -> Option<Prepared
         }),
         Err(error) => {
             say!(
-                "ginux: virtio-gpu {:02x}:{:02x}.{}: {:?}; keeping the firmware framebuffer\n",
+                "linox: virtio-gpu {:02x}:{:02x}.{}: {:?}; keeping the firmware framebuffer\n",
                 function.bus,
                 function.device,
                 function.function,
@@ -1192,7 +1192,7 @@ pub(crate) fn activate(prepared: Prepared) {
     let (bus, device, function) = gpu.device.transport.address();
     if !admitted {
         say!(
-            "ginux: virtio-gpu {:02x}:{:02x}.{}: the I/O MMU did not admit it; keeping the firmware framebuffer\n",
+            "linox: virtio-gpu {:02x}:{:02x}.{}: the I/O MMU did not admit it; keeping the firmware framebuffer\n",
             bus,
             device,
             function
@@ -1206,7 +1206,7 @@ pub(crate) fn activate(prepared: Prepared) {
     }]);
     if let Err(error) = shown {
         say!(
-            "ginux: virtio-gpu {:02x}:{:02x}.{}: {:?}; keeping the firmware framebuffer\n",
+            "linox: virtio-gpu {:02x}:{:02x}.{}: {:?}; keeping the firmware framebuffer\n",
             bus,
             device,
             function,
@@ -1235,11 +1235,11 @@ pub(crate) fn activate(prepared: Prepared) {
     // replaces its GPU, so `base` maps `display.length` bytes of it, at
     // `display.physical`, for the rest of the kernel's life.
     if !unsafe { framebuffer::adopt(display, base) } {
-        say!("ginux: virtio-gpu: the console did not move to the GPU surface\n");
+        say!("linox: virtio-gpu: the console did not move to the GPU surface\n");
         return;
     }
     say!(
-        "ginux: virtio-gpu {:02x}:{:02x}.{} display {}x{} on scanout {}; host features",
+        "linox: virtio-gpu {:02x}:{:02x}.{} display {}x{} on scanout {}; host features",
         bus,
         device,
         function,
@@ -1262,7 +1262,7 @@ pub(crate) fn activate(prepared: Prepared) {
     say!("{}\n", if any { "" } else { " none" });
     if let Some((address, length)) = host_visible {
         say!(
-            "ginux: virtio-gpu 3D: capsets {:#x}, host-visible region {:#x}+{:#x}\n",
+            "linox: virtio-gpu 3D: capsets {:#x}, host-visible region {:#x}+{:#x}\n",
             capsets,
             address,
             length

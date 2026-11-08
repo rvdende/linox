@@ -16,8 +16,8 @@ if [[ "$accelerator" == "tcg" ]]; then
 else
     cpu_model="${QEMU_CPU:-host,+smep,+smap,+umip}"
 fi
-media_dir="${GINUX_MEDIA_DIR:-$repo_root/build/media}"
-timeout_seconds="${GINUX_MEDIA_TIMEOUT:-120}"
+media_dir="${LINOX_MEDIA_DIR:-$repo_root/build/media}"
+timeout_seconds="${LINOX_MEDIA_TIMEOUT:-120}"
 work_dir="$(mktemp -d)"
 qemu_pid=""
 
@@ -47,10 +47,10 @@ boot_case() {
         -no-reboot \
         -net none \
         -device "intel-iommu,intremap=off" \
-        -device "virtio-blk-pci,drive=ginux-volume,disable-legacy=on,iommu_platform=on,serial=ginux-volume" \
-        -netdev "user,id=ginux-net,restrict=on" \
-        -device "virtio-net-pci,netdev=ginux-net,disable-legacy=on,iommu_platform=on,mac=52:54:00:12:34:56,addr=0x3" \
-        -drive "if=none,id=ginux-volume,format=raw,file=$work_dir/volume.raw" \
+        -device "virtio-blk-pci,drive=linox-volume,disable-legacy=on,iommu_platform=on,serial=linox-volume" \
+        -netdev "user,id=linox-net,restrict=on" \
+        -device "virtio-net-pci,netdev=linox-net,disable-legacy=on,iommu_platform=on,mac=52:54:00:12:34:56,addr=0x3" \
+        -drive "if=none,id=linox-volume,format=raw,file=$work_dir/volume.raw" \
         -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
         -drive "if=pflash,format=raw,file=$work_dir/vars.fd" \
         "$@" &
@@ -64,7 +64,7 @@ boot_case() {
             echo "ok   $label"
             return 0
         fi
-        if grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$log" 2>/dev/null || ! kill -0 "$qemu_pid" 2>/dev/null; then
+        if grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$log" 2>/dev/null || ! kill -0 "$qemu_pid" 2>/dev/null; then
             break
         fi
         sleep 1
@@ -78,8 +78,8 @@ boot_case() {
     return 1
 }
 
-iso="$media_dir/ginux.iso"
-usb="$media_dir/ginux-usb.img"
+iso="$media_dir/linox.iso"
+usb="$media_dir/linox-usb.img"
 for image in "$iso" "$usb"; do
     if [[ ! -s "$image" ]]; then
         echo "Missing $image; run 'make boot-media' first." >&2

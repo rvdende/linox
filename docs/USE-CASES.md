@@ -6,19 +6,19 @@ the real UEFI image; controller-only state simulation is not sufficient.
 
 ## UC-1: Boot and administer an empty host
 
-The operator boots Ginux, receives one persistent ring-3 controller, inspects
+The operator boots Linox, receives one persistent ring-3 controller, inspects
 host processes and network devices, changes link state, and shuts down without
 a kernel panic.
 
 - Automated gate: `make test-c1`
 - Key observations: controller PID 1 remains stable, DHCP configures `eth0`,
   `lo` is up, virtual links can be created and restarted, and shutdown produces
-  `GINUX_KERNEL_OK`.
+  `LINOX_KERNEL_OK`.
 
 ## UC-2: Start an unmodified Alpine domain
 
 The operator names a Linux-personality domain, assigns an OCI image, and starts
-it attached. Ginux resolves the native `linux/amd64` manifest, verifies and
+it attached. Linox resolves the native `linux/amd64` manifest, verifies and
 unpacks the image, runs `/bin/sh`, and exposes the image as that domain's root.
 
 - Automated gate: `make test-alpine`
@@ -61,7 +61,7 @@ remain usable; ordinary userspace failures must not panic the kernel.
 ## UC-6: Boot a conventional Linux system image
 
 The operator selects a Rocky image with systemd as PID 1 and expects the
-domain to boot like a normal machine while remaining inside a native Ginux
+domain to boot like a normal machine while remaining inside a native Linox
 domain boundary.
 
 - Diagnostic gate: `make probe-rocky-systemd`

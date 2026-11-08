@@ -12,14 +12,14 @@ fail() {
 }
 
 for required in \
-    'ginux_raw_copy_from_user:' \
-    'ginux_copy_from_user_fault_begin:' \
-    'ginux_copy_from_user_fault_end:' \
-    'ginux_raw_copy_to_user:' \
-    'ginux_copy_to_user_fault_begin:' \
-    'ginux_copy_to_user_fault_end:' \
-    'ginux_copy_from_user_fixup:' \
-    'ginux_copy_to_user_fixup:' \
+    'linox_raw_copy_from_user:' \
+    'linox_copy_from_user_fault_begin:' \
+    'linox_copy_from_user_fault_end:' \
+    'linox_raw_copy_to_user:' \
+    'linox_copy_to_user_fault_begin:' \
+    'linox_copy_to_user_fault_end:' \
+    'linox_copy_from_user_fixup:' \
+    'linox_copy_to_user_fixup:' \
     'verify_user_copy_fault_fixups'; do
     rg -Fq "$required" "$cpu" || fail "missing recoverable user-copy invariant: $required"
 done

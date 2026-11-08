@@ -1,5 +1,5 @@
-//! Ginux's strace: a process whose environment at exec holds
-//! `GINUX_STRACE=1`, and every process it starts after that, logs each system
+//! Linox's strace: a process whose environment at exec holds
+//! `LINOX_STRACE=1`, and every process it starts after that, logs each system
 //! call to the kernel log (pid/tid, number, arguments, the path argument if
 //! any, and the result). Domains have no ptrace, and images seldom ship
 //! strace; this answers "which call fails" without either.
@@ -17,7 +17,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The environment entry that starts a trace.
-pub(crate) const ENVIRONMENT: &[u8] = b"GINUX_STRACE=1\0";
+pub(crate) const ENVIRONMENT: &[u8] = b"LINOX_STRACE=1\0";
 
 fn key(instance: usize, pid: u32) -> u64 {
     ((instance as u64) << 32 | u64::from(pid)) + 1
@@ -104,7 +104,7 @@ pub(crate) fn writes_buffer(number: u64) -> bool {
 
 impl Call {
     pub(crate) fn log(&self, result: Option<u64>) {
-        crate::serial_write("ginux: strace ");
+        crate::serial_write("linox: strace ");
         crate::serial_write_u64(u64::from(self.pid));
         crate::serial_write("/");
         crate::serial_write_u64(u64::from(self.tid));

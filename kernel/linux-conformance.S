@@ -1,9 +1,9 @@
 .intel_syntax noprefix
 
 .section .text
-.global ginux_linux_conformance
-.type ginux_linux_conformance, @function
-ginux_linux_conformance:
+.global linox_linux_conformance
+.type linox_linux_conformance, @function
+linox_linux_conformance:
     lea rdi, [rip + .Lmemfd_name]
     mov esi, 2
     mov eax, 319
@@ -175,14 +175,14 @@ ginux_linux_conformance:
     ud2
 
 .Lmemfd_name:
-    .asciz "ginux-seals"
+    .asciz "linox-seals"
 .Lconsole:
     .asciz "/dev/console"
 .Lpayload:
     .ascii "data"
 .Lsuccess:
     .ascii "ABI_OK!\n"
-.size ginux_linux_conformance, . - ginux_linux_conformance
+.size linox_linux_conformance, . - linox_linux_conformance
 
 .section .data
 .quad 0x434e464f524d414e

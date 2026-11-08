@@ -378,7 +378,7 @@ impl ActiveTranslation {
         let cleared_high = high & !FAULT_RECORD_VALID;
         if status & FAULT_STATUS_MASK != PRIMARY_PENDING_FAULT
             || low & FAULT_INFORMATION_MASK != fault_address
-            || !ginux_kernel_policy::valid_vtd_write_fault_record(high, source as u16)
+            || !linox_kernel_policy::valid_vtd_write_fault_record(high, source as u16)
             || read_u32(self.mapping, self.register_base + GLOBAL_STATUS_OFFSET)
                 .is_none_or(|global| global & TRANSLATION_ENABLE_STATUS == 0)
             || read_u64(self.mapping, self.register_base + ROOT_TABLE_ADDRESS_OFFSET)

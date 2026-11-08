@@ -5,7 +5,7 @@
 
 ## Context
 
-Ginux needs a small immutable host, isolated and restartable system services, Linux-compatible containers, and a native control plane that can manage every workload without becoming able to rewrite the kernel or manufacture new privilege.
+Linox needs a small immutable host, isolated and restartable system services, Linux-compatible containers, and a native control plane that can manage every workload without becoming able to rewrite the kernel or manufacture new privilege.
 
 Process ancestry is useful for lifecycle and accounting but is not a safe authority mechanism. UID 0 is required inside Linux containers but must not imply native host authority. Drivers and services need explicit authentication, authority, lifetime, and failure rules regardless of whether they are native modules or isolated domains.
 

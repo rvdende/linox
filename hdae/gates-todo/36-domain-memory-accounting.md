@@ -78,7 +78,7 @@ stack, copy-on-write, tmpfs, and SysV shared-memory growth at the configured
 
 - Issue #19's static report matches the current allocation paths and the
   architecture's existing requirement that a domain own and account memory.
-- `cargo check --package ginux-kernel --target x86_64-unknown-none` passed.
+- `cargo check --package linox-kernel --target x86_64-unknown-none` passed.
 - `make check` passed, including the unchanged unsafe baseline of 1,033 blocks.
 - `make test` passed the complete two-vCPU QEMU boot and Linux runtime suite.
 - QEMU emitted `Linux mmap domain quota enforced atomically` and `Linux SysV

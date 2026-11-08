@@ -146,8 +146,8 @@ pub(crate) enum IsolatedInterruptCompletion {
 global_asm!(
     r#"
     .text
-    .global ginux_virtio_interrupt_entry
-ginux_virtio_interrupt_entry:
+    .global linox_virtio_interrupt_entry
+linox_virtio_interrupt_entry:
     test qword ptr [rsp + 8], 3
     jz 1f
     swapgs
@@ -199,7 +199,7 @@ ginux_virtio_interrupt_entry:
 );
 
 extern "C" {
-    fn ginux_virtio_interrupt_entry();
+    fn linox_virtio_interrupt_entry();
 }
 
 #[derive(Clone, Copy)]
@@ -1085,7 +1085,7 @@ fn install_virtio_interrupt_at(apic: &LocalApic, vector: u8) -> bool {
     PCI_INTERRUPTS
         .forced_timeout_object
         .store(0, Ordering::SeqCst);
-    cpu::install_interrupt_gate(vector, ginux_virtio_interrupt_entry as *const () as usize)
+    cpu::install_interrupt_gate(vector, linox_virtio_interrupt_entry as *const () as usize)
 }
 
 fn retire_virtio_interrupt(apic: &LocalApic) -> bool {

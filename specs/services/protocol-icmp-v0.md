@@ -4,7 +4,7 @@
 ICMPv4 echo request in ring 3 under QEMU/TCG.
 
 After v4 validates Ethernet, learned ARP identity, and the fixed IPv4 header,
-the `ginux-protocol-state` parser requires:
+the `linox-protocol-state` parser requires:
 
 - at least the eight-byte ICMP echo header;
 - type 8 and code 0;

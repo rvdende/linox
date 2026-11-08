@@ -777,13 +777,13 @@ struct ProcessTable {
     /// pid: one entry per mark, checked against the process when looked at
     /// (`next_live_futex_sleep_deadline`) rather than taken out wherever a
     /// mark ends. Lossy after an allocation failure, until rebuilt.
-    sleepers: ginux_deadline_heap::DeadlineHeap<u32>,
+    sleepers: linox_deadline_heap::DeadlineHeap<u32>,
     sleepers_lossy: bool,
 }
 
 /// One installed seccomp program and the filter before it in its chain.
 struct SeccompFilter {
-    program: ginux_seccomp::Program,
+    program: linox_seccomp::Program,
     /// Index + 1 of the previous filter, or 0.
     previous: u32,
     /// The chain's instructions up to here, each filter counting 4 more,
@@ -809,7 +809,7 @@ impl ProcessTable {
             sharing: false,
             dispatch_cursor: 0,
             init: None,
-            sleepers: ginux_deadline_heap::DeadlineHeap::new(),
+            sleepers: linox_deadline_heap::DeadlineHeap::new(),
             sleepers_lossy: false,
         }
     }
@@ -1019,7 +1019,7 @@ impl ProcessTable {
             .and_then(|process| process.scheduler_thread)
         else {
             crate::serial_write(
-                "ginux: process withdraw missing scheduler thread pid/slot/generation: ",
+                "linox: process withdraw missing scheduler thread pid/slot/generation: ",
             );
             crate::serial_write_u64(u64::from(handle.pid));
             crate::serial_write(" ");
@@ -1230,7 +1230,7 @@ impl ProcessTable {
             .fork_execution_stage
             .store(1137, Ordering::Release);
         if child_space.is_none() {
-            crate::serial_write("ginux: runtime fork clone state published/hierarchy/mappings: ");
+            crate::serial_write("linox: runtime fork clone state published/hierarchy/mappings: ");
             crate::serial_write_u64(u64::from(published));
             crate::serial_write(" ");
             crate::serial_write_u64(child_hierarchy.len() as u64);
@@ -1264,7 +1264,7 @@ impl ProcessTable {
                 process_runtime()
                     .fork_execution_stage
                     .store(11382, Ordering::Release);
-                crate::serial_write("ginux: runtime fork child context validation error: ");
+                crate::serial_write("linox: runtime fork child context validation error: ");
                 crate::serial_write_u64(u64::from(
                     parent_context
                         .fork_child()
@@ -1404,7 +1404,7 @@ impl ProcessTable {
                     .find(|lease| lease.address() == frame)
                     .map_or(0, |lease| u64::from(lease.generation()));
                 crate::serial_write(
-                    "ginux: fork frames still listed by pid/not-running/frame/in-mapping/address/its-generation/new-generation, forking parent: ",
+                    "linox: fork frames still listed by pid/not-running/frame/in-mapping/address/its-generation/new-generation, forking parent: ",
                 );
                 for value in [
                     u64::from(process.handle.pid),
@@ -2390,7 +2390,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         test_mapping(TEST_USER_ADDRESS + PAGE_SIZE, frames[5], true, false),
     ];
     if !write_test_hierarchy(&frames[0..4], &init_mappings) {
-        crate::serial_write("ginux: lifecycle stage hierarchy failed\r\n");
+        crate::serial_write("linox: lifecycle stage hierarchy failed\r\n");
         return false;
     }
     if !address_space::set_linux_mapping_wipe_on_fork(
@@ -2398,13 +2398,13 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         TEST_USER_ADDRESS + PAGE_SIZE,
         true,
     ) {
-        crate::serial_write("ginux: lifecycle stage wipe policy failed\r\n");
+        crate::serial_write("linox: lifecycle stage wipe policy failed\r\n");
         return false;
     }
     if address_space::verify_linux_process_root_activation(frames[0])
         || !address_space::inherit_linux_process_kernel_mappings(frames[0])
     {
-        crate::serial_write("ginux: lifecycle stage kernel inheritance failed\r\n");
+        crate::serial_write("linox: lifecycle stage kernel inheritance failed\r\n");
         return false;
     }
     let Some(init_space) = ProcessAddressSpace::new(0, &frames[0..4], &init_mappings) else {
@@ -2556,11 +2556,11 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         (parent_stack as *mut u8).write(0x44);
     }
     if first_child.pid != 3 {
-        crate::serial_write("ginux: lifecycle stage child identity failed\r\n");
+        crate::serial_write("linox: lifecycle stage child identity failed\r\n");
         return false;
     }
     if !table.commit_cloned_fork(first_child, &frames[6..10], &frames[10..12], false) {
-        crate::serial_write("ginux: lifecycle stage cloned fork failed\r\n");
+        crate::serial_write("linox: lifecycle stage cloned fork failed\r\n");
         return false;
     }
     if unsafe { core::slice::from_raw_parts(child_page as *const u8, PROCESS_CHILD_PROGRAM.len()) }
@@ -2572,11 +2572,11 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         || table.begin_exit(first_child, second_space).is_some()
         || table.begin_exit(first_child, stale_expected).is_some()
     {
-        crate::serial_write("ginux: lifecycle stage cloned fork state failed\r\n");
+        crate::serial_write("linox: lifecycle stage cloned fork state failed\r\n");
         return false;
     }
     if unsafe { (child_stack as *const u8).read() } != 0 {
-        crate::serial_write("ginux: lifecycle stage wipe contents failed\r\n");
+        crate::serial_write("linox: lifecycle stage wipe contents failed\r\n");
         return false;
     }
     if table.process_group(first_child.pid) != Some((1, 1))
@@ -2685,13 +2685,13 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         return false;
     };
     if crate::arch::x86_64::smp::online_count() > 1 {
-        crate::serial_write("ginux: scheduled Linux child executed on application processor\r\n");
+        crate::serial_write("linox: scheduled Linux child executed on application processor\r\n");
     }
     if child_exit_status != 42
         || unsafe { (child_stack as *const u8).read() } != 0x5a
         || unsafe { (parent_stack as *const u8).read() } != 0x44
     {
-        crate::serial_write("ginux: lifecycle stage wipe execution failed\r\n");
+        crate::serial_write("linox: lifecycle stage wipe execution failed\r\n");
         return false;
     }
     if crate::arch::x86_64::smp::online_count() > 1 {
@@ -2742,7 +2742,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
             concurrent_context.general,
         );
         let Some(ticket) = ticket else {
-            crate::serial_write("ginux: concurrent Linux process dispatch failed\r\n");
+            crate::serial_write("linox: concurrent Linux process dispatch failed\r\n");
             return false;
         };
         let mut remote_entered = false;
@@ -2755,7 +2755,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         }
         if !remote_entered {
             let _ = crate::arch::x86_64::smp::finish_linux_process(ticket);
-            crate::serial_write("ginux: concurrent Linux process rendezvous failed\r\n");
+            crate::serial_write("linox: concurrent Linux process rendezvous failed\r\n");
             return false;
         }
         let local_status = address_space::execute_linux_process_child(
@@ -2772,7 +2772,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         {
             return false;
         }
-        crate::serial_write("ginux: concurrent Linux processes executed across processors\r\n");
+        crate::serial_write("linox: concurrent Linux processes executed across processors\r\n");
         if !write_test_hierarchy(&frames[12..16], &second_mappings)
             || !address_space::inherit_linux_process_kernel_mappings(frames[12])
         {
@@ -3145,11 +3145,11 @@ fn refresh_live_process_registry_inner(
     validate_address_space: bool,
 ) -> bool {
     let Some(table) = live_process_table_mut() else {
-        crate::serial_write("ginux: live registry refresh has no table\r\n");
+        crate::serial_write("linox: live registry refresh has no table\r\n");
         return false;
     };
     let Some(handle) = table.handle_by_pid(pid) else {
-        crate::serial_write("ginux: live registry refresh has no process\r\n");
+        crate::serial_write("linox: live registry refresh has no process\r\n");
         return false;
     };
     let Some(storage_slot) = table
@@ -3157,7 +3157,7 @@ fn refresh_live_process_registry_inner(
         .and_then(|process| process.address_space)
         .map(|space| usize::from(space.storage_slot))
     else {
-        crate::serial_write("ginux: live registry refresh has no address space\r\n");
+        crate::serial_write("linox: live registry refresh has no address space\r\n");
         return false;
     };
     let address_space = if validate_address_space {
@@ -3170,7 +3170,7 @@ fn refresh_live_process_registry_inner(
         )
     };
     let Some(address_space) = address_space else {
-        crate::serial_write("ginux: live registry refresh rejected address space\r\n");
+        crate::serial_write("linox: live registry refresh rejected address space\r\n");
         return false;
     };
     let context = ProcessExecutionContext {
@@ -3190,7 +3190,7 @@ fn refresh_live_process_registry_inner(
         // Reported for the first few only: a call that retries after a
         // rejection would otherwise flood the serial console.
         crate::serial_write(
-            "ginux: live registry refresh rejected process context pid/state/error/rip/rsp/rflags: ",
+            "linox: live registry refresh rejected process context pid/state/error/rip/rsp/rflags: ",
         );
         let (state, retiring) = table
             .process(handle)
@@ -3402,7 +3402,7 @@ fn finish_live_process_registry_with_refresh_floor(refresh_floor: u32) -> bool {
                 && process.scheduler_thread.is_none()
         });
     if !valid {
-        crate::serial_write("ginux: live process registry finish state: ");
+        crate::serial_write("linox: live process registry finish state: ");
         crate::serial_write_u64(u64::from(table.init.is_some()));
         crate::serial_write(" ");
         crate::serial_write_u64(u64::from(
@@ -3834,7 +3834,7 @@ impl ProcessTable {
 
     /// Puts every current mark back after an allocation failure lost some.
     fn rebuild_sleepers(&mut self) {
-        let mut sleepers = ginux_deadline_heap::DeadlineHeap::new();
+        let mut sleepers = linox_deadline_heap::DeadlineHeap::new();
         for process in self.processes.iter().flatten() {
             if let Some(deadline) = process.marked_asleep_until() {
                 if sleepers.push(deadline, process.handle.pid).is_err() {
@@ -4253,7 +4253,7 @@ impl ProcessTable {
     fn install_seccomp_filter(
         &mut self,
         pid: u32,
-        program: ginux_seccomp::Program,
+        program: linox_seccomp::Program,
     ) -> Result<(), SeccompError> {
         let handle = self.handle_by_pid(pid).ok_or(SeccompError::NoProcess)?;
         let previous = self
@@ -4329,12 +4329,12 @@ impl ProcessTable {
 
     /// The strictest return value of `pid`'s filters for `data`, or None
     /// when it has none.
-    fn seccomp_return(&self, pid: u32, data: &ginux_seccomp::Data) -> Option<u32> {
+    fn seccomp_return(&self, pid: u32, data: &linox_seccomp::Data) -> Option<u32> {
         let mut id = self.process(self.handle_by_pid(pid)?)?.seccomp_filter;
         let mut result = None;
         while let Some(filter) = self.seccomp_filter(id) {
             let value = filter.program.run(data);
-            result = Some(result.map_or(value, |old| ginux_seccomp::strictest(old, value)));
+            result = Some(result.map_or(value, |old| linox_seccomp::strictest(old, value)));
             id = filter.previous;
         }
         result
@@ -4344,7 +4344,7 @@ impl ProcessTable {
 /// seccomp(SECCOMP_SET_MODE_FILTER) for `pid`.
 pub(crate) fn install_live_process_seccomp_filter(
     pid: u32,
-    program: ginux_seccomp::Program,
+    program: linox_seccomp::Program,
 ) -> Result<(), SeccompError> {
     live_process_table_mut()
         .ok_or(SeccompError::NoProcess)?
@@ -4353,7 +4353,7 @@ pub(crate) fn install_live_process_seccomp_filter(
 
 /// What `pid`'s seccomp filters return for a system call, or None without
 /// filters.
-pub(crate) fn live_process_seccomp_return(pid: u32, data: &ginux_seccomp::Data) -> Option<u32> {
+pub(crate) fn live_process_seccomp_return(pid: u32, data: &linox_seccomp::Data) -> Option<u32> {
     live_process_table_mut()?.seccomp_return(pid, data)
 }
 
@@ -5638,7 +5638,7 @@ fn report_fork_preparation_failure(table: &ProcessTable, parent: ProcessHandle) 
         .flatten()
         .filter(|process| matches!(process.state, ProcessState::Zombie { .. }))
         .count();
-    crate::serial_write("ginux: fork refused; parent pid/state/space/context/credentials: ");
+    crate::serial_write("linox: fork refused; parent pid/state/space/context/credentials: ");
     crate::serial_write_u64(u64::from(parent.pid));
     if let Some(process) = table.process(parent) {
         let state = match process.state {
@@ -5678,7 +5678,7 @@ fn write_process_table(table: &ProcessTable) {
             ProcessState::Exiting => 3,
             ProcessState::Zombie { .. } => 4,
         };
-        crate::serial_write("ginux: process pid/state/parent/space/retiring/thread: ");
+        crate::serial_write("linox: process pid/state/parent/space/retiring/thread: ");
         for value in [
             u64::from(process.handle.pid),
             state,
@@ -5738,7 +5738,7 @@ pub(crate) fn begin_live_fork(
         parent_space.is_owned()
     };
     if parent.state != ProcessState::Running || !parent_space_owned {
-        crate::serial_write("ginux: fork parent ownership pid/state/hierarchy/mappings: ");
+        crate::serial_write("linox: fork parent ownership pid/state/hierarchy/mappings: ");
         crate::serial_write_u64(u64::from(parent_pid));
         crate::serial_write(" ");
         crate::serial_write_u64(u64::from(parent.state == ProcessState::Running));
@@ -5756,7 +5756,7 @@ pub(crate) fn begin_live_fork(
             })
             .take(4)
         {
-            crate::serial_write("ginux: fork parent unowned mapping address/frame/generation: ");
+            crate::serial_write("linox: fork parent unowned mapping address/frame/generation: ");
             crate::serial_write_u64(mapping.address as u64);
             crate::serial_write(" ");
             crate::serial_write_u64(mapping.frame.address());
@@ -5908,7 +5908,7 @@ pub(crate) fn begin_live_fork(
         process_runtime()
             .fork_execution_stage
             .store(127, Ordering::Release);
-        crate::serial_write("ginux: fork child context validation error/rip/rsp/fs/mappings: ");
+        crate::serial_write("linox: fork child context validation error/rip/rsp/fs/mappings: ");
         crate::serial_write_u64(u64::from(
             child_context.validation_error(child_space).unwrap_or(0),
         ));
@@ -6735,7 +6735,7 @@ fn verify_live_fork_clone_only_transaction() -> bool {
     };
     let parent_user_namespace = parent.user_namespace;
     if parent.state != ProcessState::Running || !parent_space.is_valid() {
-        crate::serial_write("ginux: clone-only parent state/owned/validated: ");
+        crate::serial_write("linox: clone-only parent state/owned/validated: ");
         crate::serial_write_u64(u64::from(parent.state == ProcessState::Running));
         crate::serial_write(" ");
         crate::serial_write_u64(u64::from(parent_space.is_owned()));
@@ -6865,7 +6865,7 @@ fn verify_live_fork_clone_only_transaction() -> bool {
         && parent_restored
         && frame_count_restored;
     if !valid {
-        crate::serial_write("ginux: clone-only verification state: ");
+        crate::serial_write("linox: clone-only verification state: ");
         for state in [
             child_valid,
             resources_released,

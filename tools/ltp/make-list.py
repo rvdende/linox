@@ -26,7 +26,7 @@ LTP_DEFAULT_TIMEOUT = 30
 RUNTIME_MUL = 0.1
 SLACK = 15
 
-# Tests skipped from their LTP metadata, with the reason recorded: Ginux
+# Tests skipped from their LTP metadata, with the reason recorded: Linox
 # loads no kernel modules (LTP's test modules are not built). Delete a rule
 # to run those tests again.
 SKIP_RULES = (
@@ -130,7 +130,7 @@ def main():
             budgets += 1
         else:
             lines.append(f"{tag} {command}")
-    # Curated tests from outside runtest/syscalls (Ginux's own tests in
+    # Curated tests from outside runtest/syscalls (Linox's own tests in
     # tools/ltp/tests, the memory controller's) stay, at the end.
     extra = [line for tag, line in curated.items() if tag not in listed]
     if extra:

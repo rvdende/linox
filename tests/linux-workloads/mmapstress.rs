@@ -1,4 +1,4 @@
-// mmap/munmap/mremap/madvise stress test for Ginux, shaped like musl
+// mmap/munmap/mremap/madvise stress test for Linox, shaped like musl
 // mallocng's group traffic: many small anonymous mappings, some adjacent,
 // unmapped and moved in random order, with every surviving page's pattern
 // checked after each operation.

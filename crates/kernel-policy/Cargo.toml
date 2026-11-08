@@ -1,5 +1,5 @@
 [package]
-name = "ginux-kernel-policy"
+name = "linox-kernel-policy"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true

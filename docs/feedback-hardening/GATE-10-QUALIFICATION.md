@@ -1,6 +1,6 @@
 # Gate 10 Qualification and Comparison
 
-Gate 10 qualifies commit `94db6ccc` against the published Ginux research
+Gate 10 qualifies commit `94db6ccc` against the published Linox research
 baseline. Every command in the frozen matrix passed. The complete evidence set
 is indexed in [`gate-10-results/README.md`](gate-10-results/README.md).
 
@@ -21,7 +21,7 @@ is indexed in [`gate-10-results/README.md`](gate-10-results/README.md).
 ## Published single-CPU comparison
 
 The final boot median was 14.702 seconds versus the published 12.860-second
-Ginux baseline, a 14.32% increase within the frozen 25% limit. All four
+Linox baseline, a 14.32% increase within the frozen 25% limit. All four
 sysbench medians remained within the frozen 20% tolerance: CPU was 3.94% lower,
 memory 2.74% lower, threads 11.36% lower, and mutex time 2.39% higher. The
 matched Rocky-on-Linux measurements remain context, not a gate threshold.

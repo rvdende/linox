@@ -109,45 +109,45 @@ global_asm!(include_str!("../packet-egress-reuse.S"));
 global_asm!(include_str!("../packet-egress-batch.S"));
 
 extern "C" {
-    fn ginux_volume_writer_start();
-    fn ginux_volume_writer_fault();
-    fn ginux_volume_writer_end();
-    fn ginux_volume_reader_start();
-    fn ginux_volume_reader_end();
-    fn ginux_packet_consumer_start();
-    fn ginux_packet_consumer_end();
-    fn ginux_packet_wait_producer_start();
-    fn ginux_packet_wait_producer_end();
-    fn ginux_packet_wait_consumer_start();
-    fn ginux_packet_wait_consumer_end();
-    fn ginux_packet_wait_stop_helper_start();
-    fn ginux_packet_wait_stop_helper_end();
-    fn ginux_packet_wait_timeout_consumer_start();
-    fn ginux_packet_wait_timeout_consumer_end();
-    fn ginux_packet_wait_timeout_helper_start();
-    fn ginux_packet_wait_timeout_helper_end();
-    fn ginux_packet_egress_wait_producer_start();
-    fn ginux_packet_egress_wait_producer_end();
-    fn ginux_packet_egress_backpressure_producer_start();
-    fn ginux_packet_egress_backpressure_producer_end();
-    fn ginux_packet_egress_backpressure_consumer_start();
-    fn ginux_packet_egress_backpressure_consumer_end();
-    fn ginux_packet_egress_ack_backpressure_producer_start();
-    fn ginux_packet_egress_ack_backpressure_producer_end();
-    fn ginux_packet_egress_reuse_producer_start();
-    fn ginux_packet_egress_reuse_producer_end();
-    fn ginux_packet_egress_batch_producer_start();
-    fn ginux_packet_egress_batch_producer_end();
-    fn ginux_packet_backpressure_producer_start();
-    fn ginux_packet_backpressure_producer_end();
-    fn ginux_packet_backpressure_consumer_start();
-    fn ginux_packet_backpressure_consumer_end();
-    fn ginux_packet_protocol_loop_producer_start();
-    fn ginux_packet_protocol_loop_producer_end();
-    fn ginux_packet_ipv4_producer_start();
-    fn ginux_packet_ipv4_producer_end();
-    fn ginux_packet_egress_consumer_start();
-    fn ginux_packet_egress_consumer_end();
+    fn linox_volume_writer_start();
+    fn linox_volume_writer_fault();
+    fn linox_volume_writer_end();
+    fn linox_volume_reader_start();
+    fn linox_volume_reader_end();
+    fn linox_packet_consumer_start();
+    fn linox_packet_consumer_end();
+    fn linox_packet_wait_producer_start();
+    fn linox_packet_wait_producer_end();
+    fn linox_packet_wait_consumer_start();
+    fn linox_packet_wait_consumer_end();
+    fn linox_packet_wait_stop_helper_start();
+    fn linox_packet_wait_stop_helper_end();
+    fn linox_packet_wait_timeout_consumer_start();
+    fn linox_packet_wait_timeout_consumer_end();
+    fn linox_packet_wait_timeout_helper_start();
+    fn linox_packet_wait_timeout_helper_end();
+    fn linox_packet_egress_wait_producer_start();
+    fn linox_packet_egress_wait_producer_end();
+    fn linox_packet_egress_backpressure_producer_start();
+    fn linox_packet_egress_backpressure_producer_end();
+    fn linox_packet_egress_backpressure_consumer_start();
+    fn linox_packet_egress_backpressure_consumer_end();
+    fn linox_packet_egress_ack_backpressure_producer_start();
+    fn linox_packet_egress_ack_backpressure_producer_end();
+    fn linox_packet_egress_reuse_producer_start();
+    fn linox_packet_egress_reuse_producer_end();
+    fn linox_packet_egress_batch_producer_start();
+    fn linox_packet_egress_batch_producer_end();
+    fn linox_packet_backpressure_producer_start();
+    fn linox_packet_backpressure_producer_end();
+    fn linox_packet_backpressure_consumer_start();
+    fn linox_packet_backpressure_consumer_end();
+    fn linox_packet_protocol_loop_producer_start();
+    fn linox_packet_protocol_loop_producer_end();
+    fn linox_packet_ipv4_producer_start();
+    fn linox_packet_ipv4_producer_end();
+    fn linox_packet_egress_consumer_start();
+    fn linox_packet_egress_consumer_end();
 }
 
 const PAGE_SIZE: usize = 4096;
@@ -325,7 +325,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     }
     let Some(plan) = crate::published_rootfs::process_plan(init) else {
         use crate::published_rootfs::ProcessPlanFailure;
-        crate::serial_write_bytes(b"ginux: cannot launch Linux init ");
+        crate::serial_write_bytes(b"linox: cannot launch Linux init ");
         crate::serial_write_bytes(init);
         crate::serial_write_bytes(b": ");
         match crate::published_rootfs::process_plan_failure(init) {
@@ -371,12 +371,12 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     let Some(frames) =
         memory::allocate_frames::<LINUX_OWNED_FRAME_COUNT>(memory::FrameOwner::KERNEL)
     else {
-        crate::serial_write_bytes(b"ginux: Linux init hierarchy allocation failed\r\n");
+        crate::serial_write_bytes(b"linox: Linux init hierarchy allocation failed\r\n");
         return LinuxProcessOutcome::Failed;
     };
     let Some(runtime_frames) = memory::allocate_runtime_extent::<LINUX_RUNTIME_FRAME_CAPACITY>()
     else {
-        crate::serial_write_bytes(b"ginux: Linux init image allocation failed\r\n");
+        crate::serial_write_bytes(b"linox: Linux init image allocation failed\r\n");
         let _ = memory::release_frames(memory::FrameOwner::KERNEL, frames);
         return LinuxProcessOutcome::Failed;
     };
@@ -711,7 +711,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     }
     let runtime_scrubbed = memory::scrub_runtime_extent(runtime_frames);
     if !valid {
-        crate::serial_write_bytes(b"ginux: Linux init setup failed at stage ");
+        crate::serial_write_bytes(b"linox: Linux init setup failed at stage ");
         crate::serial_write_u64(u64::from(stage));
         crate::serial_write_bytes(b"\r\n");
     }
@@ -734,7 +734,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
             .all(|frame| memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[*frame]));
     if !owned_released {
         crate::serial_write_bytes(
-            b"ginux: Linux init teardown valid/runtime-scrubbed/owned-released: ",
+            b"linox: Linux init teardown valid/runtime-scrubbed/owned-released: ",
         );
         crate::serial_write_u64(u64::from(valid));
         crate::serial_write_bytes(b"/");
@@ -746,7 +746,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     if owned_released {
         let (status, syscall) = cpu::linux_runtime_diagnostics();
         if status.is_some_and(|status| status != 0) || syscall.is_some() {
-            crate::serial_write_bytes(b"ginux: Linux init diagnostics: exit=");
+            crate::serial_write_bytes(b"linox: Linux init diagnostics: exit=");
             status.map_or_else(
                 || crate::serial_write_bytes(b"signal"),
                 |status| crate::serial_write_u64(u64::from(status)),
@@ -800,7 +800,7 @@ fn resume_linux_init(slot: usize, mmap: u64) -> LinuxProcessOutcome {
     if result.valid && released {
         LinuxProcessOutcome::Exited(cpu::linux_runtime_diagnostics().0.unwrap_or(u8::MAX))
     } else {
-        crate::serial_write_bytes(b"ginux: resumed Linux init teardown failed (runtime/frames): ");
+        crate::serial_write_bytes(b"linox: resumed Linux init teardown failed (runtime/frames): ");
         crate::serial_write_u64(u64::from(result.valid));
         crate::serial_write_bytes(b"/");
         crate::serial_write_u64(u64::from(released));
@@ -850,7 +850,7 @@ pub(crate) fn verify_linux_elf_mapping(
     protected_size: usize,
     exec_name: &[u8],
 ) -> bool {
-    crate::serial_write("ginux: beginning Linux ELF mapping verification\r\n");
+    crate::serial_write("linox: beginning Linux ELF mapping verification\r\n");
     let Some(kernel_frames_before) = linux_lifecycle_kernel_frames() else {
         return false;
     };
@@ -1456,7 +1456,7 @@ pub(crate) fn verify_linux_elf_mapping(
                     })
             });
             let execution_result = if exec_rollback_valid && observed {
-                crate::serial_write("ginux: entering Linux ELF verification process\r\n");
+                crate::serial_write("linox: entering Linux ELF verification process\r\n");
                 cpu::verify_linux_elf_entry(&cpu::LinuxElfExecution {
                     runtime: false,
                     entry: startup.initial_entry as usize,
@@ -1662,7 +1662,7 @@ pub(crate) fn verify_linux_elf_mapping(
         && original_frames_released;
     let frame_count_restored = linux_lifecycle_kernel_frames() == Some(kernel_frames_before);
     if cfg!(feature = "verification-boot") && (!released || !frame_count_restored) {
-        crate::serial_write("ginux: Linux mapping cleanup state:");
+        crate::serial_write("linox: Linux mapping cleanup state:");
         for state in [
             valid,
             cleared,
@@ -2935,46 +2935,46 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 );
             activate(kernel_root_physical);
             if !permissions_valid {
-                crate::serial_write_bytes(b"\r\nginux: linked dynamic permissions invalid");
+                crate::serial_write_bytes(b"\r\nlinox: linked dynamic permissions invalid");
             }
             if !executed {
-                crate::serial_write_bytes(b"\r\nginux: linked dynamic workload incomplete");
+                crate::serial_write_bytes(b"\r\nlinox: linked dynamic workload incomplete");
             }
             if !mapping_removed {
-                crate::serial_write_bytes(b"\r\nginux: linked dynamic mmap teardown incomplete");
+                crate::serial_write_bytes(b"\r\nlinox: linked dynamic mmap teardown incomplete");
             }
             if !tls_runtime_valid {
-                crate::serial_write_bytes(b"\r\nginux: initial Linux TLS runtime invalid");
+                crate::serial_write_bytes(b"\r\nlinox: initial Linux TLS runtime invalid");
             }
             if !sibling_tls_runtime_valid {
-                crate::serial_write_bytes(b"\r\nginux: sibling Linux TLS runtime invalid");
+                crate::serial_write_bytes(b"\r\nlinox: sibling Linux TLS runtime invalid");
             }
             if !sibling_stack_runtime_valid {
-                crate::serial_write_bytes(b"\r\nginux: sibling Linux stack runtime invalid");
+                crate::serial_write_bytes(b"\r\nlinox: sibling Linux stack runtime invalid");
             }
             if !exec_stack_mapping_valid {
-                crate::serial_write_bytes(b"\r\nginux: replacement Linux stack invalid");
+                crate::serial_write_bytes(b"\r\nlinox: replacement Linux stack invalid");
             }
             if !exec_heap_mapping_valid {
-                crate::serial_write_bytes(b"\r\nginux: replacement Linux heap invalid");
+                crate::serial_write_bytes(b"\r\nlinox: replacement Linux heap invalid");
             }
             if !exec_tls_mappings_valid {
-                crate::serial_write_bytes(b"\r\nginux: replacement Linux TLS mappings invalid");
+                crate::serial_write_bytes(b"\r\nlinox: replacement Linux TLS mappings invalid");
             }
             if !exec_sibling_stack_mapping_valid {
-                crate::serial_write_bytes(b"\r\nginux: replacement Linux sibling stack invalid");
+                crate::serial_write_bytes(b"\r\nlinox: replacement Linux sibling stack invalid");
             }
             if !main_permissions_valid {
-                crate::serial_write_bytes(b"\r\nginux: userspace main mapping invalid");
+                crate::serial_write_bytes(b"\r\nlinox: userspace main mapping invalid");
             }
             if !dependency_permissions_valid {
-                crate::serial_write_bytes(b"\r\nginux: userspace dependency mapping invalid");
+                crate::serial_write_bytes(b"\r\nlinox: userspace dependency mapping invalid");
             }
             if !interpreter_relocated {
-                crate::serial_write_bytes(b"\r\nginux: linked interpreter relocation mismatch");
+                crate::serial_write_bytes(b"\r\nlinox: linked interpreter relocation mismatch");
             }
             if !main_relocated {
-                crate::serial_write_bytes(b"\r\nginux: linked PIE relocation mismatch");
+                crate::serial_write_bytes(b"\r\nlinox: linked PIE relocation mismatch");
                 if !main_relative_relocated {
                     crate::serial_write_bytes(b" relative");
                 }
@@ -2992,10 +2992,10 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 }
             }
             if !dependency_relocated {
-                crate::serial_write_bytes(b"\r\nginux: linked DSO relocation mismatch");
+                crate::serial_write_bytes(b"\r\nlinox: linked DSO relocation mismatch");
             }
             if !auxiliary_relocated {
-                crate::serial_write_bytes(b"\r\nginux: linked auxiliary DSO relocation mismatch");
+                crate::serial_write_bytes(b"\r\nlinox: linked auxiliary DSO relocation mismatch");
             }
             Some(
                 permissions_valid
@@ -3119,7 +3119,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
         frame_count_restored,
     ];
     if cfg!(feature = "verification-boot") && cleanup.contains(&false) {
-        crate::serial_write("ginux: interpreted Linux mapping cleanup state:");
+        crate::serial_write("linox: interpreted Linux mapping cleanup state:");
         for state in cleanup {
             crate::serial_write(" ");
             crate::serial_write_u64(u64::from(state));
@@ -3673,7 +3673,7 @@ pub(crate) fn current_linux_tls_rematerializable(
 ) -> bool {
     let valid = current_linux_tls_frames(dependency_plan, thread_pointers).is_some();
     if !valid {
-        crate::serial_write("ginux: TLS page diagnostics:");
+        crate::serial_write("linox: TLS page diagnostics:");
         for thread_pointer in thread_pointers {
             let page = thread_pointer & !(PAGE_SIZE as u64 - 1);
             let entry = current_linux_leaf(page).map_or(0, |leaf| leaf.read());
@@ -4801,7 +4801,7 @@ pub(crate) fn complete_current_linux_process_snapshot(
                 if value & device == device {
                     continue;
                 }
-                crate::serial_write_bytes(b"ginux: snapshot page without a frame address/entry: ");
+                crate::serial_write_bytes(b"linox: snapshot page without a frame address/entry: ");
                 crate::serial_write_u64(address);
                 crate::serial_write_bytes(b" ");
                 crate::serial_write_u64(value);
@@ -5102,7 +5102,7 @@ pub(crate) fn resume_live_linux_process(
             owned && cpu::resume_live_linux_process(entry, stack, fs_base, general, rflags);
         let restored = current_root() == previous;
         if cfg!(feature = "verification-boot") && !(owned && resumed && restored) {
-            crate::serial_write("ginux: same-root Linux resume owned/resumed/restored: ");
+            crate::serial_write("linox: same-root Linux resume owned/resumed/restored: ");
             crate::serial_write_u64(u64::from(owned));
             crate::serial_write(" ");
             crate::serial_write_u64(u64::from(resumed));
@@ -5114,7 +5114,7 @@ pub(crate) fn resume_live_linux_process(
     }
     if !verify_linux_process_root_activation(root) || current_root() != previous {
         if cfg!(feature = "verification-boot") {
-            crate::serial_write("ginux: cross-root Linux resume activation rejected\r\n");
+            crate::serial_write("linox: cross-root Linux resume activation rejected\r\n");
         }
         return false;
     }
@@ -5126,7 +5126,7 @@ pub(crate) fn resume_live_linux_process(
     // and triple-fault. Fall back to the kernel's tables and report it.
     if !linux_root_is_usable(previous) {
         unsafe { activate(paging::kernel_root_address()) };
-        crate::serial_write_raw(b"ginux: resume returned to a released address space; root ");
+        crate::serial_write_raw(b"linox: resume returned to a released address space; root ");
         crate::serial_write_u64(previous);
         crate::serial_write_raw(b" resumed root ");
         crate::serial_write_u64(root.address());
@@ -5186,7 +5186,7 @@ pub(crate) fn copy_to_linux_process(
         let offset = address & (PAGE_SIZE - 1);
         let length = (input.len() - copied).min(PAGE_SIZE - offset);
         let Some(leaf) = linux_leaf_in_root(root.address(), page as u64) else {
-            crate::serial_write("ginux: console input page-table leaf unavailable\r\n");
+            crate::serial_write("linox: console input page-table leaf unavailable\r\n");
             return false;
         };
         let mut value = leaf.read();
@@ -5196,7 +5196,7 @@ pub(crate) fn copy_to_linux_process(
             value = leaf.read();
         }
         if value & (PRESENT | USER | WRITABLE) != PRESENT | USER | WRITABLE {
-            crate::serial_write("ginux: console input page is not writable, flags: ");
+            crate::serial_write("linox: console input page is not writable, flags: ");
             crate::serial_write_u64(value & 0xfff);
             crate::serial_write("\r\n");
             return false;
@@ -5208,7 +5208,7 @@ pub(crate) fn copy_to_linux_process(
                     .filter(|frame| memory::frame_lease_is_runtime(*frame))
             });
         let Some(target) = frame.and_then(memory::FrameLease::direct_map_address) else {
-            crate::serial_write("ginux: console input frame is unavailable\r\n");
+            crate::serial_write("linox: console input frame is unavailable\r\n");
             return false;
         };
         unsafe {
@@ -6316,7 +6316,7 @@ pub(crate) fn restore_root_after_resume(previous: u64) -> bool {
         true
     } else {
         unsafe { activate(paging::kernel_root_address()) };
-        crate::serial_write_raw(b"ginux: resume returned to a released address space\r\n");
+        crate::serial_write_raw(b"linox: resume returned to a released address space\r\n");
         false
     }
 }
@@ -7926,7 +7926,7 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
                         || value & device == device)
                 {
                     crate::serial_write_bytes(
-                        b"ginux: retiring page without a frame address/entry: ",
+                        b"linox: retiring page without a frame address/entry: ",
                     );
                     crate::serial_write_u64(address);
                     crate::serial_write_bytes(b" ");
@@ -7991,7 +7991,7 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
         || !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[root])
         || !validate(root.address(), 0, 0)
     {
-        crate::serial_write_bytes(b"ginux: address space retirement refused current/owned: ");
+        crate::serial_write_bytes(b"linox: address space retirement refused current/owned: ");
         crate::serial_write_u64(u64::from(root.address() == current_root()));
         crate::serial_write_bytes(b" ");
         crate::serial_write_u64(u64::from(memory::frames_owned_by(
@@ -8596,11 +8596,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         Some((USER_TEST_ADDRESS + index * PAGE_SIZE, physical))
     }
 
-    fn write_boot_info(&self, info: ginux_native_abi::NativeServiceBootV0) -> bool {
+    fn write_boot_info(&self, info: linox_native_abi::NativeServiceBootV0) -> bool {
         if !info.is_valid_virtio_block() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeServiceBootV0>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeServiceBootV0>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8611,15 +8611,15 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info(&self, info: ginux_native_abi::NativeNetworkBootV0) -> bool {
+    fn write_network_boot_info(&self, info: linox_native_abi::NativeNetworkBootV0) -> bool {
         if !info.is_valid_virtio_network() {
             return false;
         }
         self.write_network_boot_info_raw(info)
     }
 
-    fn write_network_boot_info_raw(&self, info: ginux_native_abi::NativeNetworkBootV0) -> bool {
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV0>(
+    fn write_network_boot_info_raw(&self, info: linox_native_abi::NativeNetworkBootV0) -> bool {
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV0>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8630,11 +8630,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v1(&self, info: ginux_native_abi::NativeNetworkBootV1) -> bool {
+    fn write_network_boot_info_v1(&self, info: linox_native_abi::NativeNetworkBootV1) -> bool {
         if !info.is_valid_packet_handoff() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV1>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV1>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8645,11 +8645,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v2(&self, info: ginux_native_abi::NativeNetworkBootV2) -> bool {
+    fn write_network_boot_info_v2(&self, info: linox_native_abi::NativeNetworkBootV2) -> bool {
         if !info.is_valid_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV2>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV2>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8660,11 +8660,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v3(&self, info: ginux_native_abi::NativeNetworkBootV3) -> bool {
+    fn write_network_boot_info_v3(&self, info: linox_native_abi::NativeNetworkBootV3) -> bool {
         if !info.is_valid_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV3>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV3>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8675,11 +8675,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v4(&self, info: ginux_native_abi::NativeNetworkBootV4) -> bool {
+    fn write_network_boot_info_v4(&self, info: linox_native_abi::NativeNetworkBootV4) -> bool {
         if !info.is_valid_waiting_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV4>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV4>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8690,11 +8690,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v5(&self, info: ginux_native_abi::NativeNetworkBootV5) -> bool {
+    fn write_network_boot_info_v5(&self, info: linox_native_abi::NativeNetworkBootV5) -> bool {
         if !info.is_valid_resident_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV5>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV5>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8705,11 +8705,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v6(&self, info: ginux_native_abi::NativeNetworkBootV6) -> bool {
+    fn write_network_boot_info_v6(&self, info: linox_native_abi::NativeNetworkBootV6) -> bool {
         if !info.is_valid_resident_reliable_egress_batch() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV6>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV6>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8720,11 +8720,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v7(&self, info: ginux_native_abi::NativeNetworkBootV7) -> bool {
+    fn write_network_boot_info_v7(&self, info: linox_native_abi::NativeNetworkBootV7) -> bool {
         if !info.is_valid_resident_reliable_egress_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV7>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV7>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8735,11 +8735,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_network_boot_info_v8(&self, info: ginux_native_abi::NativeNetworkBootV8) -> bool {
+    fn write_network_boot_info_v8(&self, info: linox_native_abi::NativeNetworkBootV8) -> bool {
         if !info.is_valid_registry_pull() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeNetworkBootV8>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV8>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8750,11 +8750,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info(&self, info: ginux_native_abi::NativeProtocolBootV0) -> bool {
+    fn write_protocol_boot_info(&self, info: linox_native_abi::NativeProtocolBootV0) -> bool {
         if !info.is_valid_arp_consumer() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV0>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV0>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8765,11 +8765,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info_v1(&self, info: ginux_native_abi::NativeProtocolBootV1) -> bool {
+    fn write_protocol_boot_info_v1(&self, info: linox_native_abi::NativeProtocolBootV1) -> bool {
         if !info.is_valid_wait_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV1>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV1>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8780,11 +8780,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info_v2(&self, info: ginux_native_abi::NativeProtocolBootV2) -> bool {
+    fn write_protocol_boot_info_v2(&self, info: linox_native_abi::NativeProtocolBootV2) -> bool {
         if !info.is_valid_supervised_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV2>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV2>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8795,11 +8795,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info_v3(&self, info: ginux_native_abi::NativeProtocolBootV3) -> bool {
+    fn write_protocol_boot_info_v3(&self, info: linox_native_abi::NativeProtocolBootV3) -> bool {
         if !info.is_valid_ipv4_dispatch() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV3>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV3>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8810,11 +8810,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info_v4(&self, info: ginux_native_abi::NativeProtocolBootV4) -> bool {
+    fn write_protocol_boot_info_v4(&self, info: linox_native_abi::NativeProtocolBootV4) -> bool {
         if !info.is_valid_icmp_echo() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV4>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV4>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -8825,11 +8825,11 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         true
     }
 
-    fn write_protocol_boot_info_v5(&self, info: ginux_native_abi::NativeProtocolBootV5) -> bool {
+    fn write_protocol_boot_info_v5(&self, info: linox_native_abi::NativeProtocolBootV5) -> bool {
         if !info.is_valid_icmp_echo_reply() {
             return false;
         }
-        let Some(page) = mapped_frame::<ginux_native_abi::NativeProtocolBootV5>(
+        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV5>(
             self.frames[Self::BOOT_INFO_FRAME].address(),
         ) else {
             return false;
@@ -9044,7 +9044,7 @@ pub(crate) fn run_interactive_controller(image: &crate::native_elf::NativeImage<
             crate::capability::Rights::READ.union(crate::capability::Rights::WRITE),
         ),
     ]) else {
-        crate::serial_write("ginux: controller domain admission failed\r\n");
+        crate::serial_write("linox: controller domain admission failed\r\n");
         return false;
     };
     let (
@@ -9063,15 +9063,15 @@ pub(crate) fn run_interactive_controller(image: &crate::native_elf::NativeImage<
         memory::FrameOwner::domain(controller),
     )
     else {
-        crate::serial_write("ginux: controller capability setup failed\r\n");
+        crate::serial_write("linox: controller capability setup failed\r\n");
         return false;
     };
     let Some(space) = NativeServiceAddressSpace::<
         NATIVE_CONTROLLER_IMAGE_PAGES,
         NATIVE_CONTROLLER_FRAME_COUNT,
     >::new(kernel_root, owner, image) else {
-        crate::serial_write("ginux: controller address-space creation failed\r\n");
-        crate::serial_write("ginux: controller image-pages/owner-frames: ");
+        crate::serial_write("linox: controller address-space creation failed\r\n");
+        crate::serial_write("linox: controller image-pages/owner-frames: ");
         crate::serial_write_u64(image.page_count().unwrap_or(0) as u64);
         crate::serial_write(" ");
         crate::serial_write_u64(memory::owner_live_frame_count(owner).unwrap_or(usize::MAX) as u64);
@@ -9095,31 +9095,31 @@ pub(crate) fn run_interactive_controller(image: &crate::native_elf::NativeImage<
             rights,
         )
     {
-        crate::serial_write("ginux: controller authority validation failed\r\n");
+        crate::serial_write("linox: controller authority validation failed\r\n");
         let _ = space.release();
         return false;
     }
     let root = space.root;
     let Ok(entry) = usize::try_from(space.entry) else {
-        crate::serial_write("ginux: controller entry conversion failed\r\n");
+        crate::serial_write("linox: controller entry conversion failed\r\n");
         let _ = space.release();
         return false;
     };
     let stack = USER_TEST_ADDRESS + (NATIVE_CONTROLLER_IMAGE_PAGES + 3) * PAGE_SIZE;
     if domain::publish_controller_process(controller).is_none() {
-        crate::serial_write("ginux: controller process publication failed\r\n");
+        crate::serial_write("linox: controller process publication failed\r\n");
         return false;
     }
     if !register_address_space(controller, AuxiliaryAddressSpace::Controller(space)) {
-        crate::serial_write("ginux: controller address-space registration failed\r\n");
+        crate::serial_write("linox: controller address-space registration failed\r\n");
         return false;
     }
     if !scheduler::queue_auxiliary(controller, root, entry, stack, console) {
-        crate::serial_write("ginux: controller scheduler queue failed\r\n");
+        crate::serial_write("linox: controller scheduler queue failed\r\n");
         return false;
     }
     if !cpu::activate_user_root(root) {
-        crate::serial_write("ginux: controller root activation failed\r\n");
+        crate::serial_write("linox: controller root activation failed\r\n");
         return false;
     }
     if ADDRESS_SPACE_SERVICES
@@ -9127,7 +9127,7 @@ pub(crate) fn run_interactive_controller(image: &crate::native_elf::NativeImage<
         .compare_exchange(0, controller, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        crate::serial_write("ginux: controller residency publication failed\r\n");
+        crate::serial_write("linox: controller residency publication failed\r\n");
         return false;
     }
     cpu::execute_native_controller(
@@ -9174,7 +9174,7 @@ fn interactive_controller_return_is_valid(
         && event
             == Some((controller << 8) | u64::from(crate::control_abi::LIFECYCLE_AUXILIARY_EXITED))
         && domain::last_lifecycle_event_detail()
-            == Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
+            == Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
         && domain::last_lifecycle_event_has_fault() == Some(false)
         && domain::last_lifecycle_service_identity() == Some(identity)
         && domain::take_lifecycle_event().is_none()
@@ -9182,14 +9182,14 @@ fn interactive_controller_return_is_valid(
 
 pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeImage<'_>) -> bool {
     let Some(auxiliary) = domain::initialize_boot_unprivileged_auxiliary_service() else {
-        crate::serial_write("\r\nginux: native network invariant: domain allocation failed");
+        crate::serial_write("\r\nlinox: native network invariant: domain allocation failed");
         return false;
     };
     let (Some(identity), Some(owner)) = (
         domain::domain_service_identity(auxiliary),
         memory::FrameOwner::domain(auxiliary),
     ) else {
-        crate::serial_write("\r\nginux: native network invariant: identity allocation failed");
+        crate::serial_write("\r\nlinox: native network invariant: identity allocation failed");
         return false;
     };
     let kernel_root = current_root();
@@ -9199,7 +9199,7 @@ pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeIma
         NATIVE_NETWORK_STACK_PAGES,
     >::new(kernel_root, owner, image) else {
         crate::serial_write(
-            "\r\nginux: native network invariant: address-space construction failed",
+            "\r\nlinox: native network invariant: address-space construction failed",
         );
         return false;
     };
@@ -9208,7 +9208,7 @@ pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeIma
         || domain::auxiliary_boot_handle(auxiliary, 0).is_some()
         || memory::owner_live_frame_count(owner) != Some(NATIVE_NETWORK_FRAME_COUNT)
     {
-        crate::serial_write("\r\nginux: native network invariant: initial layout rejected");
+        crate::serial_write("\r\nlinox: native network invariant: initial layout rejected");
         let _ = space.release();
         return false;
     }
@@ -9228,7 +9228,7 @@ pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeIma
             || frames.dma().is_some()
             || !frames.frames_owned_by(owner)
     }) {
-        crate::serial_write_bytes(b"\r\nginux: native network root frame count: ");
+        crate::serial_write_bytes(b"\r\nlinox: native network root frame count: ");
         crate::serial_write_u64(
             root_frames
                 .as_ref()
@@ -9238,15 +9238,15 @@ pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeIma
         return false;
     }
     if !register_address_space(auxiliary, AuxiliaryAddressSpace::Network(space)) {
-        crate::serial_write_bytes(b"\r\nginux: native network registration failed");
+        crate::serial_write_bytes(b"\r\nlinox: native network registration failed");
         return false;
     }
     if !scheduler::queue_auxiliary(auxiliary, root, entry, stack, 0) {
-        crate::serial_write_bytes(b"\r\nginux: native network scheduler queue failed");
+        crate::serial_write_bytes(b"\r\nlinox: native network scheduler queue failed");
         return false;
     }
     if !cpu::activate_user_root(root) {
-        crate::serial_write_bytes(b"\r\nginux: native network root activation failed");
+        crate::serial_write_bytes(b"\r\nlinox: native network root activation failed");
         return false;
     }
     cpu::execute_native_auxiliary(entry, stack, 0, 0, auxiliary, identity);
@@ -9262,12 +9262,12 @@ pub(crate) fn verify_native_network_service(image: &crate::native_elf::NativeIma
             kind == crate::control_abi::LIFECYCLE_AUXILIARY_EXITED && audited == auxiliary
         })
         && domain::last_lifecycle_event_detail()
-            == Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
+            == Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
         && domain::last_lifecycle_event_has_fault() == Some(false)
         && domain::last_lifecycle_service_identity() == Some(identity)
         && domain::take_lifecycle_event().is_none();
     if !valid {
-        crate::serial_write_bytes(b"\r\nginux: native network event/status/roots/frames: ");
+        crate::serial_write_bytes(b"\r\nlinox: native network event/status/roots/frames: ");
         for value in [
             event.unwrap_or(u64::MAX),
             domain::last_lifecycle_event_detail().map_or(u64::MAX, u64::from),
@@ -10146,12 +10146,12 @@ pub(crate) fn verify_packet_wait_wakeup(timed: bool) -> bool {
     }
     let (Some(producer_program), Some(consumer_program)) = (
         volume_program(
-            ginux_packet_wait_producer_start as *const () as usize,
-            ginux_packet_wait_producer_end as *const () as usize,
+            linox_packet_wait_producer_start as *const () as usize,
+            linox_packet_wait_producer_end as *const () as usize,
         ),
         volume_program(
-            ginux_packet_wait_consumer_start as *const () as usize,
-            ginux_packet_wait_consumer_end as *const () as usize,
+            linox_packet_wait_consumer_start as *const () as usize,
+            linox_packet_wait_consumer_end as *const () as usize,
         ),
     ) else {
         return false;
@@ -10315,12 +10315,12 @@ pub(crate) fn verify_packet_wait_cancellation() -> bool {
     }
     let (Some(waiter_program), Some(helper_program)) = (
         volume_program(
-            ginux_packet_wait_consumer_start as *const () as usize,
-            ginux_packet_wait_consumer_end as *const () as usize,
+            linox_packet_wait_consumer_start as *const () as usize,
+            linox_packet_wait_consumer_end as *const () as usize,
         ),
         volume_program(
-            ginux_packet_wait_stop_helper_start as *const () as usize,
-            ginux_packet_wait_stop_helper_end as *const () as usize,
+            linox_packet_wait_stop_helper_start as *const () as usize,
+            linox_packet_wait_stop_helper_end as *const () as usize,
         ),
     ) else {
         return false;
@@ -10451,12 +10451,12 @@ pub(crate) fn verify_packet_wait_timeout() -> bool {
     }
     let (Some(waiter_program), Some(helper_program)) = (
         volume_program(
-            ginux_packet_wait_timeout_consumer_start as *const () as usize,
-            ginux_packet_wait_timeout_consumer_end as *const () as usize,
+            linox_packet_wait_timeout_consumer_start as *const () as usize,
+            linox_packet_wait_timeout_consumer_end as *const () as usize,
         ),
         volume_program(
-            ginux_packet_wait_timeout_helper_start as *const () as usize,
-            ginux_packet_wait_timeout_helper_end as *const () as usize,
+            linox_packet_wait_timeout_helper_start as *const () as usize,
+            linox_packet_wait_timeout_helper_end as *const () as usize,
         ),
     ) else {
         return false;
@@ -10567,12 +10567,12 @@ pub(crate) fn verify_packet_backpressure_wakeup() -> bool {
     }
     let (Some(producer_program), Some(consumer_program)) = (
         volume_program(
-            ginux_packet_backpressure_producer_start as *const () as usize,
-            ginux_packet_backpressure_producer_end as *const () as usize,
+            linox_packet_backpressure_producer_start as *const () as usize,
+            linox_packet_backpressure_producer_end as *const () as usize,
         ),
         volume_program(
-            ginux_packet_backpressure_consumer_start as *const () as usize,
-            ginux_packet_backpressure_consumer_end as *const () as usize,
+            linox_packet_backpressure_consumer_start as *const () as usize,
+            linox_packet_backpressure_consumer_end as *const () as usize,
         ),
     ) else {
         return false;
@@ -10698,12 +10698,12 @@ pub(crate) fn verify_egress_backpressure_wakeup() -> bool {
     }
     let (Some(producer_program), Some(consumer_program)) = (
         volume_program(
-            ginux_packet_egress_backpressure_producer_start as *const () as usize,
-            ginux_packet_egress_backpressure_producer_end as *const () as usize,
+            linox_packet_egress_backpressure_producer_start as *const () as usize,
+            linox_packet_egress_backpressure_producer_end as *const () as usize,
         ),
         volume_program(
-            ginux_packet_egress_backpressure_consumer_start as *const () as usize,
-            ginux_packet_egress_backpressure_consumer_end as *const () as usize,
+            linox_packet_egress_backpressure_consumer_start as *const () as usize,
+            linox_packet_egress_backpressure_consumer_end as *const () as usize,
         ),
     ) else {
         return false;
@@ -10886,7 +10886,7 @@ fn verify_native_protocol_consumer(
     let Some(space) = NativeServiceAddressSpace::new(kernel_root, owner, image) else {
         return false;
     };
-    let boot = ginux_native_abi::NativeProtocolBootV0::arp_consumer(
+    let boot = linox_native_abi::NativeProtocolBootV0::arp_consumer(
         handle,
         expected.sequence,
         0x5254_0012_3456,
@@ -10942,7 +10942,7 @@ fn verify_native_protocol_consumer(
         && event
             == Some((auxiliary << 8) | u64::from(crate::control_abi::LIFECYCLE_AUXILIARY_EXITED))
         && domain::last_lifecycle_event_detail()
-            == Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
+            == Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
         && domain::last_lifecycle_event_has_fault() == Some(false)
         && domain::last_lifecycle_service_identity() == Some(identity)
         && domain::take_lifecycle_event().is_none()
@@ -11041,8 +11041,8 @@ pub(crate) fn verify_native_protocol_wait_loop(image: &crate::native_elf::Native
         return false;
     }
     let Some(producer_program) = volume_program(
-        ginux_packet_protocol_loop_producer_start as *const () as usize,
-        ginux_packet_protocol_loop_producer_end as *const () as usize,
+        linox_packet_protocol_loop_producer_start as *const () as usize,
+        linox_packet_protocol_loop_producer_end as *const () as usize,
     ) else {
         return false;
     };
@@ -11078,14 +11078,14 @@ pub(crate) fn verify_native_protocol_wait_loop(image: &crate::native_elf::Native
     else {
         return false;
     };
-    let boot_v0 = ginux_native_abi::NativeProtocolBootV0::arp_consumer(
+    let boot_v0 = linox_native_abi::NativeProtocolBootV0::arp_consumer(
         consumer_handle,
         first_sequence,
         0x5254_0012_3456,
         u32::from_be_bytes([10, 0, 2, 15]),
         u32::from_be_bytes([10, 0, 2, 2]),
     );
-    let boot = ginux_native_abi::NativeProtocolBootV1::wait_loop(boot_v0, 2);
+    let boot = linox_native_abi::NativeProtocolBootV1::wait_loop(boot_v0, 2);
     if !consumer_space.layout_is_valid(image)
         || !consumer_space.relocations_are_valid(image)
         || !consumer_space.write_protocol_boot_info_v1(boot)
@@ -11149,7 +11149,7 @@ pub(crate) fn verify_native_protocol_wait_loop(image: &crate::native_elf::Native
         && consumer_event
             == Some((consumer << 8) | u64::from(crate::control_abi::LIFECYCLE_AUXILIARY_EXITED))
         && domain::last_lifecycle_event_detail()
-            == Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
+            == Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
         && domain::last_lifecycle_service_identity() == Some(consumer_identity)
         && domain::take_lifecycle_event().is_none()
         && second_delivery.is_some_and(|metadata| {
@@ -11177,8 +11177,8 @@ pub(crate) fn verify_supervised_native_protocol_loop(
         return false;
     }
     let Some(producer_program) = volume_program(
-        ginux_packet_protocol_loop_producer_start as *const () as usize,
-        ginux_packet_protocol_loop_producer_end as *const () as usize,
+        linox_packet_protocol_loop_producer_start as *const () as usize,
+        linox_packet_protocol_loop_producer_end as *const () as usize,
     ) else {
         return false;
     };
@@ -11213,14 +11213,14 @@ pub(crate) fn verify_supervised_native_protocol_loop(
     else {
         return false;
     };
-    let boot_v0 = ginux_native_abi::NativeProtocolBootV0::arp_consumer(
+    let boot_v0 = linox_native_abi::NativeProtocolBootV0::arp_consumer(
         consumer_handle,
         first_sequence,
         0x5254_0012_3456,
         u32::from_be_bytes([10, 0, 2, 15]),
         u32::from_be_bytes([10, 0, 2, 2]),
     );
-    let boot = ginux_native_abi::NativeProtocolBootV2::supervised_loop(boot_v0);
+    let boot = linox_native_abi::NativeProtocolBootV2::supervised_loop(boot_v0);
     if !consumer_space.layout_is_valid(image)
         || !consumer_space.relocations_are_valid(image)
         || !consumer_space.write_protocol_boot_info_v2(boot)
@@ -11359,8 +11359,8 @@ fn verify_native_protocol_ipv4_mode(
         return false;
     }
     let Some(producer_program) = volume_program(
-        ginux_packet_ipv4_producer_start as *const () as usize,
-        ginux_packet_ipv4_producer_end as *const () as usize,
+        linox_packet_ipv4_producer_start as *const () as usize,
+        linox_packet_ipv4_producer_end as *const () as usize,
     ) else {
         return false;
     };
@@ -11442,7 +11442,7 @@ fn verify_native_protocol_ipv4_mode(
     else {
         return false;
     };
-    let boot_v0 = ginux_native_abi::NativeProtocolBootV0::arp_consumer(
+    let boot_v0 = linox_native_abi::NativeProtocolBootV0::arp_consumer(
         consumer_handle,
         first_sequence,
         0x5254_0012_3456,
@@ -11456,7 +11456,7 @@ fn verify_native_protocol_ipv4_mode(
     }
     let boot_written = if icmp_reply {
         consumer_space.write_protocol_boot_info_v5(
-            ginux_native_abi::NativeProtocolBootV5::icmp_echo_reply(
+            linox_native_abi::NativeProtocolBootV5::icmp_echo_reply(
                 boot_v0,
                 egress_handle.unwrap_or(0),
                 expected_egress_sequence.unwrap_or(0),
@@ -11464,10 +11464,10 @@ fn verify_native_protocol_ipv4_mode(
         )
     } else if icmp_echo {
         consumer_space
-            .write_protocol_boot_info_v4(ginux_native_abi::NativeProtocolBootV4::icmp_echo(boot_v0))
+            .write_protocol_boot_info_v4(linox_native_abi::NativeProtocolBootV4::icmp_echo(boot_v0))
     } else {
         consumer_space.write_protocol_boot_info_v3(
-            ginux_native_abi::NativeProtocolBootV3::ipv4_dispatch(boot_v0),
+            linox_native_abi::NativeProtocolBootV3::ipv4_dispatch(boot_v0),
         )
     };
     if !boot_written || icmp_reply && !packet::bind_egress_producer(consumer, consumer_identity) {
@@ -11532,7 +11532,7 @@ fn verify_native_protocol_ipv4_mode(
         && consumer_event
             == Some((consumer << 8) | u64::from(crate::control_abi::LIFECYCLE_AUXILIARY_EXITED))
         && domain::last_lifecycle_event_detail()
-            == Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
+            == Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED)
         && domain::last_lifecycle_service_identity() == Some(consumer_identity)
         && domain::take_lifecycle_event().is_none()
         && second_delivery.is_some_and(|metadata| {
@@ -11582,8 +11582,8 @@ fn verify_ring3_egress_consumer(expected_sequence: u64) -> bool {
         return false;
     }
     let Some(program) = volume_program(
-        ginux_packet_egress_consumer_start as *const () as usize,
-        ginux_packet_egress_consumer_end as *const () as usize,
+        linox_packet_egress_consumer_start as *const () as usize,
+        linox_packet_egress_consumer_end as *const () as usize,
     ) else {
         return false;
     };
@@ -11676,8 +11676,8 @@ fn verify_ring3_packet_consumer(expected_sequence: u64, more_pending: bool) -> b
         return false;
     }
     let Some(program) = volume_program(
-        ginux_packet_consumer_start as *const () as usize,
-        ginux_packet_consumer_end as *const () as usize,
+        linox_packet_consumer_start as *const () as usize,
+        linox_packet_consumer_end as *const () as usize,
     ) else {
         return false;
     };
@@ -11948,7 +11948,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
     const NOTIFICATION_PAGE_INDEX: usize = DMA_PAGE_INDEX + 2;
     let Some((common_physical, common_length)) = device.common_region() else {
         if registry {
-            crate::serial_write("ginux: OCI registry common region unavailable\r\n");
+            crate::serial_write("linox: OCI registry common region unavailable\r\n");
         }
         return false;
     };
@@ -11972,7 +11972,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         || !pci::network_msix_is_disabled(device)
     {
         if registry {
-            crate::serial_write("ginux: OCI registry device state rejected\r\n");
+            crate::serial_write("linox: OCI registry device state rejected\r\n");
         }
         return false;
     }
@@ -11981,7 +11981,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         || transmit_probe != interrupt.is_some()
     {
         if registry {
-            crate::serial_write("ginux: OCI registry activation mode rejected\r\n");
+            crate::serial_write("linox: OCI registry activation mode rejected\r\n");
         }
         return false;
     }
@@ -11996,7 +11996,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
             crate::control_abi::NETWORK_DEVICE_OBJECT,
             rights,
             9,
-            ginux_native_abi::NATIVE_IMAGE_STORE_OBJECT,
+            linox_native_abi::NATIVE_IMAGE_STORE_OBJECT,
             crate::capability::Rights::WRITE,
         )
     } else if packet_handoff {
@@ -12038,7 +12038,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
     };
     let Some(auxiliary) = auxiliary else {
         if registry {
-            crate::serial_write("ginux: OCI registry domain allocation rejected\r\n");
+            crate::serial_write("linox: OCI registry domain allocation rejected\r\n");
         }
         return false;
     };
@@ -12048,7 +12048,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         memory::FrameOwner::domain(auxiliary),
     ) else {
         if registry {
-            crate::serial_write("ginux: OCI registry primary capability rejected\r\n");
+            crate::serial_write("linox: OCI registry primary capability rejected\r\n");
         }
         return false;
     };
@@ -12099,17 +12099,17 @@ fn verify_native_network_bootstrap_run_with_evidence(
             !domain::handle_permits(
                 auxiliary,
                 store_handle,
-                ginux_native_abi::NATIVE_IMAGE_STORE_OBJECT,
+                linox_native_abi::NATIVE_IMAGE_STORE_OBJECT,
                 crate::capability::Rights::WRITE,
             ) || domain::handle_permits(
                 auxiliary,
                 store_handle,
-                ginux_native_abi::NATIVE_IMAGE_STORE_OBJECT,
+                linox_native_abi::NATIVE_IMAGE_STORE_OBJECT,
                 crate::capability::Rights::READ,
             )
         })
     {
-        crate::serial_write("ginux: OCI registry image-store capability rejected\r\n");
+        crate::serial_write("linox: OCI registry image-store capability rejected\r\n");
         return false;
     }
     let kernel_root = current_root();
@@ -12119,7 +12119,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         NATIVE_NETWORK_STACK_PAGES,
     >::new(kernel_root, owner, image) else {
         if registry {
-            crate::serial_write("ginux: OCI registry service address space rejected\r\n");
+            crate::serial_write("linox: OCI registry service address space rejected\r\n");
         }
         return false;
     };
@@ -12129,7 +12129,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         || !space.map_uncached_device_page(NOTIFICATION_PAGE_INDEX, receive_page)
     {
         if registry {
-            crate::serial_write("ginux: OCI registry service mappings rejected\r\n");
+            crate::serial_write("linox: OCI registry service mappings rejected\r\n");
         }
         let _ = space.release();
         return false;
@@ -12161,7 +12161,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         .mac
         .into_iter()
         .fold(0_u64, |value, byte| (value << 8) | u64::from(byte));
-    let mut boot = ginux_native_abi::NativeNetworkBootV0::virtio_network(
+    let mut boot = linox_native_abi::NativeNetworkBootV0::virtio_network(
         user_common as u64,
         user_receive as u64,
         user_transmit as u64,
@@ -12173,18 +12173,18 @@ fn verify_native_network_bootstrap_run_with_evidence(
     if reject_reserved {
         boot.reserved = 1;
     } else if active_mapping.is_some() {
-        boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_EMPTY_QUEUES;
+        boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_EMPTY_QUEUES;
         if transmit_probe {
-            boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_TRANSMIT_PROBE;
-            boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_TX_INTERRUPT;
+            boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_TRANSMIT_PROBE;
+            boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_TX_INTERRUPT;
             if receive_arp {
-                boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_ARP_PROBE;
+                boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_ARP_PROBE;
                 if receive_reuse {
-                    boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_RX_REUSE;
+                    boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_RX_REUSE;
                     if mode == NativeNetworkRunMode::PingGateway {
-                        boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_ICMP_PROBE;
+                        boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_ICMP_PROBE;
                     } else if mode == NativeNetworkRunMode::Dhcp {
-                        boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_DHCP;
+                        boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_DHCP;
                     }
                 }
             }
@@ -12196,7 +12196,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
                 let configuration = crate::network::ipv4_configuration();
                 let ipv4 = configuration as u32;
                 let prefix = (configuration >> 32) as u8;
-                ginux_native_abi::NativeNetworkBootV8::registry_pull(
+                linox_native_abi::NativeNetworkBootV8::registry_pull(
                     boot,
                     store_handle,
                     pull.unix_time,
@@ -12215,7 +12215,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_next_sequence().is_some_and(|sequence| {
                 space.write_network_boot_info_v7(
-                    ginux_native_abi::NativeNetworkBootV7::resident_reliable_egress_loop(
+                    linox_native_abi::NativeNetworkBootV7::resident_reliable_egress_loop(
                         boot,
                         packet_handle,
                         sequence,
@@ -12227,7 +12227,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_next_sequence().is_some_and(|sequence| {
                 space.write_network_boot_info_v6(
-                    ginux_native_abi::NativeNetworkBootV6::resident_reliable_egress_batch(
+                    linox_native_abi::NativeNetworkBootV6::resident_reliable_egress_batch(
                         boot,
                         packet_handle,
                         sequence,
@@ -12239,7 +12239,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_next_sequence().is_some_and(|sequence| {
                 space.write_network_boot_info_v5(
-                    ginux_native_abi::NativeNetworkBootV5::resident_reliable_egress_transmit(
+                    linox_native_abi::NativeNetworkBootV5::resident_reliable_egress_transmit(
                         boot,
                         packet_handle,
                         sequence,
@@ -12251,7 +12251,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_next_sequence().is_some_and(|sequence| {
                 space.write_network_boot_info_v4(
-                    ginux_native_abi::NativeNetworkBootV4::waiting_reliable_egress_transmit(
+                    linox_native_abi::NativeNetworkBootV4::waiting_reliable_egress_transmit(
                         boot,
                         packet_handle,
                         sequence,
@@ -12263,7 +12263,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_pending_metadata().is_some_and(|metadata| {
                 space.write_network_boot_info_v3(
-                    ginux_native_abi::NativeNetworkBootV3::reliable_egress_transmit(
+                    linox_native_abi::NativeNetworkBootV3::reliable_egress_transmit(
                         boot,
                         packet_handle,
                         metadata.sequence,
@@ -12276,7 +12276,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         secondary_handle.is_some_and(|packet_handle| {
             packet::egress_pending_metadata().is_some_and(|metadata| {
                 space.write_network_boot_info_v2(
-                    ginux_native_abi::NativeNetworkBootV2::egress_transmit(
+                    linox_native_abi::NativeNetworkBootV2::egress_transmit(
                         boot,
                         packet_handle,
                         metadata.sequence,
@@ -12286,12 +12286,12 @@ fn verify_native_network_bootstrap_run_with_evidence(
         })
     } else if packet_handoff {
         secondary_handle.is_some_and(|packet_handle| {
-            let mut boot = ginux_native_abi::NativeNetworkBootV1::from_v0(boot, packet_handle);
+            let mut boot = linox_native_abi::NativeNetworkBootV1::from_v0(boot, packet_handle);
             if packet_fault {
-                boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_PACKET_FAULT;
+                boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_PACKET_FAULT;
             }
             if packet_batch {
-                boot.features |= ginux_native_abi::NATIVE_NETWORK_FEATURE_PACKET_BATCH;
+                boot.features |= linox_native_abi::NATIVE_NETWORK_FEATURE_PACKET_BATCH;
             }
             space.write_network_boot_info_v1(boot)
         })
@@ -12304,7 +12304,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         || memory::owner_live_frame_count(owner) != Some(NATIVE_NETWORK_FRAME_COUNT + 1)
     {
         if registry {
-            crate::serial_write("ginux: OCI registry boot contract rejected\r\n");
+            crate::serial_write("linox: OCI registry boot contract rejected\r\n");
         }
         let _ = space.release();
         return false;
@@ -12325,14 +12325,14 @@ fn verify_native_network_bootstrap_run_with_evidence(
             || !frames.frames_owned_by(owner)
     }) {
         if registry {
-            crate::serial_write("ginux: OCI registry address-space validation rejected\r\n");
+            crate::serial_write("linox: OCI registry address-space validation rejected\r\n");
         }
         let _ = space.release();
         return false;
     }
     if !register_address_space(auxiliary, AuxiliaryAddressSpace::Network(space)) {
         if registry {
-            crate::serial_write("ginux: OCI registry service registration rejected\r\n");
+            crate::serial_write("linox: OCI registry service registration rejected\r\n");
         }
         return false;
     }
@@ -12376,23 +12376,23 @@ fn verify_native_network_bootstrap_run_with_evidence(
     let egress_producer = if egress_wait {
         let program = if egress_batch {
             volume_program(
-                ginux_packet_egress_batch_producer_start as *const () as usize,
-                ginux_packet_egress_batch_producer_end as *const () as usize,
+                linox_packet_egress_batch_producer_start as *const () as usize,
+                linox_packet_egress_batch_producer_end as *const () as usize,
             )
         } else if egress_reuse {
             volume_program(
-                ginux_packet_egress_reuse_producer_start as *const () as usize,
-                ginux_packet_egress_reuse_producer_end as *const () as usize,
+                linox_packet_egress_reuse_producer_start as *const () as usize,
+                linox_packet_egress_reuse_producer_end as *const () as usize,
             )
         } else if egress_ack_backpressure {
             volume_program(
-                ginux_packet_egress_ack_backpressure_producer_start as *const () as usize,
-                ginux_packet_egress_ack_backpressure_producer_end as *const () as usize,
+                linox_packet_egress_ack_backpressure_producer_start as *const () as usize,
+                linox_packet_egress_ack_backpressure_producer_end as *const () as usize,
             )
         } else {
             volume_program(
-                ginux_packet_egress_wait_producer_start as *const () as usize,
-                ginux_packet_egress_wait_producer_end as *const () as usize,
+                linox_packet_egress_wait_producer_start as *const () as usize,
+                linox_packet_egress_wait_producer_end as *const () as usize,
             )
         };
         let Some(program) = program else {
@@ -12420,7 +12420,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         || !execution_ready
     {
         if registry {
-            crate::serial_write("ginux: OCI registry device activation rejected\r\n");
+            crate::serial_write("linox: OCI registry device activation rejected\r\n");
         }
         return false;
     }
@@ -12519,9 +12519,9 @@ fn verify_native_network_bootstrap_run_with_evidence(
         crate::control_abi::LIFECYCLE_AUXILIARY_EXITED
     };
     let expected_detail = if force_transmit_timeout || force_receive_timeout {
-        ginux_native_abi::NATIVE_SERVICE_EXIT_RESTART_REQUIRED
+        linox_native_abi::NATIVE_SERVICE_EXIT_RESTART_REQUIRED
     } else {
-        ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED
+        linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED
     };
     let execution_retired = current_root() == kernel_root
         && scheduler::current_domain().is_none()
@@ -12620,7 +12620,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         && fault_ordering_valid
         && stop_ordering_valid;
     if mode == NativeNetworkRunMode::Dhcp && !valid {
-        crate::serial_write_bytes(b"\r\nginux: DHCP service lifecycle event/detail/fault: ");
+        crate::serial_write_bytes(b"\r\nlinox: DHCP service lifecycle event/detail/fault: ");
         crate::serial_write_u64(event.unwrap_or(u64::MAX));
         crate::serial_write_bytes(b" ");
         crate::serial_write_u64(domain::last_lifecycle_event_detail().map_or(u64::MAX, u64::from));
@@ -12631,7 +12631,7 @@ fn verify_native_network_bootstrap_run_with_evidence(
         crate::serial_write_bytes(b"\r\n");
     }
     if registry && !valid {
-        crate::serial_write_bytes(b"\r\nginux: OCI service lifecycle event/detail/fault: ");
+        crate::serial_write_bytes(b"\r\nlinox: OCI service lifecycle event/detail/fault: ");
         crate::serial_write_u64(event.unwrap_or(u64::MAX));
         crate::serial_write_bytes(b" ");
         crate::serial_write_u64(domain::last_lifecycle_event_detail().map_or(u64::MAX, u64::from));
@@ -13918,19 +13918,19 @@ pub(crate) fn verify_ring3_control_plane(
         let ipc_empty = ipc::is_empty();
         let root_restored = current_root() == kernel_root;
         if !handled {
-            crate::serial_write_bytes(b"\r\nginux: control proof syscall state incomplete");
+            crate::serial_write_bytes(b"\r\nlinox: control proof syscall state incomplete");
         }
         if !runtime_complete {
-            crate::serial_write_bytes(b"\r\nginux: control proof scheduler state incomplete");
+            crate::serial_write_bytes(b"\r\nlinox: control proof scheduler state incomplete");
         }
         if !ipc_empty {
-            crate::serial_write_bytes(b"\r\nginux: control proof IPC state not drained");
+            crate::serial_write_bytes(b"\r\nlinox: control proof IPC state not drained");
         }
         if !root_restored {
-            crate::serial_write_bytes(b"\r\nginux: control proof kernel root not restored");
+            crate::serial_write_bytes(b"\r\nlinox: control proof kernel root not restored");
         }
         if !preemption_complete {
-            crate::serial_write_bytes(b"\r\nginux: control proof APIC preemption incomplete");
+            crate::serial_write_bytes(b"\r\nlinox: control proof APIC preemption incomplete");
         }
         let valid = user_copy_faults_recovered
             && hostile_entry_contexts_rejected
@@ -14455,14 +14455,14 @@ struct VolumeAuxiliaryResult {
 
 pub(crate) fn verify_ring3_volume_service() -> bool {
     let Some(writer_program) = volume_program(
-        ginux_volume_writer_start as *const () as usize,
-        ginux_volume_writer_end as *const () as usize,
+        linox_volume_writer_start as *const () as usize,
+        linox_volume_writer_end as *const () as usize,
     ) else {
         return false;
     };
     let Some(writer) = run_volume_auxiliary(writer_program, crate::capability::Rights::WRITE)
     else {
-        crate::serial_write_bytes(b"\r\nginux: volume writer setup/runtime failed");
+        crate::serial_write_bytes(b"\r\nlinox: volume writer setup/runtime failed");
         return false;
     };
     if writer.kind != crate::control_abi::LIFECYCLE_AUXILIARY_FAULT
@@ -14476,15 +14476,15 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
                 error: 0,
                 address: 0,
                 instruction: (USER_TEST_ADDRESS
-                    + (ginux_volume_writer_fault as *const () as usize
-                        - ginux_volume_writer_start as *const () as usize))
+                    + (linox_volume_writer_fault as *const () as usize
+                        - linox_volume_writer_start as *const () as usize))
                     as u64,
             },
         )
         || volume::live_generation() != Ok(1)
     {
         crate::serial_write_bytes(
-            b"\r\nginux: volume writer result invalid kind/detail/event/gen: ",
+            b"\r\nlinox: volume writer result invalid kind/detail/event/gen: ",
         );
         crate::serial_write_u64(u64::from(writer.kind));
         crate::serial_write_bytes(b" ");
@@ -14497,13 +14497,13 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
     }
 
     let Some(reader_program) = volume_program(
-        ginux_volume_reader_start as *const () as usize,
-        ginux_volume_reader_end as *const () as usize,
+        linox_volume_reader_start as *const () as usize,
+        linox_volume_reader_end as *const () as usize,
     ) else {
         return false;
     };
     let Some(reader) = run_volume_auxiliary(reader_program, crate::capability::Rights::READ) else {
-        crate::serial_write_bytes(b"\r\nginux: volume reader setup/runtime failed");
+        crate::serial_write_bytes(b"\r\nlinox: volume reader setup/runtime failed");
         return false;
     };
     let valid = reader.kind == crate::control_abi::LIFECYCLE_AUXILIARY_EXITED
@@ -14517,7 +14517,7 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
         && volume::live_generation() == Ok(1);
     if !valid {
         crate::serial_write_bytes(
-            b"\r\nginux: volume reader result invalid kind/detail/event/gen: ",
+            b"\r\nlinox: volume reader result invalid kind/detail/event/gen: ",
         );
         crate::serial_write_u64(u64::from(reader.kind));
         crate::serial_write_bytes(b" ");
@@ -14783,7 +14783,7 @@ pub(crate) fn verify_ring3_read_only_device_grant(
         && domain::delivered_fault_matches(auxiliary, expected_fault)
         && domain::take_lifecycle_event().is_none();
     if !valid {
-        crate::serial_write_bytes(b"\r\nginux: device grant event: ");
+        crate::serial_write_bytes(b"\r\nlinox: device grant event: ");
         crate::serial_write_u64(event.unwrap_or(u64::MAX));
         if let Some(descriptor) = domain::delivered_fault_descriptor() {
             for range in [6..8, 16..24, 24..32, 32..40] {
@@ -15010,7 +15010,7 @@ fn verify_native_volume_service_run(
         return None;
     };
     let boot_info = USER_TEST_ADDRESS + NATIVE_BOOT_INFO_PAGE * PAGE_SIZE;
-    if !space.write_boot_info(ginux_native_abi::NativeServiceBootV0::virtio_block(
+    if !space.write_boot_info(linox_native_abi::NativeServiceBootV0::virtio_block(
         user_common as u64,
         user_notification as u64,
         user_dma as u64,
@@ -15045,12 +15045,12 @@ fn verify_native_volume_service_run(
             || frames.dma() != Some(dma_physical)
             || !frames.frames_owned_by(owner)
     }) {
-        crate::serial_write_bytes(b"\r\nginux: native volume root validation failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume root validation failed");
         let _ = space.release();
         return None;
     }
     if !register_address_space(auxiliary, AuxiliaryAddressSpace::Native(space)) {
-        crate::serial_write_bytes(b"\r\nginux: native volume registration failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume registration failed");
         return None;
     }
     if !bind_auxiliary_device_teardown(
@@ -15061,15 +15061,15 @@ fn verify_native_volume_service_run(
         Some(notification_page),
         INTERRUPT_REQUEST,
     ) {
-        crate::serial_write_bytes(b"\r\nginux: native volume teardown binding failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume teardown binding failed");
         return None;
     }
     if !scheduler::queue_auxiliary(auxiliary, root, entry, stack, handle) {
-        crate::serial_write_bytes(b"\r\nginux: native volume scheduler queue failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume scheduler queue failed");
         return None;
     }
     let Some(iommu_evidence) = bind_auxiliary_iommu_translation(auxiliary, iommu_profile) else {
-        crate::serial_write_bytes(b"\r\nginux: native volume IOMMU binding failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume IOMMU binding failed");
         return None;
     };
     if !pci::arm_isolated_device_interrupt(
@@ -15080,33 +15080,33 @@ fn verify_native_volume_service_run(
         auxiliary,
         INTERRUPT_REQUEST,
     ) {
-        crate::serial_write_bytes(b"\r\nginux: native volume interrupt arm failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume interrupt arm failed");
         return None;
     }
     if mode == NativeVolumeMode::IncompatibleAbi
         && !cpu::force_next_control_discovery(
             auxiliary,
-            (u64::from(ginux_native_abi::NATIVE_CONTROL_ABI_VERSION - 1) << 16)
-                | u64::from(ginux_native_abi::NATIVE_CONTROL_REQUIRED_FEATURES),
+            (u64::from(linox_native_abi::NATIVE_CONTROL_ABI_VERSION - 1) << 16)
+                | u64::from(linox_native_abi::NATIVE_CONTROL_REQUIRED_FEATURES),
         )
     {
-        crate::serial_write_bytes(b"\r\nginux: native control ABI mismatch injection failed");
+        crate::serial_write_bytes(b"\r\nlinox: native control ABI mismatch injection failed");
         return None;
     }
     if mode == NativeVolumeMode::IncompatibleDescriptor
         && !cpu::force_next_control_descriptor_reserved(auxiliary)
     {
-        crate::serial_write_bytes(b"\r\nginux: native control descriptor injection failed");
+        crate::serial_write_bytes(b"\r\nlinox: native control descriptor injection failed");
         return None;
     }
     if mode == NativeVolumeMode::CancelNotified
         && !pci::force_next_notified_wait_timeout(auxiliary, INTERRUPT_REQUEST)
     {
-        crate::serial_write_bytes(b"\r\nginux: native volume cancellation injection failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume cancellation injection failed");
         return None;
     }
     if !cpu::activate_user_root(root) {
-        crate::serial_write_bytes(b"\r\nginux: native volume root activation failed");
+        crate::serial_write_bytes(b"\r\nlinox: native volume root activation failed");
         return None;
     }
     cpu::execute_native_auxiliary(entry, stack, boot_info as u64, handle, auxiliary, identity);
@@ -15152,25 +15152,25 @@ fn verify_native_volume_service_run(
         }
         (
             NativeVolumeMode::CancelNotified,
-            Some(ginux_native_abi::NATIVE_SERVICE_EXIT_RESTART_REQUIRED),
+            Some(linox_native_abi::NATIVE_SERVICE_EXIT_RESTART_REQUIRED),
             0,
             None,
         ) => Some(NativeVolumeOutcome::RestartRequired),
         (
             NativeVolumeMode::Normal,
-            Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED),
+            Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED),
             1,
             None,
         ) => Some(NativeVolumeOutcome::Initialized),
         (
             NativeVolumeMode::Normal,
-            Some(ginux_native_abi::NATIVE_SERVICE_EXIT_COMPLETED),
+            Some(linox_native_abi::NATIVE_SERVICE_EXIT_COMPLETED),
             2,
             None,
         ) => Some(NativeVolumeOutcome::Recovered),
         (
             NativeVolumeMode::Normal,
-            Some(ginux_native_abi::NATIVE_SERVICE_EXIT_REJECTED),
+            Some(linox_native_abi::NATIVE_SERVICE_EXIT_REJECTED),
             2,
             None,
         ) => Some(NativeVolumeOutcome::Rejected),
@@ -15242,7 +15242,7 @@ fn verify_native_volume_service_run(
     let valid = checks.iter().all(|check| *check);
     if !valid {
         crate::serial_write_bytes(
-            b"\r\nginux: native volume event/completion/status/roots/frames: ",
+            b"\r\nlinox: native volume event/completion/status/roots/frames: ",
         );
         for value in [
             event.unwrap_or(u64::MAX),

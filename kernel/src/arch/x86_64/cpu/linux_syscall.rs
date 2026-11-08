@@ -7,7 +7,7 @@ use super::*;
 const LINUX_SYSCALL_HEARTBEAT: u64 = 1 << 24;
 
 fn write_linux_syscall_heartbeat(count: u64, number: u64, registers: &LinuxSyscallFrame) {
-    serial_write("ginux: syscall heartbeat count/pid/tid/number/arguments/previous-result: ");
+    serial_write("linox: syscall heartbeat count/pid/tid/number/arguments/previous-result: ");
     let previous = (count as usize + LINUX_RUNTIME_SYSCALL_TRACE_LIMIT - 2)
         % LINUX_RUNTIME_SYSCALL_TRACE_LIMIT;
     for value in [
@@ -166,7 +166,7 @@ fn linux_strace_call(
     Some(call)
 }
 
-/// Whether the environment vector at `address` holds `GINUX_STRACE=1`.
+/// Whether the environment vector at `address` holds `LINOX_STRACE=1`.
 fn linux_environment_requests_strace(address: u64) -> bool {
     let wanted = crate::linux_strace::ENVIRONMENT;
     (0..4096_u64)
@@ -333,7 +333,7 @@ fn linux_syscall_dispatch(
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
             || cfg!(feature = "verification-boot")
         {
-            serial_write("ginux: Linux runtime invalid syscall context:");
+            serial_write("linox: Linux runtime invalid syscall context:");
             for value in [number, user_stack, user_rip, user_rflags] {
                 serial_write(" ");
                 serial_write_u64(value);
@@ -1378,7 +1378,7 @@ fn linux_syscall_dispatch(
                     | 0x4000_0000)
                 != 0
                 && !current_linux_credentials().is_some_and(|credentials| {
-                    credentials.has(ginux_credentials::capability::SYS_ADMIN)
+                    credentials.has(linox_credentials::capability::SYS_ADMIN)
                 }) =>
         {
             LINUX_EPERM
@@ -1396,7 +1396,7 @@ fn linux_syscall_dispatch(
             };
             if child_tid != 0 && !linux_writable_user_range_contains(child_tid, size_of::<u32>()) {
                 if runtime_mode {
-                    serial_write("ginux: Linux process clone child-tid EFAULT flags/address: ");
+                    serial_write("linox: Linux process clone child-tid EFAULT flags/address: ");
                     serial_write_u64(saved_registers.rdi);
                     serial_write(" ");
                     serial_write_u64(child_tid);
@@ -1474,7 +1474,7 @@ fn linux_syscall_dispatch(
         LINUX_CLONE_SYSCALL => {
             let result = linux_clone_thread(saved_registers, user_rip, user_rflags);
             if runtime_mode {
-                serial_write("ginux: Linux clone flags/stack/parent-tid/child-tid/tls/result: ");
+                serial_write("linox: Linux clone flags/stack/parent-tid/child-tid/tls/result: ");
                 for value in [
                     saved_registers.rdi,
                     saved_registers.rsi,
@@ -2229,7 +2229,7 @@ fn linux_syscall_dispatch(
                 // registry's mappings may then name pages the process has
                 // already freed, so its release frees only what the page
                 // tables show.
-                serial_write("ginux: child exit using last validated process snapshot\r\n");
+                serial_write("linox: child exit using last validated process snapshot\r\n");
                 let _ = linux_process::mark_live_process_address_space_stale(
                     current_linux_process_pid(),
                 );
@@ -2242,7 +2242,7 @@ fn linux_syscall_dispatch(
                 && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
                 && cfg!(feature = "verification-boot")
             {
-                serial_write("ginux: Linux child exited with status ");
+                serial_write("linox: Linux child exited with status ");
                 serial_write_u64(first_argument);
                 serial_write("\r\n");
                 write_linux_runtime_syscall_trace();
@@ -2460,9 +2460,9 @@ fn linux_syscall_dispatch(
                 == 0;
             if first_observation {
                 serial_write(if first.is_ok() {
-                    "ginux: first unsupported syscall number/arguments: "
+                    "linox: first unsupported syscall number/arguments: "
                 } else {
-                    "ginux: unsupported syscall number/arguments: "
+                    "linox: unsupported syscall number/arguments: "
                 });
                 serial_write_u64(number);
                 for value in [

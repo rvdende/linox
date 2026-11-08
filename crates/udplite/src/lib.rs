@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! UDP-Lite (RFC 3828) datagrams as Ginux sends and checks them.
+//! UDP-Lite (RFC 3828) datagrams as Linox sends and checks them.
 //!
 //! A UDP-Lite header is UDP's, with the length field holding the
 //! checksum's coverage: how many bytes, from the header's first, the

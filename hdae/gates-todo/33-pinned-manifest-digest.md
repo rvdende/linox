@@ -7,7 +7,7 @@
 ## Goal
 
 Make an OCI image reference using `@sha256:<digest>` cryptographically bind
-the exact top-level registry manifest or index body before Ginux parses it or
+the exact top-level registry manifest or index body before Linox parses it or
 follows any descriptor.
 
 ## Approved scope
@@ -53,12 +53,12 @@ follows any descriptor.
 
 ## Verification plan
 
-- `cargo test --package ginux-oci` -> exact pin passes, mismatch fails, and tag
+- `cargo test --package linox-oci` -> exact pin passes, mismatch fails, and tag
   selection remains unaffected.
 - Source inspection -> top-level verification runs immediately after transfer
   and before index selection or manifest parsing.
 - `make check` -> formatting, architecture, lint, and unit checks pass.
-- `make test` -> complete QEMU verification emits `GINUX_KERNEL_OK` and
+- `make test` -> complete QEMU verification emits `LINOX_KERNEL_OK` and
   `Boot test passed.`
 
 ## Evidence
@@ -66,13 +66,13 @@ follows any descriptor.
 - `ImageReference::write_manifest_path` includes the selector in the URL.
 - The top-level body currently reaches `select_manifest` or
   `parse_registry_manifest` without comparison to `reference.selector`.
-- `cargo test --package ginux-oci` -> 9 tests passed, including exact pinned
+- `cargo test --package linox-oci` -> 9 tests passed, including exact pinned
   body acceptance, changed-body rejection, and unchanged tag behavior.
-- Warning-denying clippy for `ginux-oci` and the freestanding network service
+- Warning-denying clippy for `linox-oci` and the freestanding network service
   -> passed.
 - `make check` -> passed all formatting, architecture, lint, unit, and ABI
-  checks, including all 9 `ginux-oci` tests.
-- `make test` on QEMU 10.1.2/TCG -> emitted `GINUX_KERNEL_OK` and reported
+  checks, including all 9 `linox-oci` tests.
+- `make test` on QEMU 10.1.2/TCG -> emitted `LINOX_KERNEL_OK` and reported
   `Boot test passed.`
 - After PR #40 advanced `main`, the combined TLS entropy and manifest-pin
   network service was regenerated; fresh `make check` and `make test` passed.

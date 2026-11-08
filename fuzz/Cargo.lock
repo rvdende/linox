@@ -87,17 +87,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "ginux-fuzz"
+name = "linox-fuzz"
 version = "0.0.0"
 dependencies = [
- "ginux-oci",
- "ginux-protocol-state",
- "ginux-volume-format",
+ "linox-oci",
+ "linox-protocol-state",
+ "linox-volume-format",
  "libfuzzer-sys",
 ]
 
 [[package]]
-name = "ginux-oci"
+name = "linox-oci"
 version = "0.1.0"
 dependencies = [
  "heapless",
@@ -107,11 +107,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ginux-protocol-state"
+name = "linox-protocol-state"
 version = "0.1.0"
 
 [[package]]
-name = "ginux-volume-format"
+name = "linox-volume-format"
 version = "0.1.0"
 dependencies = [
  "sha2",

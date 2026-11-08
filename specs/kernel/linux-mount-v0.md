@@ -18,7 +18,7 @@ domain; the control domain cannot use it to mutate a workload domain. The PID
 `/proc/1/mountinfo`:
 
 ```text
-1 0 0:1 / / ro,nosuid,nodev - ginux-root rootfs ro
+1 0 0:1 / / ro,nosuid,nodev - linox-root rootfs ro
 2 1 0:2 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
 3 1 0:3 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw
 ```
@@ -30,4 +30,4 @@ the remaining namespace syscalls are still compatibility work.
 
 Mount is not intended to be policy-denied inside a domain. Linux root must be
 able to construct nested Linux namespaces and run container stacks while the
-enclosing Ginux domain remains the stronger security and resource boundary.
+enclosing Linox domain remains the stronger security and resource boundary.

@@ -70,7 +70,7 @@ None.
 - `make test-controller-desktop-all` -> integrated desktop qualification passes.
 - `make test-controller-desktop-performance` -> published budgets pass with raw
   measurements retained.
-- `pgrep -f 'qemu-system.*ginux'` after tests -> no test-owned QEMU process remains.
+- `pgrep -f 'qemu-system.*linox'` after tests -> no test-owned QEMU process remains.
 - Documentation link and HDAE coverage audit -> no broken link or unmapped item.
 
 ## Evidence
@@ -100,7 +100,7 @@ None.
 - QEMU process and volume-handle audit -> no QEMU process or open Rocky volume
   remained. Initial cold-pull failures were traced by packet capture to the
   execution sandbox returning ICMP network-unreachable; the authorized
-  network-enabled run passed without a Ginux code change.
+  network-enabled run passed without a Linox code change.
 - `git diff --check`, documentation target/link inspection, gate-ledger review,
   and `git log origin/main..HEAD` -> no whitespace failure, broken local desktop
   link, unchecked Gate 19–30 work, or branch change outside the approved batch.
@@ -118,7 +118,7 @@ None.
 - `make check` -> passed architecture consistency, 487 classified writable
   globals, 406 managed x86 runtime backings, the 1,036-block unsafe boundary,
   the 375-syscall Linux matrix, native C ABI, format/lint, and unit suites.
-- Post-test process inspection -> no Ginux QEMU process remained.
+- Post-test process inspection -> no Linox QEMU process remained.
 
 ## Decisions and limitations
 

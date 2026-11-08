@@ -1,9 +1,9 @@
 .text
 .balign 16
-.global ginux_packet_egress_consumer_start
-.global ginux_packet_egress_consumer_end
+.global linox_packet_egress_consumer_start
+.global linox_packet_egress_consumer_end
 
-ginux_packet_egress_consumer_start:
+linox_packet_egress_consumer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x90
@@ -79,4 +79,4 @@ ginux_packet_egress_consumer_start:
     .byte 0x40, 0x01, 0x10, 0x9d, 10, 0, 2, 15, 10, 0, 2, 2
     .byte 0x00, 0x00, 0x41, 0x0f, 0xbe, 0xef, 0x00, 0x01
 
-ginux_packet_egress_consumer_end:
+linox_packet_egress_consumer_end:

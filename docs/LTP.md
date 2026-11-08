@@ -1,14 +1,14 @@
 # Linux Test Project (LTP) Compatibility Harness
 
-Ginux's Linux compatibility is driven by the syscall tests of the
+Linox's Linux compatibility is driven by the syscall tests of the
 [Linux Test Project](https://github.com/linux-test-project/ltp) rather than by
 chasing bugs one program at a time. This harness builds LTP statically for
-musl, runs each test of `runtest/syscalls` in an Alpine domain on Ginux under
+musl, runs each test of `runtest/syscalls` in an Alpine domain on Linox under
 QEMU, and reports one machine-parseable line per test plus failure clusters.
 
 ## Progress
 
-| Ginux | Change | Tests run | TPASS | TFAIL | TBROK | TCONF | TWARN | CRASH | HANG |
+| Linox | Change | Tests run | TPASS | TFAIL | TBROK | TCONF | TWARN | CRASH | HANG |
 |---|---|---|---|---|---|---|---|---|---|
 | `d1f41667` | baseline (below) | 1362 | 41* | 39 | 1181 | 75 | 6 | 11 | 9 |
 | `62dce194` | `/proc/PID/oom_score_adj` kept per process | 1362 | 1043* | 38 | 130 | 76 | 6 | 52 | 17 |
@@ -46,7 +46,7 @@ failures were lost before now report them.
 
 **Pass counts before 2026-11-01 were overstated by about 600.** The LTP
 library counts results in a MAP_SHARED page of a /dev/shm file and derives
-the test's exit status from it. Ginux gave each process its own copy of
+the test's exit status from it. Linox gave each process its own copy of
 such a page, so results from the test process never reached the library's
 process, which then exited 0: in the `778dd3d0` run 204 tests that
 printed TFAIL and 416 that printed TBROK (60 of them an anonymous mmap
@@ -203,7 +203,7 @@ feature rather than a fix:
   stays). The tests that need free swap rather than making their own
   (madvise06, madvise09, process_madvise01) run through
   `/opt/ltp/with-swap.sh MIB`, which turns a loop device over a sparse
-  file on for the test; ginux_swap01 (`tools/ltp/tests`, built with LTP)
+  file on for the test; linox_swap01 (`tools/ltp/tests`, built with LTP)
   oversubscribes a memory cgroup from three processes with a swap file on
   ext4, forks while pages are out and turns swap off while they are.
   /proc/sys/vm/min_free_kbytes reads 8192 and swappiness 60.
@@ -240,7 +240,7 @@ feature rather than a fix:
   down to RLIMIT_STACK's soft limit as the limit is when it grows (8 MiB
   by default, as Linux's _STK_LIM; unlimited stops at 64 GiB), and not
   within the stack guard gap (256 pages) of a mapping below; past either,
-  the fault is SIGSEGV (ginux_stack01, process_madvise01's 1 MiB stack
+  the fault is SIGSEGV (linox_stack01, process_madvise01's 1 MiB stack
   array). The domain's first process keeps its stack above its heap
   until it execs. stack_clash is skipped: it maps MAP_FIXED next to the
   stack and over every gap below it, and MAP_FIXED takes only 256 MiB to
@@ -252,7 +252,7 @@ feature rather than a fix:
 
 ## Baseline (2026-10-31)
 
-Ginux at `d1f41667` (no kernel change since), LTP 20260930,
+Linox at `d1f41667` (no kernel change since), LTP 20260930,
 `tests/ltp/syscalls.list`, QEMU/KVM with one vCPU and 6 GiB, domain
 `alpine:3.22`:
 
@@ -279,7 +279,7 @@ Counts are tests, from the baseline (B) and the variant (V); the logs are
 `target/ltp/logs/NAME.log` (and `target/ltp-no-oom-protection/logs`).
 
 1. **`oom_score_adj` does not stick** (B 1136). LTP writes -1000 to
-   `/proc/<lib pid>/oom_score_adj`, reads 0 back and gives up. Ginux must
+   `/proc/<lib pid>/oom_score_adj`, reads 0 back and gives up. Linox must
    keep the value (-1000..1000, per process) or refuse the write (`EACCES`),
    which LTP tolerates. `getpid01`:
    ```text
@@ -308,11 +308,11 @@ Counts are tests, from the baseline (B) and the variant (V); the logs are
    cannot be started again until reboot ("Linux process registry setup
    failed"). `waitpid06` (V):
    ```text
-   ginux: runtime fork preparation failed at stage 13
-   ginux: runtime child completion failed at stage 13
-   ginux: scheduled process return failed child/parent/resumed/dispatch: 3 1 0 0
-   ginux: Linux user fault vector/error/address/rip:14 6 18446744071616660459 4406038
-   ginux: Linux init execution failed; domain marked failed
+   linox: runtime fork preparation failed at stage 13
+   linox: runtime child completion failed at stage 13
+   linox: scheduled process return failed child/parent/resumed/dispatch: 3 1 0 0
+   linox: Linux user fault vector/error/address/rip:14 6 18446744071616660459 4406038
+   linox: Linux init execution failed; domain marked failed
    ```
 3. ~~**Root cannot change credentials**~~ (B 15, V 38; fixed 2026-11-01):
    each process now has real, effective, saved and filesystem ids and
@@ -322,7 +322,7 @@ Counts are tests, from the baseline (B) and the variant (V); the logs are
    flag that grants it (`linux_user::user_switching_allowed`); the LTP
    harness sets it. `setgroups03` still fails: LTP built for musl expects
    `setgroups(33, ...)` to fail because musl's `NGROUPS` is 32, while
-   Linux (and Ginux) allow 65536.
+   Linux (and Linox) allow 65536.
 4. **A signal-killed child is reported as a normal exit with status 128+N**,
    and **a parent's `alarm` reaches its child** (V 27 at exactly 30 s; B
    `kill12`). `waitpid` gives `WIFEXITED` with 137 for `SIGKILL`, 139 for
@@ -347,7 +347,7 @@ Counts are tests, from the baseline (B) and the variant (V); the logs are
    single ones (`kernel/pid_max`, `shmmax`, `sem`, `msgmni`, `printk`,
    `core_pattern`, `io_uring_disabled`, `fs/pipe-max-size`, `/proc/modules`).
    Without the harness's `KCONFIG_SKIP_CHECK=1` another 95 tests stop at
-   "Cannot parse kernel .config"; Ginux could publish `/proc/config.gz`.
+   "Cannot parse kernel .config"; Linox could publish `/proc/config.gz`.
    `bpf_prog04`:
    `tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted'
    for reading: ENOENT (2)`.
@@ -382,7 +382,7 @@ flags (`EINVAL`), `removexattr` returning `ENODATA` for `ENOENT`,
 `open(O_DIRECTORY)` succeeding on a FIFO (`fcntl07`: LTP's cleanup then
 fails with `ENOTDIR`). The tests read the kernel's configuration from
 `/proc/config.gz` (`kernel/src/arch/x86_64/cpu/kernel_config`, which lists
-what Ginux implements; `KCONFIG_SKIP_CHECK` is no longer set). The lease
+what Linox implements; `KCONFIG_SKIP_CHECK` is no longer set). The lease
 tests (fcntl24-26, 32, 33) and lseek11 run with their TMPDIR on an ext2
 volume (`disk-tmpdir.sh`), as on a Linux machine whose /tmp is on disk:
 LTP skips them on tmpfs and ramfs. TCONF is mostly expected:
@@ -395,8 +395,8 @@ LTP skips them on tmpfs and ramfs. TCONF is mostly expected:
   IOPRIO_CLASS_NONE, 0, as on Linux). kill13 needs a UBSAN kernel. musl
   has no `sethostid` (gethostid01), and the image no `<sys/acl.h>`
   (getxattr05, listxattr04). 32-bit-only syscalls; NUMA tests that need two
-  nodes (Ginux has one, node 0, as a one-node Linux machine does).
-- **Filesystems Ginux does not have:** xfs (getxattr04), btrfs (ioctl08),
+  nodes (Linox has one, node 0, as a one-node Linux machine does).
+- **Filesystems Linox does not have:** xfs (getxattr04), btrfs (ioctl08),
   NFS (statx07, which also needs `exportfs`), RDS sockets (recvmsg03,
   io_uring04), fs-verity, XFS quotas, kTLS (setsockopt10), netfilter
   (setsockopt08), swap (madvise06, process_madvise01, swapon04), kprobe
@@ -404,7 +404,7 @@ LTP skips them on tmpfs and ramfs. TCONF is mostly expected:
 - **The test image:** no `parted` (ioctl09); musl's `struct statx` has no
   `stx_dio_*` fields (statx10, statx11: the kernel reports
   `STATX_DIOALIGN`).
-- **Ginux's limits:** sendfile09 wants 5 GiB free where the LTP domain has
+- **Linox's limits:** sendfile09 wants 5 GiB free where the LTP domain has
   4 GiB; no TUN/TAP device (ioctl03).
 
 `target/ltp-report.txt` lists every cluster with its tests;
@@ -422,7 +422,7 @@ make test-ltp OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd \
     OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
 ```
 
-`make test-ltp` builds Ginux (`make build`) and runs `tests/qemu/ltp.sh`,
+`make test-ltp` builds Linox (`make build`) and runs `tests/qemu/ltp.sh`,
 which builds and runs the Rust harness in `tests/ltp` (below). To keep a
 running VM's `build/esp` untouched, build and boot a separate image:
 `make test-ltp ESP_DIR=build/esp-ltp`. `TMPDIR` defaults to `target/tmp`.
@@ -453,15 +453,15 @@ cargo test --manifest-path tests/ltp/Cargo.toml --test ltp -- accept          # 
 cargo test --manifest-path tests/ltp/Cargo.toml --test ltp -- --exact accept01
 cargo test --manifest-path tests/ltp/Cargo.toml --test ltp -- --list          # list; boots nothing
 cargo test --manifest-path tests/ltp/Cargo.toml --test ltp -- --ignored       # the tests the list skips
-LTP_VARIANT=probe GINUX_ESP_DIR=build/esp-probe LTP_LIST=/path/probe.list \
+LTP_VARIANT=probe LINOX_ESP_DIR=build/esp-probe LTP_LIST=/path/probe.list \
     cargo test --manifest-path tests/ltp/Cargo.toml --test ltp -- -q
 make ltp-check                                   # the harness's fmt, clippy and unit tests
 ```
 
 The settings come from the environment (`tests/ltp/src/config.rs`):
-`LTP_LIST`, `LTP_TESTS`, `LTP_FILTER`, `LTP_VARIANT`, `GINUX_ESP_DIR`,
+`LTP_LIST`, `LTP_TESTS`, `LTP_FILTER`, `LTP_VARIANT`, `LINOX_ESP_DIR`,
 `LTP_BUDGET`, `LTP_GRACE`, `LTP_BETWEEN_TESTS`, `LTP_SETUP_TIMEOUT`,
-`LTP_MAX_BOOTS`, `GINUX_MEMORY`, `LTP_DOMAIN_MEMORY_MIB`, `LTP_IMAGE`,
+`LTP_MAX_BOOTS`, `LINOX_MEMORY`, `LTP_DOMAIN_MEMORY_MIB`, `LTP_IMAGE`,
 `LTP_BASELINE`, `LTP_STRICT=1` and `LTP_UPDATE_BASELINE=1` (relative paths
 are taken from the repository root; `ltp.sh` resolves them from where it
 runs). `--strict` and `--update-baseline` also work as arguments of the
@@ -519,7 +519,7 @@ Outputs:
 | File | Contents |
 |---|---|
 | `target/ltp-results.txt` | summary counts, then `NAME RESULT SECONDS DETAIL` per test, in list order; rewritten after every test |
-| `target/ltp-report.txt` | results by LTP source directory, failure symptoms, errnos, Ginux kernel diagnostics, crashes and hangs |
+| `target/ltp-report.txt` | results by LTP source directory, failure symptoms, errnos, Linox kernel diagnostics, crashes and hangs |
 | `target/ltp/logs/NAME.log` | the console output of each test, kernel diagnostics included |
 | `target/ltp-serial.log` | the whole serial console of every boot |
 
@@ -528,13 +528,13 @@ The results file's detail says why, e.g.
 ```text
 abort01 TBROK 0.02 exit=2
 pipeio_1 HANG 60.04 guest-timeout 60s
-getdents01 CRASH 0.42 domain down: ginux: Linux init execution failed; domain marked failed
+getdents01 CRASH 0.42 domain down: linox: Linux init execution failed; domain marked failed
 ```
 
 | Result | Meaning |
 |---|---|
 | `TPASS` | exit status 0 |
-| `TFAIL`, `TBROK`, `TWARN`, `TCONF` | LTP's exit status bits (2 TBROK, 1 TFAIL, 4 TWARN, 32 TCONF, in that precedence); also `TBROK` if the test was killed by a signal (`killed by signal N`, or an exit status of 128 or more, which is how Ginux reports a signal death today), could not be executed (126, 127), or the runner lost its status |
+| `TFAIL`, `TBROK`, `TWARN`, `TCONF` | LTP's exit status bits (2 TBROK, 1 TFAIL, 4 TWARN, 32 TCONF, in that precedence); also `TBROK` if the test was killed by a signal (`killed by signal N`, or an exit status of 128 or more, which is how Linox reports a signal death today), could not be executed (126, 127), or the runner lost its status |
 | `HANG` | over its time budget: `guest-timeout` (the runner killed it), `ltp-timeout` (LTP's own timeout fired: "Test killed! (timeout?)"), or `host-watchdog` (the guest stopped reporting; QEMU was rebooted) |
 | `CRASH` | the domain, the kernel or QEMU went down during the test; QEMU was rebooted |
 | `SKIP` | marked skipped in the list, with the reason as detail |
@@ -569,10 +569,10 @@ getdents01 CRASH 0.42 domain down: ginux: Linux init execution failed; domain ma
   their code, which only xz's large window sees), which is what the domain
   downloads.
 - Binaries are **static-pie** (`-static-pie -fPIE`), not fixed-address
-  `-static`: Ginux runs a file written at runtime only if it is position
+  `-static`: Linox runs a file written at runtime only if it is position
   independent; its fixed-address (ET_EXEC) loader accepts only tiny programs
   (5 code pages, 8 pages in all).
-- The harness's session (`tests/ltp/src/session.rs`) boots Ginux with
+- The harness's session (`tests/ltp/src/session.rs`) boots Linox with
   `tools/qemu/run.sh` (6 GiB, KVM, a fresh sparse volume in `target/ltp`),
   creates domain `ltp` from `alpine:3.22`, and serves the tree, the runner and
   the run list over HTTP on a free port (the guest reaches it at 10.0.2.2).
@@ -597,7 +597,7 @@ getdents01 CRASH 0.42 domain down: ginux: Linux init execution failed; domain ma
   again ("Linux process registry setup failed"). It gives up after three
   boots in a row that run no test, or after 400 boots.
 
-### Ginux limitations the harness works around
+### Linox limitations the harness works around
 
 These are findings in their own right:
 

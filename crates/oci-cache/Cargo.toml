@@ -1,9 +1,9 @@
 [package]
-name = "ginux-oci-cache"
+name = "linox-oci-cache"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
 
 [dependencies]
-ginux-oci = { path = "../oci" }
+linox-oci = { path = "../oci" }

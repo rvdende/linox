@@ -20,7 +20,7 @@ preparation_log="$benchmark_asset_dir/rocky-linux-prepare-v2.log"
 seed_dir="$benchmark_asset_dir/nocloud-v2"
 # A free port the host picks, unless one is given: runs in parallel would
 # otherwise collide on a fixed one.
-http_port="${GINUX_BENCHMARK_HTTP_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+http_port="${LINOX_BENCHMARK_HTTP_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 http_pid=""
 qemu_pid=""
 
@@ -61,7 +61,7 @@ rm -f "$prepared_image"
 qemu-img create -q -f qcow2 -F qcow2 -b "$cloud_image" "$prepared_image"
 
 cat >"$seed_dir/meta-data" <<'EOF'
-instance-id: ginux-rocky-benchmark-v1
+instance-id: linox-rocky-benchmark-v1
 local-hostname: rocky-linux-benchmark
 EOF
 
@@ -69,72 +69,72 @@ cat >"$seed_dir/user-data" <<EOF
 #cloud-config
 ssh_pwauth: false
 write_files:
-  - path: /usr/local/sbin/ginux-benchmark
+  - path: /usr/local/sbin/linox-benchmark
     permissions: '0755'
     content: |
       #!/usr/bin/bash
       output=/dev/ttyS0
-      if [ -e /dev/virtio-ports/org.ginux.benchmark ]; then
-          output=/dev/virtio-ports/org.ginux.benchmark
+      if [ -e /dev/virtio-ports/org.linox.benchmark ]; then
+          output=/dev/virtio-ports/org.linox.benchmark
       fi
       exec 3>"\$output"
       threads=1
-      threads_file=/sys/firmware/qemu_fw_cfg/by_name/opt/ginux/threads/raw
+      threads_file=/sys/firmware/qemu_fw_cfg/by_name/opt/linox/threads/raw
       if [ -r "\$threads_file" ]; then
           candidate=\$(tr -dc '0-9' <"\$threads_file")
           case "\$candidate" in 1|2|4) threads=\$candidate ;; esac
       fi
-      echo GINUX_BENCH_READY >&3
+      echo LINOX_BENCH_READY >&3
       {
-          printf 'GINUX_BENCH_KERNEL_TO_MULTI_USER_SECONDS '
+          printf 'LINOX_BENCH_KERNEL_TO_MULTI_USER_SECONDS '
           cut -d' ' -f1 /proc/uptime
-          printf 'GINUX_BENCH_SYSBENCH_SHA256 '
+          printf 'LINOX_BENCH_SYSBENCH_SHA256 '
           sha256sum /usr/bin/sysbench | awk '{print \$1}'
-          echo "GINUX_BENCH_THREADS \$threads"
+          echo "LINOX_BENCH_THREADS \$threads"
           for workload in cpu memory threads mutex; do
               run=1
               while [ \$run -le ${BENCHMARK_WORKLOAD_RUNS} ]; do
-                  echo "GINUX_BENCH_WORKLOAD_BEGIN \$workload \$run"
+                  echo "LINOX_BENCH_WORKLOAD_BEGIN \$workload \$run"
                   case \$workload in
                       cpu) sysbench cpu --threads=\$threads --time=${BENCHMARK_WORKLOAD_SECONDS} --cpu-max-prime=20000 run ;;
                       memory) sysbench memory --threads=\$threads --time=${BENCHMARK_WORKLOAD_SECONDS} --memory-total-size=100G run ;;
                       threads) sysbench threads --threads=\$threads --time=${BENCHMARK_WORKLOAD_SECONDS} run ;;
                       mutex) sysbench mutex --threads=\$threads --time=${BENCHMARK_WORKLOAD_SECONDS} run ;;
                   esac
-                  echo "GINUX_BENCH_WORKLOAD_END \$workload \$run \$?"
+                  echo "LINOX_BENCH_WORKLOAD_END \$workload \$run \$?"
                   run=\$((run + 1))
               done
           done
-      } >/var/tmp/ginux-benchmark-results 2>&1
-      cat /var/tmp/ginux-benchmark-results >&3
-      echo GINUX_BENCH_COMPLETE >&3
+      } >/var/tmp/linox-benchmark-results 2>&1
+      cat /var/tmp/linox-benchmark-results >&3
+      echo LINOX_BENCH_COMPLETE >&3
       sync
       sleep 1
       systemctl poweroff
-  - path: /etc/systemd/system/ginux-benchmark.service
+  - path: /etc/systemd/system/linox-benchmark.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=Ginux comparative benchmark workload
+      Description=Linox comparative benchmark workload
       After=multi-user.target
       [Service]
       Type=simple
-      ExecStart=/usr/local/sbin/ginux-benchmark
-  - path: /etc/systemd/system/ginux-benchmark.timer
+      ExecStart=/usr/local/sbin/linox-benchmark
+  - path: /etc/systemd/system/linox-benchmark.timer
     permissions: '0644'
     content: |
       [Unit]
       Description=Run benchmark after normal userspace boot
       [Timer]
       OnBootSec=1s
-      Unit=ginux-benchmark.service
+      Unit=linox-benchmark.service
       [Install]
       WantedBy=timers.target
 runcmd:
   - [dnf, -y, install, epel-release]
   - [dnf, -y, install, sysbench]
-  - [systemctl, enable, ginux-benchmark.timer]
-  - [sh, -c, 'printf "GINUX_LINUX_PREPARED\\n" >/dev/ttyS0']
+  - [systemctl, enable, linox-benchmark.timer]
+  - [sh, -c, 'printf "LINOX_LINUX_PREPARED\\n" >/dev/ttyS0']
   - [systemctl, poweroff]
 EOF
 
@@ -165,14 +165,14 @@ echo "Preparing Rocky Linux baseline under QEMU/$accelerator; this installs EPEL
 qemu_pid=$!
 
 for _ in {1..1800}; do
-    grep -Fq GINUX_LINUX_PREPARED "$preparation_log" && break
+    grep -Fq LINOX_LINUX_PREPARED "$preparation_log" && break
     kill -0 "$qemu_pid" 2>/dev/null || break
     sleep 1
 done
 
 wait "$qemu_pid" || true
 qemu_pid=""
-grep -Fq GINUX_LINUX_PREPARED "$preparation_log" || {
+grep -Fq LINOX_LINUX_PREPARED "$preparation_log" || {
     tail -n 120 "$preparation_log" >&2
     echo "benchmark: Rocky Linux preparation did not complete" >&2
     exit 1

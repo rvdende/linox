@@ -6,14 +6,14 @@ blocking switches stacks, and a scheduler decides who runs next on each CPU.
 
 ## The model being replaced
 
-- `ginux_process_user_enter` pushes the callee-saved registers on the current
+- `linox_process_user_enter` pushes the callee-saved registers on the current
   kernel stack, records that stack pointer as the CPU's *return stack* and
   enters ring 3 with `iretq`.
 - A Linux `syscall` switches to the return stack and runs the handler below
   that frame. The handler either returns to the same thread (`sysretq`, or the
   `iretq` epilogue when it switched threads) or returns
   `LINUX_RETURN_TO_KERNEL`, which abandons the user frame and returns from
-  `ginux_process_user_enter` to whoever entered the process.
+  `linox_process_user_enter` to whoever entered the process.
 - Waiting is done in one of two ways: save the user context so the syscall is
   re-issued later (restart), or call `run_other_linux_processes` /
   `run_scheduled_linux_process`, which enters *another* process from inside
@@ -95,7 +95,7 @@ calls act as the scheduler.
    reported ("re-entered during its own system call").
 Done out of order: timer preemption of processes (`linux_preempt_process_from_timer`
 in cpu.rs). A process other than init that runs 50 ms is sent through the
-vDSO's `__ginux_preempt` entry, whose internal system call yields it with its
+vDSO's `__linox_preempt` entry, whose internal system call yields it with its
 exact interrupted registers; it is resumed where the tick interrupted it.
 It applies whenever someone can take the yield (init's nested scheduling, or
 a fork transaction's exec'd child); the scheduler loop makes that everyone.
@@ -207,7 +207,7 @@ Progress on step 1: every dispatched process is entered through
 
 Progress on kernel stacks (2026-11-01): every activation already runs on a
 guarded 256 KiB kernel stack of its own (`cpu/activation.rs`), and the
-switch between kernel contexts now exists: `ginux_switch_stack(save, load)`
+switch between kernel contexts now exists: `linox_switch_stack(save, load)`
 saves the callee-saved registers and stack pointer, loads another
 context's and returns into it, and `new_context` lays out a fresh stack
 so its first switch starts a function. `verify_stack_switching` runs at

@@ -34,7 +34,7 @@ to regenerate the machine-readable starting inventory.
 | `make test-storage` | Pass | Persistence and reset boots; 14.11 seconds. |
 | `make test-domain-responsiveness` | Pass | Controller response measured at 7 ms; 16.32 seconds total. |
 | `make test-rocky-systemd` | Pass | Three modes passed; Linux init to login was 6 seconds. |
-| `make benchmark-compare` | Pass | Matching single-vCPU Rocky/Linux and Rocky/Ginux input set; existing medians reproduced. |
+| `make benchmark-compare` | Pass | Matching single-vCPU Rocky/Linux and Rocky/Linox input set; existing medians reproduced. |
 | `make test-multi-domain` | External failure | Registry transfer failed before the Alpine image became ready; QEMU was terminated by the harness trap. |
 | `make test` / `make test-linux-runtime` | Baseline regression reproduced | The published tag fails at the linked ELF verifier. After repairing stale `AT_SYSINFO_EHDR` fixture expectations and loopback TCP endpoint classification, the branch reaches the later thread-transition probe and exposes an independent invalid return context. |
 

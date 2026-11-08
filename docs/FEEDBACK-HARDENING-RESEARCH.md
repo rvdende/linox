@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The initial Ginux experiment asked whether Human-Directed Agentic Engineering
+The initial Linox experiment asked whether Human-Directed Agentic Engineering
 (HDAE) could produce an independent kernel capable of running an existing Linux
 userspace. This secondary experiment asks a different question:
 
@@ -88,7 +88,7 @@ A gate passes only when every stated criterion has fresh evidence.
 10. **Qualification and comparison:** rerun the complete compatibility,
     lifecycle, Rocky, multi-domain, topology, adversarial, stress, and benchmark
     suites against the initial baseline.
-11. **Matched UP and SMP measurement:** compare Rocky on Linux and Ginux with
+11. **Matched UP and SMP measurement:** compare Rocky on Linux and Linox with
     fixed and CPU-scaled thread counts at one, two, and four vCPUs. Correctness
     faults discovered during measurement became separate shared-page and exact
     thread-context gates before the matrix was allowed to complete.

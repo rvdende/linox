@@ -65,7 +65,7 @@ audit, and full regressions.
 - `cargo fmt --all`, `make architecture-check`, and `make check` pass with the
   four new synchronization globals explicitly classified.
 - `make build-verification && bash tests/qemu/boot.sh` reports
-  `ginux: ranked synchronization primitives ready`, completes all kernel and
+  `linox: ranked synchronization primitives ready`, completes all kernel and
   Linux runtime checks, shuts down cleanly, and ends with `Boot test passed`.
 - The physical allocator migration passed formatting, architecture and global
   ownership checks, `make check`, and the complete deterministic QEMU suite;

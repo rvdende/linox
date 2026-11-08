@@ -1,4 +1,4 @@
-# Multi-CPU tests: boot Ginux under QEMU with several CPUs and check that a
+# Multi-CPU tests: boot Linox under QEMU with several CPUs and check that a
 # domain given more than one CPU runs its processes on all of them.
 #
 #   make build && cargo test --manifest-path tests/smp/Cargo.toml multicore
@@ -7,7 +7,7 @@
 # 16 GiB process in a 24 GB domain on a 26 GiB guest. Its own workspace,
 # like tests/ltp.
 [package]
-name = "ginux-smp-tests"
+name = "linox-smp-tests"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"

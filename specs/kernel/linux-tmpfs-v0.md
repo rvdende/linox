@@ -6,8 +6,8 @@ The measured read-only root supplies the `/tmp` mount-point anchor. The kernel
 installs a separate volatile filesystem object before entering Linux PID 1;
 no mutable bytes are part of the authenticated root image.
 
-This version admits exactly one regular file named `ginux-ready`. The directory
-starts empty. Absolute `openat(AT_FDCWD, "/tmp/ginux-ready",
+This version admits exactly one regular file named `linox-ready`. The directory
+starts empty. Absolute `openat(AT_FDCWD, "/tmp/linox-ready",
 O_WRONLY | O_CREAT | O_EXCL)` creates a zero-length, mode `0600` file with a
 64-byte capacity. A second exclusive creation returns `-EEXIST`. Opening an
 absent file without `O_CREAT` returns `-ENOENT`.
@@ -19,7 +19,7 @@ generation is rejected. Descriptor offsets are independent. Writes stage the
 complete userspace input before mutation and return `-ENOSPC` if the resulting
 extent exceeds 64 bytes.
 
-`getdents64` always reports `.` and `..`, and reports `ginux-ready` only while
+`getdents64` always reports `.` and `..`, and reports `linox-ready` only while
 the live generation is linked. `unlinkat` supports the exact absolute pathname
 with zero flags. This bounded version rejects unlink while a matching
 descriptor is open with `-EBUSY`. After the final close, unlink atomically

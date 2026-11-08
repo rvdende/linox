@@ -48,8 +48,8 @@ for ((run = 1; run <= BENCHMARK_BOOT_RUNS; run++)); do
         -device "virtio-blk-pci,drive=linux-root,bootindex=1" \
         -device virtio-serial \
         -chardev "file,id=benchmark-output,path=$results" \
-        -device "virtserialport,chardev=benchmark-output,name=org.ginux.benchmark" \
-        -fw_cfg "name=opt/ginux/threads,string=$BENCHMARK_THREADS" \
+        -device "virtserialport,chardev=benchmark-output,name=org.linox.benchmark" \
+        -fw_cfg "name=opt/linox/threads,string=$BENCHMARK_THREADS" \
         -net none >"$log" 2>&1 &
     qemu_pid=$!
     ready=""
@@ -78,19 +78,19 @@ for ((run = 1; run <= BENCHMARK_BOOT_RUNS; run++)); do
         continue
     fi
     for _ in {1..900}; do
-        grep -Fq GINUX_BENCH_COMPLETE "$results" && break
+        grep -Fq LINOX_BENCH_COMPLETE "$results" && break
         kill -0 "$qemu_pid" 2>/dev/null || break
         sleep 1
     done
     wait "$qemu_pid" || true
     qemu_pid=""
-    grep -Fq GINUX_BENCH_COMPLETE "$results" || {
+    grep -Fq LINOX_BENCH_COMPLETE "$results" || {
         cat "$results" >&2
         tail -n 120 "$log" >&2
         echo "benchmark: Linux workload run $run did not complete" >&2
         exit 1
     }
-    grep -Fq "GINUX_BENCH_THREADS $BENCHMARK_THREADS" "$results" || {
+    grep -Fq "LINOX_BENCH_THREADS $BENCHMARK_THREADS" "$results" || {
         cat "$results" >&2
         echo "benchmark: Linux run $run did not use $BENCHMARK_THREADS threads" >&2
         exit 1

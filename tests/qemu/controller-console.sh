@@ -3,9 +3,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-output_file="$(mktemp -t ginux-controller.XXXXXX)"
-volume_image="$(mktemp -t ginux-controller-volume.XXXXXX)"
-qemu_pid_file="$(mktemp -t ginux-controller-pid.XXXXXX)"
+output_file="$(mktemp -t linox-controller.XXXXXX)"
+volume_image="$(mktemp -t linox-controller-volume.XXXXXX)"
+qemu_pid_file="$(mktemp -t linox-controller-pid.XXXXXX)"
 qemu_pid=""
 : >"$qemu_pid_file"
 
@@ -32,23 +32,23 @@ trap cleanup EXIT
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
     for _ in {1..60}; do
-        if grep -aFq 'ginux> ' "$output_file"; then
+        if grep -aFq 'linox> ' "$output_file"; then
             break
         fi
-        if grep -Fq 'GINUX_KERNEL_PANIC' "$output_file"; then
+        if grep -Fq 'LINOX_KERNEL_PANIC' "$output_file"; then
             break
         fi
         sleep 1
     done
     send_command() {
-        before="$(grep -aFo 'ginux> ' "$output_file" | wc -l | tr -d ' ')"
+        before="$(grep -aFo 'linox> ' "$output_file" | wc -l | tr -d ' ')"
         printf '%s\n' "$1"
         for _ in {1..60}; do
-            observed="$(grep -aFo 'ginux> ' "$output_file" | wc -l | tr -d ' ')"
+            observed="$(grep -aFo 'linox> ' "$output_file" | wc -l | tr -d ' ')"
             if [[ "$observed" -gt "$before" ]]; then
                 return
             fi
-            if grep -Fq 'GINUX_KERNEL_PANIC' "$output_file"; then
+            if grep -Fq 'LINOX_KERNEL_PANIC' "$output_file"; then
                 return
             fi
             sleep 1
@@ -67,12 +67,12 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
         send_command "$command"
     done
     printf 'shutdown\n'
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..75}; do
-    if grep -Fq 'GINUX_KERNEL_PANIC' "$output_file"; then
+    if grep -Fq 'LINOX_KERNEL_PANIC' "$output_file"; then
         stop_qemu
         break
     fi
@@ -100,10 +100,10 @@ qemu_pid=""
 : >"$qemu_pid_file"
 
 for expected in \
-    'ginux: launching embedded controller in ring 3' \
+    'linox: launching embedded controller in ring 3' \
     'eth0: automatic DHCP configuration' \
-    'Ginux controller v0 (ring 3)' \
-    'Ginux controller shell' \
+    'Linox controller v0 (ring 3)' \
+    'Linox controller shell' \
     'Available Commands:' \
     'help [COMMAND...]' \
     'ls [PATH]' \
@@ -186,7 +186,7 @@ for expected in \
     'domains: 2 configured' \
     'demo: running' \
     'integrity: sealed' \
-    'GINUX.EFI component catalog v0:' \
+    'LINOX.EFI component catalog v0:' \
     '- kernel: active, ring 0' \
     '- controller: active, ring 3' \
     '- boot modules: embedded, sealed' \
@@ -204,11 +204,11 @@ for expected in \
     '100    0      R      demo:init' \
     'demo: stopped' \
     'demo: failed (contained)' \
-    'ginux: starting configured runtime domain' \
+    'linox: starting configured runtime domain' \
     'Error: unknown command' \
-    'Shutting down Ginux.' \
-    'ginux: controller requested clean shutdown' \
-    'GINUX_KERNEL_OK'; do
+    'Shutting down Linox.' \
+    'linox: controller requested clean shutdown' \
+    'LINOX_KERNEL_OK'; do
     if ! grep -Fq -- "$expected" "$output_file"; then
         cat "$output_file"
         echo "Controller console test failed: missing '$expected'." >&2
@@ -241,7 +241,7 @@ for rejected in UNVERIFIED POLICY-DENIED UNSUPPORTED; do
     fi
 done
 
-if grep -qE '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+if grep -qE '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
     cat "$output_file"
     echo "Controller console test failed: a panic marker was emitted." >&2
     exit 1
@@ -253,7 +253,7 @@ if grep -qE 'vtd_iova_to_slpte|vtd_iommu_translate|Interrupt Mask set|New fault 
     exit 1
 fi
 
-if grep -Fq 'ginux: UEFI boot entered' "$output_file"; then
+if grep -Fq 'linox: UEFI boot entered' "$output_file"; then
     cat "$output_file"
     echo "Controller console test failed: obsolete UEFI entry chatter was emitted." >&2
     exit 1
@@ -265,13 +265,13 @@ if grep -Fq 'BdsDxe: failed to load' "$output_file"; then
     exit 1
 fi
 
-if [[ "$(grep -Fc 'Ginux controller v0 (ring 3)' "$output_file")" -ne 1 ]]; then
+if [[ "$(grep -Fc 'Linox controller v0 (ring 3)' "$output_file")" -ne 1 ]]; then
     cat "$output_file"
     echo "Controller console test failed: controller was relaunched." >&2
     exit 1
 fi
 
-if [[ "$(grep -Fc 'ginux> status' "$output_file")" -ne 2 ]]; then
+if [[ "$(grep -Fc 'linox> status' "$output_file")" -ne 2 ]]; then
     cat "$output_file"
     echo "Controller console test failed: tab completion did not expand 'sta' to 'status'." >&2
     exit 1

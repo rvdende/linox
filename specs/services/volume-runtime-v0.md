@@ -6,11 +6,11 @@ and executed on the interrupt-driven virtio path.
 
 ## Artifact
 
-`make volume-service` builds `ginux-volume-service-runtime` for Rust's
+`make volume-service` builds `linox-volume-service-runtime` for Rust's
 `x86_64-unknown-none` target. The result is a stripped static PIE ELF with
 separate read-only, RX, and RW load segments and a non-executable stack. It has
 no host libc, allocator, filesystem, firmware, or kernel-library dependency.
-The runtime links the same `ginux-volume-format` and `ginux-volume-service`
+The runtime links the same `linox-volume-format` and `linox-volume-service`
 `no_std` crates used by the kernel reference backend.
 
 Manifest generation places the artifact at the internal `native/volume` path in the
@@ -37,7 +37,7 @@ kernel root, and scrubs and releases every temporary frame.
 ## Bootstrap contract
 
 The entry shim accepts a pointer in `RBX` to the read-only, fixed 64-byte
-`NativeServiceBootV0` defined by the shared `ginux-native-abi` crate and its C
+`NativeServiceBootV0` defined by the shared `linox-native-abi` crate and its C
 binding. Kernel and service both validate its magic, version, size, exact
 `VIRTIO_BLOCK` feature bitmap, nonzero resource fields, and reserved-zero rule.
 It contains the service-visible virtio common-configuration and notification
@@ -67,7 +67,7 @@ status, and device status are validated before returning to the shared volume
 engine.
 
 Volume slots map to reserved device sectors four and five. On empty media the
-shared engine commits generation one containing `ginux-isolated-volume\n` via
+shared engine commits generation one containing `linox-isolated-volume\n` via
 prepare/write/flush/commit/write/flush and recovers it. On existing media it
 accepts only that exact generation and payload. Success exits through control
 ABI operation 2 with `COMPLETED`; the supervisor cross-checks that status

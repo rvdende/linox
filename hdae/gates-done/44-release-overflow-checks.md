@@ -55,7 +55,7 @@ builds.
 
 ## Verification plan
 
-- `cargo test --release --package ginux-oci release_profile_traps_size_overflow`
+- `cargo test --release --package linox-oci release_profile_traps_size_overflow`
   -> the `should_panic` regression passes only when release overflow checks are
   active.
 - `stat -f '%z' build/esp/EFI/BOOT/BOOTX64.EFI` and
@@ -69,7 +69,7 @@ builds.
   `main@ecbb3142`.
 - Baseline: 70,063,104-byte EFI image; cached-build smoke test passed in 9.22
   seconds wall time.
-- `cargo test --release --package ginux-oci
+- `cargo test --release --package linox-oci
   release_profile_traps_size_overflow` passed and is part of `make check`.
 - The first checked-release boot exposed eager rejected-branch underflows in
   MMIO validation and CPU-index validation; both now use lazy `then` branches.
@@ -93,7 +93,7 @@ builds.
 - Fresh `make check` passed on the synchronized tree, including the
   release-profile overflow trap and architecture/compatibility checks.
 - Fresh complete `make test` passed on the synchronized tree, including
-  `GINUX_KERNEL_OK`, Linux ELF/runtime compatibility, and `Boot test passed`.
+  `LINOX_KERNEL_OK`, Linux ELF/runtime compatibility, and `Boot test passed`.
 
 ## Decisions and limitations
 

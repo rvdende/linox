@@ -21,8 +21,8 @@
 
 ## Governing outcome
 
-Ginux owns the physical display/input seat and presents a native ring-3
-controller desktop. Native applications use a Ginux protocol; Linux domains run
+Linox owns the physical display/input seat and presents a native ring-3
+controller desktop. Native applications use a Linox protocol; Linux domains run
 their own Wayland environment and export one desktop surface that can be
 windowed or full screen. The CLI remains the recovery path.
 

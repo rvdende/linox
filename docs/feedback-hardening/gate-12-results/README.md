@@ -1,6 +1,6 @@
 # Gate 12 Reduced Evidence
 
-- `topology-comparison.tsv`: final Linux and Ginux medians and the
+- `topology-comparison.tsv`: final Linux and Linox medians and the
   favorable-direction ratio for every fixed and scaled sysbench cell.
 - `topology-scaling.tsv`: each system's median relative to its own one-vCPU
   result.

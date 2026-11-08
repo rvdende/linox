@@ -48,7 +48,7 @@ and every descendant so removed content cannot reappear by full-path lookup.
 
 ## Verification plan
 
-- `cargo test --package ginux-oci` -> the reported resurrection and prefix
+- `cargo test --package linox-oci` -> the reported resurrection and prefix
   boundary regressions pass with all existing OCI tests.
 - Source inspection -> plain published-rootfs whiteouts remove the target and
   call the existing descendant-removal path for that target.
@@ -58,15 +58,15 @@ and every descendant so removed content cannot reappear by full-path lookup.
 
 - Issue #18's code-path analysis matches the current implementation: both
   lookup paths preserve descendants after removing only the exact directory.
-- `cargo test --package ginux-oci` -> all 9 tests passed, including a lower
+- `cargo test --package linox-oci` -> all 9 tests passed, including a lower
   `secret/key`, upper `.wh.secret`, and retained adjacent `secret2/key`.
-- Warning-denying `ginux-oci` clippy passed.
+- Warning-denying `linox-oci` clippy passed.
 - Source inspection confirms plain published-rootfs whiteouts remove the exact
   target and then reuse `remove_index_children` for its descendants.
 - `make check` -> all static, architecture, unit, and warning-denying checks
   passed.
 - `make test` -> the complete two-vCPU QEMU verification boot reached
-  `GINUX_KERNEL_OK` and reported `Boot test passed.`
+  `LINOX_KERNEL_OK` and reported `Boot test passed.`
 - [PR #45](https://github.com/gmkurtzer/ginux/pull/45) contains the dedicated
   remediation branch; issue #18 and the PR contain reciprocal summaries.
 - PR #45 GitHub `static` and `qemu` checks passed on the delivered code and

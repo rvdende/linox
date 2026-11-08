@@ -11,7 +11,7 @@
 
 use core::ptr::{addr_of, addr_of_mut};
 
-use ginux_usb_audio as usb_audio;
+use linox_usb_audio as usb_audio;
 
 use super::pci::Function;
 use super::{delay_ms, say, wait_until_ms, DmaPage, DmaRegion};
@@ -585,7 +585,7 @@ impl Controller {
             // the controller may still write to its contexts.
             match controller.try_root_port(port) {
                 Ok(()) | Err(Error::NotConnected) => {}
-                Err(error) => say!("ginux:     port {}: {:?}\n", port, error),
+                Err(error) => say!("linox:     port {}: {:?}\n", port, error),
             }
         }
         if controller.inputs().next().is_none() && controller.speakers().next().is_none() {
@@ -797,7 +797,7 @@ impl Controller {
         let identity = device.address(self)?;
         if self.verbose {
             say!(
-                "ginux:     port {}: device {:04x}:{:04x} at speed {}\n",
+                "linox:     port {}: device {:04x}:{:04x} at speed {}\n",
                 location,
                 identity.vendor,
                 identity.product,
@@ -828,7 +828,7 @@ impl Controller {
         let ports = hub.configure_hub(self, protocol)?;
         if self.verbose {
             say!(
-                "ginux:     port {}: hub with {} ports\n",
+                "linox:     port {}: hub with {} ports\n",
                 hub.location,
                 ports
             );
@@ -836,7 +836,7 @@ impl Controller {
         for port in 1..=ports {
             match self.try_hub_port(&mut hub, port, protocol) {
                 Ok(()) | Err(Error::NotConnected) => {}
-                Err(error) => say!("ginux:     port {}.{}: {:?}\n", hub.location, port, error),
+                Err(error) => say!("linox:     port {}.{}: {:?}\n", hub.location, port, error),
             }
         }
         Ok(())
@@ -1152,7 +1152,7 @@ impl Device {
                     interface,
                 ) {
                     say!(
-                        "ginux:     port {}: interface {} refused the boot protocol: {:?}\n",
+                        "linox:     port {}: interface {} refused the boot protocol: {:?}\n",
                         self.location,
                         interface,
                         error
@@ -1233,13 +1233,13 @@ impl Device {
                     added += 1;
                 }
                 Ok(None) => say!(
-                    "ginux:     port {}: cannot play 48 kHz on the {} (interface {})\n",
+                    "linox:     port {}: cannot play 48 kHz on the {} (interface {})\n",
                     self.location,
                     output.terminal_name(),
                     output.interface
                 ),
                 Err(error) => say!(
-                    "ginux:     port {}: {} (interface {}) failed: {:?}\n",
+                    "linox:     port {}: {} (interface {}) failed: {:?}\n",
                     self.location,
                     output.terminal_name(),
                     output.interface,

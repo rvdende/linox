@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
-use ginux_volume_format::{
+use linox_volume_format::{
     decode, encode, HostVolumeHeader, PAYLOAD_CAPACITY, SECTOR_SIZE, SLOT_COUNT,
 };
 use sha2::{Digest as _, Sha256};
 
-pub use ginux_volume_format::Record;
+pub use linox_volume_format::Record;
 
 pub trait BlockDevice {
     fn read_sector(&mut self, sector: usize, output: &mut [u8; SECTOR_SIZE]) -> bool;
@@ -61,7 +61,7 @@ pub enum HostVolumeError {
     TooSmall,
 }
 
-pub const LEGACY_HOST_VOLUME_PAYLOAD: &[u8] = b"ginux-reboot-persistent\n";
+pub const LEGACY_HOST_VOLUME_PAYLOAD: &[u8] = b"linox-reboot-persistent\n";
 pub const LOCAL_CONFIG_SLOT_SECTORS: usize = 32;
 pub const LOCAL_CONFIG_SLOT_STARTS: [usize; 2] = [8, 40];
 pub const LOCAL_CONFIG_HEADER_SIZE: usize = 80;
@@ -73,7 +73,7 @@ pub const OCI_CATALOG_PAYLOAD_CAPACITY: usize =
     OCI_CATALOG_SLOT_SECTORS * SECTOR_SIZE - LOCAL_CONFIG_HEADER_SIZE;
 pub const OCI_OBJECT_START_SECTOR: usize = 256;
 
-const LOCAL_CONFIG_MAGIC: &[u8; 8] = b"GINUXLC1";
+const LOCAL_CONFIG_MAGIC: &[u8; 8] = b"LINOXLC1";
 // Version 1 digests only the payload, so generation and length are not
 // integrity-protected. Version 2 binds the header fields into the digest.
 // Version 1 slots remain readable; every new commit writes version 2.
@@ -81,7 +81,7 @@ const LOCAL_CONFIG_LEGACY_VERSION: u32 = 1;
 const LOCAL_CONFIG_VERSION: u32 = 2;
 const LOCAL_CONFIG_BOUND_HEADER: usize = 32;
 const LOCAL_CONFIG_COMMIT_MARKER: u64 = 0x3147_4643_4c58_5547;
-const OCI_CATALOG_MAGIC: &[u8; 8] = b"GINUXOC1";
+const OCI_CATALOG_MAGIC: &[u8; 8] = b"LINOXOC1";
 const OCI_CATALOG_COMMIT_MARKER: u64 = 0x3147_434f_5855_4e47;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

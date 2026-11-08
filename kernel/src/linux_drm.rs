@@ -1,7 +1,7 @@
 //! The DRM render node `/dev/dri/renderD128` of a virtio-gpu with 3D
 //! (Venus) support, as Linux's `virtio_gpu` driver offers it.
 //!
-//! `ginux_drm` holds what an open render node keeps and decodes the
+//! `linox_drm` holds what an open render node keeps and decodes the
 //! ioctls; `drivers::virtio_gpu` runs the device. This module keeps the
 //! open files and the dma-bufs exported from them, which descriptors share
 //! as object slots of the socket table (so `dup`, `fork`, SCM_RIGHTS and
@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use ginux_drm::{File, Gpu};
+use linox_drm::{File, Gpu};
 
 use crate::drivers::virtio_gpu::{self, VirtioGpu};
 use crate::sync::{LockRank, SpinLock};
@@ -24,7 +24,7 @@ pub(crate) const CLASS_DMABUF: u8 = 3;
 
 /// The render node's path and device number (226:128).
 pub(crate) const NODE_PATH: &[u8] = b"dev/dri/renderD128";
-pub(crate) const NODE_DEVICE: u32 = (ginux_drm::MAJOR << 8) | ginux_drm::RENDER_MINOR;
+pub(crate) const NODE_DEVICE: u32 = (linox_drm::MAJOR << 8) | linox_drm::RENDER_MINOR;
 const SYSFS_DEVICE: &[u8] = b"sys/dev/char/226:128/device";
 
 /// A dma-buf exported from a render node: its resource, size and memory.
@@ -147,7 +147,7 @@ pub(crate) fn ensure_nodes() {
 /// and errno, so a stalled Vulkan driver shows what the kernel refused.
 pub(crate) fn log_failure(command: u32, errno: u64) {
     if FAILURES_LOGGED.fetch_add(1, Ordering::Relaxed) < FAILURE_LOG_LIMIT {
-        crate::serial_write("ginux: drm ioctl ");
+        crate::serial_write("linox: drm ioctl ");
         crate::serial_write_hex(u64::from(command));
         crate::serial_write(" failed: errno ");
         crate::serial_write_u64(errno);
@@ -187,7 +187,7 @@ pub(crate) fn report_ioctl_stats() {
     let hz = crate::arch::x86_64::timer::monotonic_frequency()
         .unwrap_or(1)
         .max(1);
-    crate::serial_write("ginux: profile: drm ioctls (number:calls/retries/us):");
+    crate::serial_write("linox: profile: drm ioctls (number:calls/retries/us):");
     for number in 0..256 {
         let calls = IOCTL_CALLS[number].load(Ordering::Relaxed);
         if calls == 0 {

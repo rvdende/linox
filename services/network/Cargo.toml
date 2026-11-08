@@ -1,12 +1,12 @@
 [package]
-name = "ginux-network-service-runtime"
+name = "linox-network-service-runtime"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
 
 [[bin]]
-name = "ginux-network-service-runtime"
+name = "linox-network-service-runtime"
 path = "src/main.rs"
 test = false
 bench = false
@@ -15,8 +15,8 @@ bench = false
 base64ct = { version = "=1.8.3", default-features = false }
 embedded-io = { version = "=0.7.1", default-features = false }
 embedded-tls = { version = "=0.19.0", default-features = false, features = ["alloc", "p384", "rsa"] }
-ginux-native-abi = { path = "../../crates/native-abi" }
-ginux-oci = { path = "../../crates/oci" }
+linox-native-abi = { path = "../../crates/native-abi" }
+linox-oci = { path = "../../crates/oci" }
 heapless = "=0.9.2"
 p256 = { version = "=0.13.2", default-features = false, features = ["ecdsa"] }
 rand_chacha = { version = "=0.3.1", default-features = false }

@@ -1,4 +1,4 @@
-//! A Ginux guest under QEMU driven over its serial console, for tests that
+//! A Linox guest under QEMU driven over its serial console, for tests that
 //! type commands at a domain's shell.
 
 use std::fs::{self, File};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 /// Console lines that mean the kernel or the domain has failed.
 const FAILURES: &[&str] = &[
-    "GINUX_KERNEL_PANIC",
+    "LINOX_KERNEL_PANIC",
     "application processor run failed",
     "domain marked failed",
     "invalid kernel-entry",
@@ -41,15 +41,15 @@ impl Guest {
         File::create(&volume).unwrap().set_len(8 << 30).unwrap();
         let pid_file = work.join("qemu.pid");
         let log = work.join("serial.log");
-        let esp = std::env::var_os("GINUX_ESP_DIR")
+        let esp = std::env::var_os("LINOX_ESP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| repo.join("build/esp"));
         let mut qemu = Command::new(repo.join("tools/qemu/run.sh"))
-            .env("GINUX_ESP_DIR", &esp)
-            .env("GINUX_CPUS", cpus.to_string())
-            .env("GINUX_MEMORY", memory)
-            .env("GINUX_VOLUME_IMAGE", &volume)
-            .env("GINUX_QEMU_PID_FILE", &pid_file)
+            .env("LINOX_ESP_DIR", &esp)
+            .env("LINOX_CPUS", cpus.to_string())
+            .env("LINOX_MEMORY", memory)
+            .env("LINOX_VOLUME_IMAGE", &volume)
+            .env("LINOX_QEMU_PID_FILE", &pid_file)
             .env(
                 "OVMF_CODE",
                 std::env::var("OVMF_CODE")

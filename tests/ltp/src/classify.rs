@@ -80,7 +80,7 @@ pub fn classify(status: &str, output: &[u8], budget: u32) -> (Verdict, String) {
     }
     if code == 0 {
         // The LTP library counts results in a page it shares with the test
-        // process and derives the exit status from it. Under Ginux that page
+        // process and derives the exit status from it. Under Linox that page
         // has not always reached the library's process from the test, so the
         // exit status can claim success after the test reported a failure:
         // the results it printed decide.

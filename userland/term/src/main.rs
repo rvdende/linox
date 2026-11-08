@@ -1,5 +1,5 @@
-//! ginux-term: a small Wayland terminal for Ginux. It runs an interactive
-//! shell over pipes (Ginux has no pseudo-terminals yet), so it keeps its own
+//! linox-term: a small Wayland terminal for Linox. It runs an interactive
+//! shell over pipes (Linox has no pseudo-terminals yet), so it keeps its own
 //! line editing: typed text is echoed locally and sent a line at a time.
 
 use std::{
@@ -12,7 +12,7 @@ use std::{
     process::{Child, ChildStdin, Command, ExitCode, Stdio},
 };
 
-use ginux_gfx::{Canvas, GLYPH};
+use linox_gfx::{Canvas, GLYPH};
 use rustix::event::{poll, PollFd, PollFlags};
 use wayland_client::{
     delegate_noop,
@@ -252,7 +252,7 @@ impl Terminal {
             let frame = (width * height * 4) as usize;
             let length = frame * 2;
             let fd: OwnedFd =
-                rustix::fs::memfd_create("ginux-term", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
+                rustix::fs::memfd_create("linox-term", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
             rustix::fs::ftruncate(&fd, length as u64).ok()?;
             // SAFETY: maps the memfd just sized to `length` bytes.
             let address = unsafe { mmap(std::ptr::null_mut(), length, 3, 1, fd.as_raw_fd(), 0) };
@@ -598,7 +598,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("ginux-term: {message}");
+            eprintln!("linox-term: {message}");
             ExitCode::FAILURE
         }
     }
@@ -619,7 +619,7 @@ fn run() -> Result<(), String> {
             "-e" => command = arguments.by_ref().collect::<Vec<_>>().join(" "),
             _ => {
                 return Err(format!(
-                    "unknown argument {argument}; usage: ginux-term [--scale N] [-e COMMAND]"
+                    "unknown argument {argument}; usage: linox-term [--scale N] [-e COMMAND]"
                 ))
             }
         }
@@ -657,7 +657,7 @@ fn run() -> Result<(), String> {
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title("Terminal".into());
-    toplevel.set_app_id("ginux-term".into());
+    toplevel.set_app_id("linox-term".into());
     if let Ok(manager) =
         globals.bind::<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
     {

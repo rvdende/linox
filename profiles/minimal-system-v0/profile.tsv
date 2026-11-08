@@ -1,4 +1,4 @@
-GINUX_SYSTEM_PROFILE_V0
+LINOX_SYSTEM_PROFILE_V0
 meta	architecture	x86_64	required
 meta	init	/sbin/init	required
 meta	console	/dev/console	required

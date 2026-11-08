@@ -3,7 +3,7 @@
 ## Goal
 
 Run unmodified Wayland client applications inside a Linux domain and export the
-domain's composed desktop through the Ginux bridge.
+domain's composed desktop through the Linox bridge.
 
 ## Approved scope
 
@@ -62,7 +62,7 @@ domain's composed desktop through the Ginux bridge.
 
 ## Decisions and limitations
 
-- Wayland is a Linux-domain compatibility mechanism, not the Ginux host display
+- Wayland is a Linux-domain compatibility mechanism, not the Linox host display
   protocol. The exact supported interface set and fixed resource bounds are
   recorded in `docs/CONTROLLER-DESKTOP.md`; general Wayland and desktop
   environment compatibility remain out of scope.

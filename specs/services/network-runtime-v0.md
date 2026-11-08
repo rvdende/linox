@@ -12,7 +12,7 @@ runtime.
 
 ## Artifact contract
 
-`ginux-network-service-runtime` is a `no_std`, `no_main`, freestanding x86-64
+`linox-network-service-runtime` is a `no_std`, `no_main`, freestanding x86-64
 PIE built for `x86_64-unknown-none`. Its entry point uses only the stable native
 control and lifecycle ABI. It requires control ABI v4 and its structured
 descriptor before reporting a clean `COMPLETED` lifecycle outcome. An

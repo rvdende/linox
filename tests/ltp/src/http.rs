@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn serves_a_file_and_refuses_the_rest() {
-        let directory = std::env::temp_dir().join(format!("ginux-ltp-http-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("linox-ltp-http-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("runlist.txt"), "0\ta\t60\ta\n").unwrap();
         let port = serve(directory.clone()).unwrap();

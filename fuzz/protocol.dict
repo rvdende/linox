@@ -1,4 +1,4 @@
-# libFuzzer dictionary for ginux-protocol-state surfaces (v2.6-4).
+# libFuzzer dictionary for linox-protocol-state surfaces (v2.6-4).
 e_arp="\x08\x06"
 e_ipv4="\x08\x00"
 arp_hdr="\x00\x01\x08\x00\x06\x04\x00\x02"

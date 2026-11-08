@@ -97,7 +97,7 @@ interrupt. Clean exit requires request four and both queue completions.
 
 ## Sources and compatibility
 
-`ginux-native-abi` is the canonical `no_std` Rust source. The matching
+`linox-native-abi` is the canonical `no_std` Rust source. The matching
 `native-service-lifecycle-v0.h` file is the C binding. These constants refine
 the already frozen control ABI v4 operation-2 contract; they do not change its
 calling convention or lifecycle record layout.

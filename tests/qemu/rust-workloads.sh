@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots Ginux, starts the official rust:alpine image in a domain, and has
+# Boots Linox, starts the official rust:alpine image in a domain, and has
 # its rustc compile and run the stress programs in tests/linux-workloads
 # (allocator, thread churn, mmap, file I/O, malloc metadata and every kind
 # of descriptor above 1024), then has
@@ -9,12 +9,12 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-workloads.XXXXXX")
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-workloads-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-workloads-pid.XXXXXX")
+output_file=$(mktemp "${TMPDIR:-/tmp}/linox-rust-workloads.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-rust-workloads-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-rust-workloads-pid.XXXXXX")
 # A free port the host picks, unless one is given: runs in parallel (other
 # worktrees, other suites) would otherwise collide on a fixed one.
-http_port="${GINUX_WORKLOAD_HTTP_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+http_port="${LINOX_WORKLOAD_HTTP_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 qemu_pid=""
 http_pid=""
 
@@ -48,7 +48,7 @@ wait_for() {
     local seconds=${2:-120}
     for _ in $(seq 1 "$seconds"); do
         grep -Eq "^${marker}" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
             break
         fi
         sleep 1
@@ -67,12 +67,12 @@ toolchain=/usr/local/rustup/toolchains/1.99.1-x86_64-unknown-linux-musl/bin
 fetch="wget -q http://10.0.2.2:${http_port}"
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
-    wait_for 'ginux> ' 300
+    wait_for 'linox> ' 300
     printf '%s\n' \
         'domain new rust' \
         'domain set rust image=rust:alpine init=/bin/sh' \
         'domain start rust --attach'
-    wait_for 'ginux: OCI image ready' 900
+    wait_for 'linox: OCI image ready' 900
     sleep 5
     printf '%s\n' \
         "export PATH=$toolchain:\$PATH CARGO_HOME=/tmp/cargo; cd /tmp" \
@@ -100,10 +100,10 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
         "cargo build -j1 2>&1 | grep -E 'Finished|error'; ./target/debug/sd | grep -q 'Point { x: 7 }' && echo SERDE_DERIVE\"_OK\"" \
         'exit 0'
     wait_for 'SERDE_DERIVE_OK' 1200
-    wait_for 'ginux: Linux init exited cleanly' 120
+    wait_for 'linox: Linux init exited cleanly' 120
     sleep 2
     printf '%s\n' 'shutdown'
-} | GINUX_MEMORY=8G GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_MEMORY=8G LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 

@@ -1,6 +1,6 @@
 # Graphics
 
-Ginux shows its console and the Wayland desktop on one of two displays:
+Linox shows its console and the Wayland desktop on one of two displays:
 
 - the **UEFI GOP framebuffer** the firmware leaves behind (any PC, and QEMU's
   standard VGA), or
@@ -16,7 +16,7 @@ composes in software and copies each frame into its mapping of `/dev/fb0`.
 
 | Piece | Where | What it does |
 | --- | --- | --- |
-| Protocol | `crates/virtio-gpu` (`ginux-virtio-gpu`) | Encodes `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`, `RESOURCE_ATTACH_BACKING`, `SET_SCANOUT`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH`, checks replies, picks the mode, and packs damage rectangles into one atomic word. Pure, `no_std`, host-tested (`cargo test -p ginux-virtio-gpu`). |
+| Protocol | `crates/virtio-gpu` (`linox-virtio-gpu`) | Encodes `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`, `RESOURCE_ATTACH_BACKING`, `SET_SCANOUT`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH`, checks replies, picks the mode, and packs damage rectangles into one atomic word. Pure, `no_std`, host-tested (`cargo test -p linox-virtio-gpu`). |
 | Unsafe floor | `kernel/src/drivers/device_memory.rs` | `Mmio` (device registers in the kernel's uncached device window) and `DmaBuffer` (contiguous kernel frames from the frame allocator, reached through the direct map). Bounds-checked volatile access, no references to device-visible memory; the only `unsafe` the driver needs. |
 | Transport | `kernel/src/drivers/virtio.rs` | Modern virtio 1.x over PCI, polled: capability parsing, reset, feature negotiation (`VERSION_1`, `ACCESS_PLATFORM`), and a split virtqueue used one batch of request/response chains at a time. Safe Rust. |
 | Driver | `kernel/src/drivers/virtio_gpu.rs` | Discovery, bring-up, the scanout owner and the flush policy. Safe Rust apart from the owner's latch (`SCANOUT`, one `UnsafeCell` behind a try-only `AtomicBool`). |
@@ -77,15 +77,15 @@ tick. The device is polled; MSI-X stays off.
 The periodic full-surface refresh costs the host a 4 MB copy per frame at
 1280x800 whether or not anything changed. Linux's fbdev emulation instead
 uses deferred I/O (write-protect the mapping, collect the pages that fault,
-flush those after a delay); Ginux could do the same with the dirty bits of
+flush those after a delay); Linox could do the same with the dirty bits of
 the domain's page-table entries, or let the compositor report damage.
 
 ### Running it
 
 ```sh
-GINUX_QEMU_GPU=virtio tools/qemu/run.sh       # virtio-gpu-pci, no VGA
-GINUX_QEMU_GPU=virtio-vga tools/qemu/run.sh   # GOP on the VGA part, then virtio-gpu
-GINUX_QEMU_GPU_SIZE=1920x1080                 # the mode the host reports
+LINOX_QEMU_GPU=virtio tools/qemu/run.sh       # virtio-gpu-pci, no VGA
+LINOX_QEMU_GPU=virtio-vga tools/qemu/run.sh   # GOP on the VGA part, then virtio-gpu
+LINOX_QEMU_GPU_SIZE=1920x1080                 # the mode the host reports
 make test-desktop-virtio-gpu                  # the Wayland desktop on virtio-gpu
 ```
 
@@ -98,11 +98,11 @@ through its mapping.
 
 ## 3D: Venus (Vulkan on the host GPU)
 
-Ginux runs unmodified Vulkan applications on the host's GPU through Mesa's
-Venus driver, as a Linux guest does. With `GINUX_QEMU_GPU=venus`, run.sh
+Linox runs unmodified Vulkan applications on the host's GPU through Mesa's
+Venus driver, as a Linux guest does. With `LINOX_QEMU_GPU=venus`, run.sh
 gives QEMU a `virtio-gpu-gl-pci` with `blob=on,venus=on`, a `hostmem`
 region (default 4 GiB) and `ioeventfd=on`, on an EGL display
-(`egl-headless`, or `gtk,gl=on` with `GINUX_QEMU_DISPLAY=gtk`). The host
+(`egl-headless`, or `gtk,gl=on` with `LINOX_QEMU_DISPLAY=gtk`). The host
 needs virglrenderer built with Venus (QEMU 10.2 and virglrenderer 1.2 on
 this machine).
 
@@ -110,10 +110,10 @@ this machine).
 | --- | --- | --- |
 | 3D commands | `crates/virtio-gpu` | Context, capset, blob (create, map, unmap), fenced `SUBMIT_3D` with a ring index, the shared-memory capability. |
 | Device | `kernel/src/drivers/virtio_gpu.rs` | Negotiates `VIRGL`, `RESOURCE_BLOB` and `CONTEXT_INIT`, reads the capsets, places blobs in the host-visible region, keeps fenced submissions in flight (out-of-order completion), and reports a busy queue or fence as `EAGAIN` rather than spinning. |
-| Render node | `crates/drm` (`ginux-drm`), `kernel/src/linux_drm.rs` | `/dev/dri/renderD128` (226:128) with the virtgpu ioctls Mesa uses, sync-file fences, dma-buf export and import, and the sysfs entries libdrm's `drmGetDevices2` reads. An ioctl that must wait for the GPU lets the domain run and is issued again. |
+| Render node | `crates/drm` (`linox-drm`), `kernel/src/linux_drm.rs` | `/dev/dri/renderD128` (226:128) with the virtgpu ioctls Mesa uses, sync-file fences, dma-buf export and import, and the sysfs entries libdrm's `drmGetDevices2` reads. An ioctl that must wait for the GPU lets the domain run and is issued again. |
 | Mappings | `kernel/src/arch/x86_64/cpu.rs` (`linux_object_mmap`) | Blob pages are mapped with the caching the host gives in `RESOURCE_MAP_BLOB` (write-back, write-combining or uncached, through the page attribute table every CPU programs). A write-back mapping of memory the GPU writes without snooping never sees fence feedback change. |
 
-Mesa presents through `wl_shm` (`MESA_VK_WSI_DEBUG=sw`), since ginux-wm has
+Mesa presents through `wl_shm` (`MESA_VK_WSI_DEBUG=sw`), since linox-wm has
 no linux-dmabuf yet: the Venus WSI copies each rendered frame into a shared
 memory buffer, which the compositor draws straight from the client's pool.
 
@@ -121,12 +121,12 @@ memory buffer, which the compositor draws straight from the client's pool.
 
 cadrs (Bevy, wgpu) in an Ubuntu 26.04 domain with one CPU, 1280x800, its
 `camera_frame_walk` scenario, on the host's Radeon RX 6800 XT through Venus,
-under ginux-wm: after the first 100 frames (startup: a 5 s first frame and a
+under linox-wm: after the first 100 frames (startup: a 5 s first frame and a
 9 s scene load) mean 17.4 ms (57 fps), median 17 ms, p90 19 ms, worst 50 ms.
 Before cheaper process switches (docs/SCHEDULER.md) the median was 23 ms
 (p90 33 ms). Software rendering (lavapipe) on the same domain was 295 ms.
 cadrs exits with SIGSEGV after its scenario (status 139). That is the
-application and driver, not Ginux: the main thread destroys the Vulkan
+application and driver, not Linox: the main thread destroys the Vulkan
 instance (the loader unloads `libvulkan_virtio.so`) and only then wakes a
 thread that had used Venus; that thread exits, and glibc runs the
 thread-specific-data destructor Venus registered with `pthread_key_create`
@@ -136,7 +136,7 @@ domains (`cpu=N`) are not yet usable with a compositor: a process whose
 threads run on other CPUs cannot be switched out (docs/SCHEDULER.md).
 
 ```sh
-GINUX_QEMU_GPU=venus tools/qemu/run.sh
+LINOX_QEMU_GPU=venus tools/qemu/run.sh
 # in the domain:
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.json MESA_VK_WSI_DEBUG=sw vulkaninfo --summary
 ```

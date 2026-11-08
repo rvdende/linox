@@ -7,12 +7,12 @@ delivery, and measured ring-3 service validation are verified.
 
 The kernel will enter the authenticated network-service PIE at ring 3 with
 `RBX` containing the user virtual address of a read-only, NX
-`ginux_native_network_boot_v0` record. The record is little-endian, C-aligned,
+`linox_native_network_boot_v0` record. The record is little-endian, C-aligned,
 exactly 80 bytes, and uses only fixed-width integers:
 
 | Offset | Width | Field |
 |---:|---:|---|
-| 0 | 8 | magic `0x30424e58554e4947` (`GINUXNB0` in memory) |
+| 0 | 8 | magic `0x30424e584f4e494c` (`LINOXNB0` in memory) |
 | 8 | 2 | version `0` |
 | 10 | 2 | structure size `80` |
 | 12 | 4 | exact feature bitmap |
@@ -49,7 +49,7 @@ MSI-X table, IDT, APIC, IOMMU-table, or kernel pointer.
 
 ## Compatibility and limits
 
-`ginux-native-abi` is the canonical `no_std` Rust definition.
+`linox-native-abi` is the canonical `no_std` Rust definition.
 `native-network-bootstrap-v0.h` is the C binding, and `make abi-conformance`
 freezes every field offset and the total size through an independent
 freestanding C11 consumer.

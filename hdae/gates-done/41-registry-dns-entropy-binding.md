@@ -58,7 +58,7 @@ traffic used to select the image-pull endpoint.
   transaction IDs, server addresses, client ports, and questions.
 - `make check` passed with the 1,032-block unsafe baseline, network-service
   parser tests, and the unchanged 160-page root publication capacity.
-- `make test` passed with `GINUX_KERNEL_OK` and `Boot test passed`.
+- `make test` passed with `LINOX_KERNEL_OK` and `Boot test passed`.
 
 ## Decisions and limitations
 

@@ -1,10 +1,10 @@
-# Linux and Ginux Comparative Benchmark
+# Linux and Linox Comparative Benchmark
 
 This harness tests two deliberately narrow questions: how long do Linux and
-Ginux take to reach the same systemd readiness marker from QEMU process launch,
+Linox take to reach the same systemd readiness marker from QEMU process launch,
 and how do they execute the same x86-64 userspace workload?
 
-It does not establish general operating-system performance. Ginux is currently
+It does not establish general operating-system performance. Linox is currently
 single-vCPU, the macOS development host can only use QEMU TCG for x86-64, and
 the two systems do not yet expose equivalent storage stacks.
 
@@ -25,9 +25,9 @@ The Linux baseline is the official Rocky Linux 10.2 GenericCloud image
 The source URL and all other fixed settings are in
 `profiles/benchmarks/rocky10-single-vcpu.env`.
 
-The Ginux systemd boot guest uses `rockylinux/rockylinux:10-ubi-init`.
+The Linox systemd boot guest uses `rockylinux/rockylinux:10-ubi-init`.
 GenericCloud and UBI are different Rocky image profiles, so the boot result is
-not a byte-for-byte userspace comparison. The Ginux sysbench workload instead
+not a byte-for-byte userspace comparison. The Linox sysbench workload instead
 uses a minimal root assembled from a Rocky Linux 10 image with `/bin/sh`,
 `/usr/bin/sysbench`, and their runtime dependencies. Workload results are
 accepted only when both guests report the same SHA-256 digest for
@@ -43,9 +43,9 @@ separate from the login and boot console.
 
 ```sh
 make benchmark-prepare-linux
-make benchmark-prepare-ginux
+make benchmark-prepare-linox
 make benchmark-boot-comparison
-make benchmark-ginux-sysbench
+make benchmark-linox-sysbench
 make benchmark-compare
 ```
 
@@ -72,35 +72,35 @@ the `max,+smep,+smap,+umip` CPU model, TCG, and warm local image data.
 | System | Run 1 | Run 2 | Run 3 | Median | Mean | Range |
 |---|---:|---:|---:|---:|---:|---:|
 | Rocky on Linux | 41.596 s | 46.472 s | 42.579 s | 42.579 s | 43.549 s | 4.876 s |
-| Rocky on Ginux | 12.910 s | 12.820 s | 12.860 s | 12.860 s | 12.863 s | 0.090 s |
+| Rocky on Linox | 12.910 s | 12.820 s | 12.860 s | 12.860 s | 12.863 s | 0.090 s |
 
-Ginux reached the matched marker 3.31 times sooner, corresponding to 69.8%
+Linox reached the matched marker 3.31 times sooner, corresponding to 69.8%
 less median elapsed time in this configuration. Linux varied materially across
-the three TCG runs (an 11.5% range relative to its median), while Ginux's range
+the three TCG runs (an 11.5% range relative to its median), while Linox's range
 was 0.7%. This is a preliminary operational full-guest startup comparison, not
 a general kernel-performance result.
 
-The likely explanation is structural. Ginux boots a compact EFI kernel and
+The likely explanation is structural. Linox boots a compact EFI kernel and
 controller, restores a cached OCI filesystem, and launches the Rocky domain
 without booting a second kernel or initramfs. Rocky Linux boots from a local
 qcow2 disk through its general-purpose UEFI, kernel, initramfs, and device
-discovery path. Ginux also implements less hardware and service machinery, so omitted
-work may appear as lower latency. The Linux GenericCloud and Ginux UBI profiles
+discovery path. Linox also implements less hardware and service machinery, so omitted
+work may appear as lower latency. The Linux GenericCloud and Linox UBI profiles
 do not enable identical services; their qcow2 and OCI/raw storage paths also
 differ. TCG can affect their instruction paths differently. A stronger claim
 requires an identical userspace profile, more runs, equivalent storage paths,
 and execution on the same x86-64 KVM host.
 
 Raw boot results are written to `rocky-linux-summary.tsv`,
-`ginux-boot-summary.tsv`, and `boot-comparison.tsv` under the benchmark build
+`linox-boot-summary.tsv`, and `boot-comparison.tsv` under the benchmark build
 directory.
 
 ## October 23, 2026 matched sysbench checkpoint
 
 Rocky on Linux used the official Rocky Linux 10.2 GenericCloud image and its
-stock `6.12.0-211.16.1.el10_2.0.1.x86_64` kernel. Rocky on Ginux used the
+stock `6.12.0-211.16.1.el10_2.0.1.x86_64` kernel. Rocky on Linox used the
 minimal Rocky Linux 10 sysbench root built by
-`tools/benchmarks/prepare-ginux-sysbench.sh`. Both guests ran the same Rocky
+`tools/benchmarks/prepare-linox-sysbench.sh`. Both guests ran the same Rocky
 Linux 10 x86-64 sysbench executable, verified
 by SHA-256
 `7cf6b71521436bd32a8ab197851035ff1632bee383fec5a35468d61969e7c18d`.
@@ -108,14 +108,14 @@ Commands, QEMU machine, CPU count, memory size, CPU model, accelerator, and
 three-second workload duration matched. The table reports nine observations
 per workload and system.
 
-| Workload | Metric | Rocky on Linux | Rocky on Ginux | Relative result |
+| Workload | Metric | Rocky on Linux | Rocky on Linox | Relative result |
 |---|---|---:|---:|---:|
-| CPU | events/s | 232.360 | 267.650 | Ginux 1.152x faster |
-| Memory | MiB/s | 679.510 | 620.580 | Ginux 1.095x slower |
-| Threads | events/s | 306.129 | 309.732 | Ginux 1.012x faster |
-| Mutex | seconds/event | 1.550 | 1.423 | Ginux 1.089x faster |
+| CPU | events/s | 232.360 | 267.650 | Linox 1.152x faster |
+| Memory | MiB/s | 679.510 | 620.580 | Linox 1.095x slower |
+| Threads | events/s | 306.129 | 309.732 | Linox 1.012x faster |
+| Mutex | seconds/event | 1.550 | 1.423 | Linox 1.089x faster |
 
-The CPU workload is almost entirely userspace computation; its 12.8% Ginux
+The CPU workload is almost entirely userspace computation; its 12.8% Linox
 lead is preliminary and may include TCG variation or different background
 work. The memory workload uses one-kibibyte events and times each event. A
 block-size sweep reached 2.76 GiB/s with one-mebibyte events, showing that the
@@ -127,7 +127,7 @@ page then removed the remaining privilege crossings and raised the median to
 584.540 MiB/s. A second vDSO pass replaced per-read division and synchronized
 live snapshots with an immutable per-exec time base, fixed-point TSC
 conversion, and constant-time reciprocal normalization. The final median is
-620.580 MiB/s. Rocky on Ginux is 1.095 times slower in this one-kibibyte test;
+620.580 MiB/s. Rocky on Linox is 1.095 times slower in this one-kibibyte test;
 the remaining TCG gap is too small to assign to one kernel mechanism without
 native KVM profiling.
 
@@ -135,7 +135,7 @@ The original threads checkpoint exposed a scheduler defect: every
 worker `sched_yield()` selected a just-preempted busy supervisory thread, so
 the worker waited for another timer interrupt on each of the workload's 1,000
 yields per event. Tracking the last preempted thread and excluding it from an
-immediate voluntary-yield selection raised the Ginux median from 0.078 to
+immediate voluntary-yield selection raised the Linox median from 0.078 to
 181.915 events/s. A second pass found that a yield with no other runnable
 thread still serialized and restored the unchanged user context. Treating
 that Linux scheduling hint as a no-op raised the median to 309.732 events/s,
@@ -144,10 +144,10 @@ gap; it does not measure parallel execution or SMP scheduling.
 The single-thread mutex workload completed one event on both kernels and
 carries little weight.
 
-Ginux samples use a fresh QEMU boot for isolation because the current shell
+Linox samples use a fresh QEMU boot for isolation because the current shell
 child-lifecycle path does not reliably support several sequential sysbench
 children. Workload timing excludes those boots. Complete output is preserved
-in `rocky-linux-run-*-results.log`, `ginux-sysbench-*.log`, and
+in `rocky-linux-run-*-results.log`, `linox-sysbench-*.log`, and
 `sysbench-comparison.tsv`.
 
 ## Publication requirements
@@ -162,4 +162,4 @@ Before treating these checkpoint results as general performance evidence:
 5. Add equivalent IPC, network, and storage tests.
 
 File-I/O tests are intentionally deferred until equivalent storage paths can be
-defined. Multicore tests are deferred until Ginux has SMP support.
+defined. Multicore tests are deferred until Linox has SMP support.

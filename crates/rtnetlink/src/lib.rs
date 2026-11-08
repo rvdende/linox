@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! rtnetlink (NETLINK_ROUTE) as Ginux answers it: the requests iproute2
+//! rtnetlink (NETLINK_ROUTE) as Linox answers it: the requests iproute2
 //! and busybox `ip` send, and the messages Linux sends back.
 //!
 //! The kernel describes a network namespace as a [`View`] (its links,

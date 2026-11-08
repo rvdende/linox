@@ -3,15 +3,15 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-boot_timeout_seconds="${GINUX_BOOT_TIMEOUT_SECONDS:-180}"
+boot_timeout_seconds="${LINOX_BOOT_TIMEOUT_SECONDS:-180}"
 if [[ ! "$boot_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-    echo "QEMU smoke test failed: GINUX_BOOT_TIMEOUT_SECONDS must be a positive integer." >&2
+    echo "QEMU smoke test failed: LINOX_BOOT_TIMEOUT_SECONDS must be a positive integer." >&2
     exit 2
 fi
 
-output_file="$(mktemp -t ginux-smoke.XXXXXX)"
-volume_image="$(mktemp -t ginux-smoke-volume.XXXXXX)"
-qemu_pid_file="$(mktemp -t ginux-smoke-pid.XXXXXX)"
+output_file="$(mktemp -t linox-smoke.XXXXXX)"
+volume_image="$(mktemp -t linox-smoke-volume.XXXXXX)"
+qemu_pid_file="$(mktemp -t linox-smoke-pid.XXXXXX)"
 qemu_pid=""
 
 stop_qemu() {
@@ -42,17 +42,17 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 # shellcheck disable=SC2094
 {
     for ((attempt = 0; attempt < boot_timeout_seconds; attempt++)); do
-        if grep -aFq 'ginux> ' "$output_file"; then
+        if grep -aFq 'linox> ' "$output_file"; then
             printf 'shutdown\n'
             exit 0
         fi
-        if grep -aEq 'GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -aEq 'LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             exit 0
         fi
         sleep 1
     done
-} | GINUX_CPUS=2 GINUX_VOLUME_IMAGE="$volume_image" \
-    GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_CPUS=2 LINOX_VOLUME_IMAGE="$volume_image" \
+    LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
@@ -87,11 +87,11 @@ if [[ "$qemu_status" -ne 0 ]]; then
 fi
 
 for expected in \
-    'GINUX_KERNEL_OK' \
-    'ginux: launching embedded controller in ring 3' \
-    'Ginux controller v0 (ring 3)' \
-    'ginux> ' \
-    'ginux: controller requested clean shutdown'; do
+    'LINOX_KERNEL_OK' \
+    'linox: launching embedded controller in ring 3' \
+    'Linox controller v0 (ring 3)' \
+    'linox> ' \
+    'linox: controller requested clean shutdown'; do
     if ! grep -aFq -- "$expected" "$output_file"; then
         cat "$output_file"
         echo "QEMU smoke test failed: missing '$expected'." >&2
@@ -99,7 +99,7 @@ for expected in \
     fi
 done
 
-if grep -aEq 'GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+if grep -aEq 'LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
     cat "$output_file"
     echo "QEMU smoke test failed: a boot or kernel panic was emitted." >&2
     exit 1

@@ -1,5 +1,5 @@
 //! Unix98 pseudo-terminals, as Linux's devpts offers them: opening
-//! `/dev/ptmx` makes a master and slave pair ([`ginux_tty::Pair`]), and the
+//! `/dev/ptmx` makes a master and slave pair ([`linox_tty::Pair`]), and the
 //! slave appears as `/dev/pts/N` until the master closes.
 //!
 //! The pairs live in one table by index (the N of `/dev/pts/N`), each
@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use ginux_tty::Pair;
+use linox_tty::Pair;
 
 use crate::sync::{LockRank, SpinLock};
 

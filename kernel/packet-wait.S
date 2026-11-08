@@ -1,17 +1,17 @@
 .text
 .balign 16
-.global ginux_packet_wait_producer_start
-.global ginux_packet_wait_producer_end
-.global ginux_packet_wait_consumer_start
-.global ginux_packet_wait_consumer_end
-.global ginux_packet_wait_stop_helper_start
-.global ginux_packet_wait_stop_helper_end
-.global ginux_packet_wait_timeout_consumer_start
-.global ginux_packet_wait_timeout_consumer_end
-.global ginux_packet_wait_timeout_helper_start
-.global ginux_packet_wait_timeout_helper_end
+.global linox_packet_wait_producer_start
+.global linox_packet_wait_producer_end
+.global linox_packet_wait_consumer_start
+.global linox_packet_wait_consumer_end
+.global linox_packet_wait_stop_helper_start
+.global linox_packet_wait_stop_helper_end
+.global linox_packet_wait_timeout_consumer_start
+.global linox_packet_wait_timeout_consumer_end
+.global linox_packet_wait_timeout_helper_start
+.global linox_packet_wait_timeout_helper_end
 
-ginux_packet_wait_producer_start:
+linox_packet_wait_producer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x90
@@ -81,10 +81,10 @@ ginux_packet_wait_producer_start:
     .byte 0x52, 0x54, 0x00, 0x12, 0x34, 0x56
     .byte 10, 0, 2, 15
 
-ginux_packet_wait_producer_end:
+linox_packet_wait_producer_end:
 
 .balign 16
-ginux_packet_wait_consumer_start:
+linox_packet_wait_consumer_start:
     mov r12, rbx
     mov r14, rcx
     mov r15, rdx
@@ -190,18 +190,18 @@ ginux_packet_wait_consumer_start:
     .byte 0x52, 0x54, 0x00, 0x12, 0x34, 0x56
     .byte 10, 0, 2, 15
 
-ginux_packet_wait_consumer_end:
+linox_packet_wait_consumer_end:
 
 .balign 16
-ginux_packet_wait_stop_helper_start:
+linox_packet_wait_stop_helper_start:
     mov esi, 50
     mov eax, 2
     int 0x80
     int3
-ginux_packet_wait_stop_helper_end:
+linox_packet_wait_stop_helper_end:
 
 .balign 16
-ginux_packet_wait_timeout_consumer_start:
+linox_packet_wait_timeout_consumer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x40
@@ -247,10 +247,10 @@ ginux_packet_wait_timeout_consumer_start:
     mov eax, 2
     int 0x80
     int3
-ginux_packet_wait_timeout_consumer_end:
+linox_packet_wait_timeout_consumer_end:
 
 .balign 16
-ginux_packet_wait_timeout_helper_start:
+linox_packet_wait_timeout_helper_start:
     # Stay in ring 3 across the deadline. The timer must make the blocked
     # consumer runnable and preempt this peer; ordinary cooperative yield is
     # deliberately absent.
@@ -272,4 +272,4 @@ ginux_packet_wait_timeout_helper_start:
     mov eax, 2
     int 0x80
     int3
-ginux_packet_wait_timeout_helper_end:
+linox_packet_wait_timeout_helper_end:

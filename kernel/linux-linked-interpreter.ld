@@ -1,4 +1,4 @@
-ENTRY(ginux_linux_interpreter)
+ENTRY(linox_linux_interpreter)
 
 PHDRS
 {

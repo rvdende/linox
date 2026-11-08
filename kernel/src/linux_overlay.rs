@@ -776,7 +776,7 @@ pub(crate) fn mark_pseudo(handle: Handle) -> bool {
 
 /// The name an O_TMPFILE file is created under in its directory, for the
 /// moment before it is unlinked.
-const TEMPORARY_NAME: &[u8] = b".ginux-o-tmpfile";
+const TEMPORARY_NAME: &[u8] = b".linox-o-tmpfile";
 
 /// Creates an O_TMPFILE file: a regular file with no name, made as if in
 /// `directory` (owner, group and set-group-ID inheritance from it), that
@@ -1003,7 +1003,7 @@ pub(crate) fn paged_file(device: u64, inode: u64) -> Option<Handle> {
 /// Makes the unnamed node behind an anonymous shared mapping. Its pages are
 /// allocated zeroed as they are first mapped (`memfd_frame`).
 pub(crate) fn create_shmem() -> Option<Handle> {
-    let handle = create_file_stored(b"tmp/.ginux-shmem", 0o600, &[])?;
+    let handle = create_file_stored(b"tmp/.linox-shmem", 0o600, &[])?;
     let made = node_mut(handle).is_some_and(|node| {
         let paged = make_node_paged(node);
         if paged {

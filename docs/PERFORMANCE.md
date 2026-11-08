@@ -88,7 +88,7 @@ one virtual CPU.
   every per-domain atomic access. Its 9,935 / 10,226 / 10,226 ms TCG result is
   within run-to-run variance, so no speedup is claimed.
 - The single-thread sysbench threads workload issued 1,000 `sched_yield()`
-  calls per event. Ginux serialized and restored its full user context even
+  calls per event. Linox serialized and restored its full user context even
   when no other thread was runnable. Returning directly for that Linux-defined
   scheduling hint raised the nine-sample median from 181.915 to 311.147
   events/s, versus Rocky Linux at 306.129. Actual thread switches retain the
@@ -99,7 +99,7 @@ one virtual CPU.
   per-read division and synchronization with an immutable per-exec time base,
   fixed-point TSC conversion, and constant-time reciprocal normalization raised
   it again to 620.580 MiB/s. Rocky on Linux measured 679.510 MiB/s, leaving
-  Rocky on Ginux 1.095 times slower. The remaining TCG gap needs native KVM
+  Rocky on Linox 1.095 times slower. The remaining TCG gap needs native KVM
   profiling; syscall safety was not weakened.
 - A cached 299,590,656-byte published Rocky rootfs restored directly in 8,363
   ms. Restoring its 109,755,585 compressed bytes and unpacking them took about

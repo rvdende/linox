@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Boot the normal image twice. With 8 GiB of guest RAM OVMF loads GINUX.EFI at
+# Boot the normal image twice. With 8 GiB of guest RAM OVMF loads LINOX.EFI at
 # its 5 GiB link base, so the UEFI stage must relocate it below 4 GiB before
 # the kernel starts. With 1 GiB the image already lies below 4 GiB and must
 # not be moved. Both boots must reach the controller and shut down cleanly.
@@ -8,16 +8,16 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-boot_timeout_seconds="${GINUX_BOOT_TIMEOUT_SECONDS:-180}"
+boot_timeout_seconds="${LINOX_BOOT_TIMEOUT_SECONDS:-180}"
 if [[ ! "$boot_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-    echo "EFI load test failed: GINUX_BOOT_TIMEOUT_SECONDS must be a positive integer." >&2
+    echo "EFI load test failed: LINOX_BOOT_TIMEOUT_SECONDS must be a positive integer." >&2
     exit 2
 fi
 identity_limit=$((1 << 32))
 
-output_file="$(mktemp -t ginux-efi-load.XXXXXX)"
-volume_image="$(mktemp -t ginux-efi-load-volume.XXXXXX)"
-qemu_pid_file="$(mktemp -t ginux-efi-load-pid.XXXXXX)"
+output_file="$(mktemp -t linox-efi-load.XXXXXX)"
+volume_image="$(mktemp -t linox-efi-load-volume.XXXXXX)"
+qemu_pid_file="$(mktemp -t linox-efi-load-pid.XXXXXX)"
 qemu_pid=""
 
 stop_qemu() {
@@ -64,18 +64,18 @@ boot() {
     # shellcheck disable=SC2094
     {
         for ((attempt = 0; attempt < boot_timeout_seconds; attempt++)); do
-            if grep -aFq 'ginux> ' "$output_file"; then
+            if grep -aFq 'linox> ' "$output_file"; then
                 printf 'shutdown\n'
                 exit 0
             fi
-            if grep -aEq 'GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+            if grep -aEq 'LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
                 stop_qemu
                 exit 0
             fi
             sleep 1
         done
-    } | GINUX_MEMORY="$memory" GINUX_CPUS=2 GINUX_VOLUME_IMAGE="$volume_image" \
-        GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+    } | LINOX_MEMORY="$memory" LINOX_CPUS=2 LINOX_VOLUME_IMAGE="$volume_image" \
+        LINOX_QEMU_PID_FILE="$qemu_pid_file" \
         "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
     qemu_pid=$!
 
@@ -99,32 +99,32 @@ boot() {
     fi
     qemu_pid=""
 
-    if grep -aEq 'GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -aEq 'LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         fail "$memory" "a boot or kernel panic was emitted."
     fi
     if [[ "$qemu_status" -ne 0 ]]; then
         fail "$memory" "QEMU exited with $qemu_status; expected 0."
     fi
     # The kernel rejects a handed-off image outside its identity map before
-    # GINUX_KERNEL_OK, so reaching the controller proves the handoff.
+    # LINOX_KERNEL_OK, so reaching the controller proves the handoff.
     for expected in \
-        'GINUX_KERNEL_OK' \
-        'ginux: launching embedded controller in ring 3' \
-        'Ginux controller v0 (ring 3)' \
-        'ginux> ' \
-        'ginux: controller requested clean shutdown'; do
+        'LINOX_KERNEL_OK' \
+        'linox: launching embedded controller in ring 3' \
+        'Linox controller v0 (ring 3)' \
+        'linox> ' \
+        'linox: controller requested clean shutdown'; do
         if ! grep -aFq -- "$expected" "$output_file"; then
             fail "$memory" "missing '$expected'."
         fi
     done
 
-    loaded_base="$(serial_hex 'ginux: EFI image loaded at ')"
-    loaded_size="$(serial_hex "ginux: EFI image loaded at $loaded_base size ")"
+    loaded_base="$(serial_hex 'linox: EFI image loaded at ')"
+    loaded_size="$(serial_hex "linox: EFI image loaded at $loaded_base size ")"
     if [[ -z "$loaded_base" || -z "$loaded_size" ]]; then
         fail "$memory" "the UEFI stage did not report the firmware load address."
     fi
-    relocated_base="$(serial_hex 'ginux: EFI image relocated below 4 GiB to ')"
-    entered_base="$(serial_hex 'ginux: EFI image entered at relocated base ')"
+    relocated_base="$(serial_hex 'linox: EFI image relocated below 4 GiB to ')"
+    entered_base="$(serial_hex 'linox: EFI image entered at relocated base ')"
 }
 
 boot 8G

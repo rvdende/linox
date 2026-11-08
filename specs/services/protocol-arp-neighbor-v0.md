@@ -5,7 +5,7 @@ neighbor under QEMU/TCG and rejects a conflicting mapping without mutation.
 
 ## Parser boundary
 
-`ginux-protocol-state` is a reusable `no_std` crate. Its Ethernet/ARP parser
+`linox-protocol-state` is a reusable `no_std` crate. Its Ethernet/ARP parser
 accepts exactly one 42-byte Ethernet II ARP reply addressed to the configured
 local MAC and IPv4 endpoint. It requires Ethernet/IPv4 ARP, reply opcode,
 matching Ethernet and ARP sender MACs, a nonzero unicast sender, the configured

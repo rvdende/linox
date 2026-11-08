@@ -58,7 +58,7 @@ state into explicit host, device, service, or domain-owned structures.
 
 - After the isolated network-service migration, `make architecture-check`
   passed with the writable-global inventory reduced from 560 to 543 objects.
-- `cargo check -p ginux-network-service-runtime --target
+- `cargo check -p linox-network-service-runtime --target
   x86_64-unknown-none` and `make check` passed.
 - `make build-verification && bash tests/qemu/boot.sh` passed the complete
   service fault, replacement, network request-generation, ABI, lifecycle, and

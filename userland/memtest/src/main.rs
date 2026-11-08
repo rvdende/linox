@@ -1,21 +1,21 @@
-//! ginux-memtest: memory checks for Ginux tests.
+//! linox-memtest: memory checks for Linox tests.
 //!
-//! - `ginux-memtest touch MIB [THEN]` maps MIB MiB of private anonymous
+//! - `linox-memtest touch MIB [THEN]` maps MIB MiB of private anonymous
 //!   memory, writes one byte to every page, reads them back, and prints
 //!   `MEMTEST OK MIB`. Then, still holding the memory, it exits (no THEN),
 //!   or THEN is `segv` (fault: the kernel frees a killed process's memory),
 //!   `fork` (fork a child that writes a page of it, copy-on-write, and
 //!   exits; prints `FORK OK`) or `spawn` (run `true` through
 //!   `std::process::Command`, a vfork-and-exec; prints `SPAWN OK`).
-//! - `ginux-memtest segv` writes through a null pointer, so the process dies
+//! - `linox-memtest segv` writes through a null pointer, so the process dies
 //!   from SIGSEGV (a parent shell sees status 139).
-//! - `ginux-memtest returns` checks that memory comes back: rounds of a
+//! - `linox-memtest returns` checks that memory comes back: rounds of a
 //!   burst of processes alive at once, fork-and-exec children, and shared
 //!   mappings of files removed while mapped. Once a burst is over its
 //!   kernel stacks (/proc/meminfo's KernelStack) must have gone back but
 //!   for the spare ones, and the rounds after the first must give back
 //!   all but a little of MemFree. Prints `RETURNS OK`.
-//! - `ginux-memtest slab` makes and removes thousands of files with long
+//! - `linox-memtest slab` makes and removes thousands of files with long
 //!   paths, whose names the kernel keeps on its heap: /proc/meminfo's Slab
 //!   must grow with them and come back once they are gone. Prints
 //!   `SLAB OK`.
@@ -370,7 +370,7 @@ fn main() -> ExitCode {
         Some("touch") => match args.get(2).and_then(|mib| mib.parse().ok()) {
             Some(mib) => touch(mib, args.get(3).map(String::as_str)),
             None => {
-                eprintln!("usage: ginux-memtest touch MIB [segv|fork|spawn]");
+                eprintln!("usage: linox-memtest touch MIB [segv|fork|spawn]");
                 ExitCode::FAILURE
             }
         },
@@ -387,7 +387,7 @@ fn main() -> ExitCode {
         }
         Some("exit") => ExitCode::SUCCESS,
         _ => {
-            eprintln!("usage: ginux-memtest touch MIB [segv|fork|spawn] | segv | returns");
+            eprintln!("usage: linox-memtest touch MIB [segv|fork|spawn] | segv | returns");
             ExitCode::FAILURE
         }
     }

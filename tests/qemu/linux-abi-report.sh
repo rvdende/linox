@@ -3,9 +3,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-output_file="$(mktemp -t ginux-linux-abi.XXXXXX)"
-volume_image="$(mktemp -t ginux-linux-abi-volume.XXXXXX)"
-qemu_pid_file="$(mktemp -t ginux-linux-abi-pid.XXXXXX)"
+output_file="$(mktemp -t linox-linux-abi.XXXXXX)"
+volume_image="$(mktemp -t linox-linux-abi-volume.XXXXXX)"
+qemu_pid_file="$(mktemp -t linox-linux-abi-pid.XXXXXX)"
 qemu_pid=""
 : >"$qemu_pid_file"
 
@@ -29,8 +29,8 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
     prompt_count=1
     for _ in {1..60}; do
-        [[ "$(grep -Fo 'ginux> ' "$output_file" | wc -l | tr -d ' ')" -ge "$prompt_count" ]] && break
-        grep -Fq 'GINUX_KERNEL_PANIC' "$output_file" && break
+        [[ "$(grep -Fo 'linox> ' "$output_file" | wc -l | tr -d ' ')" -ge "$prompt_count" ]] && break
+        grep -Fq 'LINOX_KERNEL_PANIC' "$output_file" && break
         sleep 1
     done
     for command in 'test linux' 'test linux all' 'test linux syscall read' \
@@ -38,18 +38,18 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
         printf '%s\n' "$command"
         prompt_count=$((prompt_count + 1))
         for _ in {1..60}; do
-            [[ "$(grep -Fo 'ginux> ' "$output_file" | wc -l | tr -d ' ')" -ge "$prompt_count" ]] && break
-            grep -Fq 'GINUX_KERNEL_PANIC' "$output_file" && break
+            [[ "$(grep -Fo 'linox> ' "$output_file" | wc -l | tr -d ' ')" -ge "$prompt_count" ]] && break
+            grep -Fq 'LINOX_KERNEL_PANIC' "$output_file" && break
             sleep 1
         done
     done
     printf 'shutdown\n'
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..75}; do
-    grep -Fq 'GINUX_KERNEL_PANIC' "$output_file" && break
+    grep -Fq 'LINOX_KERNEL_PANIC' "$output_file" && break
     ! kill -0 "$qemu_pid" 2>/dev/null && break
     sleep 1
 done
@@ -79,7 +79,7 @@ for expected in \
     'Summary: 70 pass, 279 fail, 49 policy-exempt, 398 total' \
     'PASS = verified; FAIL = incomplete or unsupported; POLICY-EXEMPT = deliberately denied.' \
     '1      0      R      controller' \
-    'Shutting down Ginux.'; do
+    'Shutting down Linox.'; do
     if ! grep -Fq "$expected" "$output_file"; then
         cat "$output_file"
         echo "Linux ABI report test failed: missing output: $expected" >&2
@@ -128,7 +128,7 @@ if [[ "$report_rows $interface_rows $syscall_rows $pass_rows $fail_rows $exempt_
     exit 1
 fi
 
-for rejected in GINUX_KERNEL_PANIC 'controller failed; restarting control plane' UNVERIFIED POLICY-DENIED UNSUPPORTED; do
+for rejected in LINOX_KERNEL_PANIC 'controller failed; restarting control plane' UNVERIFIED POLICY-DENIED UNSUPPORTED; do
     if grep -Fq "$rejected" "$output_file"; then
         cat "$output_file"
         echo "Linux ABI report test failed: observed: $rejected" >&2

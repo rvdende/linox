@@ -12,7 +12,7 @@ fail() {
     exit 1
 }
 
-entry=$(rg -n -m1 '^ginux_linux_syscall_entry:' "$cpu" | cut -d: -f1)
+entry=$(rg -n -m1 '^linox_linux_syscall_entry:' "$cpu" | cut -d: -f1)
 switch=$(awk -v start="$entry" 'NR > start && /mov rsp, gs:\[\{entry_return_stack\}\]/ { print NR; exit }' "$cpu")
 [[ -n "$switch" ]] || fail 'missing GS-based trusted stack switch'
 
@@ -23,9 +23,9 @@ if awk -v start="$entry" -v stop="$switch" \
 fi
 
 for required in \
-    'ginux_nmi_entry:' \
+    'linox_nmi_entry:' \
     'lock inc byte ptr [rip + {entry_nmi_probe_hits}]' \
-    'jne ginux_invalid_user_return'; do
+    'jne linox_invalid_user_return'; do
     rg -Fq "$required" "$cpu" || fail "missing required invariant: $required"
 done
 

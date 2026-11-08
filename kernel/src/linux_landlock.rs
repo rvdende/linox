@@ -1,6 +1,6 @@
 //! Landlock state: the rulesets descriptors name, the domain each process
 //! is restricted by, and the domains of the processes that bound abstract
-//! Unix socket names. The policy itself is `ginux_landlock`'s.
+//! Unix socket names. The policy itself is `linox_landlock`'s.
 //!
 //! A ruleset descriptor is an object slot of the socket table
 //! ([`CLASS_RULESET`]), so dup, fork, SCM_RIGHTS and close count it; the
@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use ginux_landlock::{Denial, Domain, Error, Ruleset};
+use linox_landlock::{Denial, Domain, Error, Ruleset};
 
 use crate::linux_socket::SlotId;
 use crate::sync::{LockRank, SpinLock};
@@ -268,7 +268,7 @@ pub(crate) fn may_signal(instance: usize, pid: u32, target: u32) -> bool {
     };
     let free = Domain::default();
     let target = state.domain(instance, target).unwrap_or(&free);
-    domain.reaches(ginux_landlock::access::SCOPE_SIGNAL, target)
+    domain.reaches(linox_landlock::access::SCOPE_SIGNAL, target)
 }
 
 /// Socket `slot` was bound to an abstract name by process `pid`: connects
@@ -305,5 +305,5 @@ pub(crate) fn may_reach_socket(instance: usize, pid: u32, slot: SlotId) -> bool 
         .iter()
         .find(|socket| socket.instance == instance && socket.slot == slot)
         .map_or(&free, |socket| &socket.domain);
-    domain.reaches(ginux_landlock::access::SCOPE_ABSTRACT_UNIX_SOCKET, target)
+    domain.reaches(linox_landlock::access::SCOPE_ABSTRACT_UNIX_SOCKET, target)
 }

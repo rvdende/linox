@@ -2,9 +2,9 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain-detached.XXXXXX")
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain-detached-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-multi-domain-detached-pid.XXXXXX")
+output_file=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain-detached.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain-detached-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-multi-domain-detached-pid.XXXXXX")
 qemu_pid=""
 
 stop_qemu() {
@@ -32,7 +32,7 @@ wait_for() {
     local limit=${2:-120}
     for ((attempt = 0; attempt < limit; attempt++)); do
         grep -Fq "$marker" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -51,7 +51,7 @@ wait_for_count() {
         local observed
         observed=$(grep -Fc "$marker" "$output_file" || true)
         [[ "$observed" -ge "$expected" ]] && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -64,7 +64,7 @@ wait_for_count() {
 
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
-    wait_for 'ginux> '
+    wait_for 'linox> '
     printf '%s\n' \
         'domain new alpine' \
         'domain set alpine image=alpine:latest init=/bin/sh' \
@@ -116,12 +116,12 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     printf '%s\n' \
         'domain list' \
         'shutdown'
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..600}; do
-    if grep -Fq 'GINUX_KERNEL_OK' "$output_file" || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -Fq 'LINOX_KERNEL_OK' "$output_file" || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         break
     fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
@@ -148,7 +148,7 @@ for expected in \
     'ALPINE_PROC_OK' \
     'ALPINE2_DOMAIN_OK' \
     'ALPINE_RESUME_OK' \
-    'GINUX_KERNEL_OK'; do
+    'LINOX_KERNEL_OK'; do
     if ! grep -Fq "$expected" "$output_file"; then
         tail -n 160 "$output_file"
         echo "Multi-domain test failed: missing '$expected'." >&2
@@ -156,7 +156,7 @@ for expected in \
     fi
 done
 
-if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|live registry refresh snapshot failed' "$output_file"; then
+if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|live registry refresh snapshot failed' "$output_file"; then
     tail -n 160 "$output_file"
     echo "Multi-domain test failed: kernel or process-registry failure detected." >&2
     exit 1

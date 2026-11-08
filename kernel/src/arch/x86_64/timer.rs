@@ -97,8 +97,8 @@ static TIMER: TimerOwner = TimerOwner {
 global_asm!(
     r#"
     .text
-    .global ginux_apic_timer_entry
-ginux_apic_timer_entry:
+    .global linox_apic_timer_entry
+linox_apic_timer_entry:
     test qword ptr [rsp + 8], 3
     jz 1f
     swapgs
@@ -146,8 +146,8 @@ ginux_apic_timer_entry:
 2:
     iretq
 
-    .global ginux_apic_spurious_entry
-ginux_apic_spurious_entry:
+    .global linox_apic_spurious_entry
+linox_apic_spurious_entry:
     clac
     iretq
 "#,
@@ -155,8 +155,8 @@ ginux_apic_spurious_entry:
 );
 
 extern "C" {
-    fn ginux_apic_timer_entry();
-    fn ginux_apic_spurious_entry();
+    fn linox_apic_timer_entry();
+    fn linox_apic_spurious_entry();
 }
 
 pub(crate) struct LocalApicCalibration {
@@ -329,10 +329,10 @@ pub(crate) unsafe fn verify_local_apic_interrupt(
     apic: &LocalApic,
     calibration: &LocalApicCalibration,
 ) -> bool {
-    if !cpu::install_interrupt_gate(TIMER_VECTOR, ginux_apic_timer_entry as *const () as usize)
+    if !cpu::install_interrupt_gate(TIMER_VECTOR, linox_apic_timer_entry as *const () as usize)
         || !cpu::install_interrupt_gate(
             SPURIOUS_VECTOR,
-            ginux_apic_spurious_entry as *const () as usize,
+            linox_apic_spurious_entry as *const () as usize,
         )
     {
         return false;

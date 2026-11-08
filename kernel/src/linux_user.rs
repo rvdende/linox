@@ -22,7 +22,7 @@ const SWITCHING_ID_COUNT: u32 = 65_536;
 const ROOT_ID_MAP: &[u8] = b"0 100000 1\n";
 const SWITCHING_ID_MAP: &[u8] = b"0 100000 65536\n";
 
-pub(crate) use ginux_credentials::{Authority, Credentials};
+pub(crate) use linox_credentials::{Authority, Credentials};
 
 struct UserRuntimeOwner {
     installed: AtomicBool,

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install Ginux next to an existing Linux installation on this computer.
+# Install Linox next to an existing Linux installation on this computer.
 #
-# Copies the unified EFI image to <ESP>/EFI/ginux/ginux.efi and registers a
+# Copies the unified EFI image to <ESP>/EFI/linox/linox.efi and registers a
 # firmware boot entry for it. The entry is not added to the default boot order,
-# so the computer keeps booting the existing system unless Ginux is chosen in
+# so the computer keeps booting the existing system unless Linox is chosen in
 # the firmware boot menu or --boot-next is given (a one-time boot). The
 # removable-media fallback loader EFI/BOOT/BOOTX64.EFI is never touched.
 #
@@ -17,8 +17,8 @@ efi_image="$repo_root/build/esp/EFI/BOOT/BOOTX64.EFI"
 esp=""
 boot_entry=true
 boot_next=false
-label="Ginux"
-loader='\EFI\ginux\ginux.efi'
+label="Linox"
+loader='\EFI\linox\linox.efi'
 
 while (($#)); do
     case "$1" in
@@ -43,9 +43,9 @@ if [[ -z "$esp" || ! -d "$esp/EFI" ]]; then
     exit 1
 fi
 
-install -D -m 0644 "$efi_image" "$esp/EFI/ginux/ginux.efi"
+install -D -m 0644 "$efi_image" "$esp/EFI/linox/linox.efi"
 sync
-echo "Installed $esp/EFI/ginux/ginux.efi"
+echo "Installed $esp/EFI/linox/linox.efi"
 
 if ! $boot_entry; then
     exit 0
@@ -69,7 +69,7 @@ echo "Firmware boot entry Boot$existing ($label) points at $disk partition $numb
 
 if $boot_next; then
     efibootmgr --bootnext "$existing" >/dev/null
-    echo "The next reboot starts Ginux once; the following one returns to the default entry."
+    echo "The next reboot starts Linox once; the following one returns to the default entry."
 else
     echo "Choose '$label' in the firmware boot menu, or run: sudo efibootmgr --bootnext $existing"
 fi

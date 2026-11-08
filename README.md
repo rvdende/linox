@@ -1,17 +1,17 @@
-# Ginux
+# Linox
 
 **A Rust-first x86-64 operating system built around native domains and Linux
 userspace compatibility.**
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23682548.svg)](https://doi.org/10.5281/zenodo.23682548)
 
-This fork (rvdende/ginux) continues the standalone bootable kernel. Upstream
-(gmkurtzer/ginux) ended that line on 2026-11-04, froze it as the
-`bootable-kernel-final` tag and moved on to a userspace kernel; its fixes up
-to that tag are merged here, without its native controller desktop (this
-fork's desktop runs in a Linux domain).
+Linox (rvdende/linox) began as a fork of Ginux (gmkurtzer/ginux) and continues
+its standalone bootable kernel. Upstream ended that line on 2026-11-04, froze
+it as the `bootable-kernel-final` tag and moved on to a userspace kernel; its
+fixes up to that tag are merged here, without its native controller desktop
+(Linox's desktop runs in a Linux domain).
 
-Ginux is an independent kernel and operating-system prototype. It boots directly
+Linox is an independent kernel and operating-system prototype. It boots directly
 through UEFI without a Linux host kernel, provides its own memory management,
 scheduler, process model, VFS, networking, device support, and Linux ABI, and
 runs an embedded administration controller in ring 3. Its primary workload is
@@ -24,9 +24,9 @@ target is an x86-64 Q35 virtual machine with OVMF, Intel IOMMU, and virtio
 devices. It runs through KVM on an x86-64 Linux host and QEMU TCG on Apple
 Silicon.
 
-Today, Ginux can:
+Today, Linox can:
 
-- build as one bootable `GINUX.EFI` image;
+- build as one bootable `LINOX.EFI` image;
 - start its embedded controller as an ordinary ring-3 process;
 - configure devices, networking, storage, and persistent domain definitions;
 - pull, verify, cache, and assemble OCI images into domain-local roots;
@@ -36,19 +36,19 @@ Today, Ginux can:
   programs; and
 - boot Rocky Linux 10 systemd through `multi-user.target`.
 
-Ginux is experimental. Linux ABI coverage, device support, filesystems,
+Linox is experimental. Linux ABI coverage, device support, filesystems,
 networking, resource enforcement, security validation, and real-hardware
 coverage are incomplete. It is useful for research, architecture experiments,
 and testing—not production workloads or as a replacement for Linux.
 
-The name is a joke in the same family as Linux: **Ginux** combines Linux, GPT,
+The name is a joke in the same family as Linux: **Linox** combines Linux, GPT,
 and Greg. To keep the author's ego within its configured resource limit, the
 `G` officially stands for GPT.
 
 ## Design goals
 
 - **Linux userspace without Linux underneath.** Linux is a personality exposed
-  by Ginux, not the host kernel.
+  by Linox, not the host kernel.
 - **Domains as the native system boundary.** Domains own processes, address
   spaces, filesystems, devices, resources, authority, and lifecycle.
 - **A self-contained boot image.** The kernel, controller, and core boot
@@ -58,7 +58,7 @@ and Greg. To keep the author's ego within its configured resource limit, the
 - **Explicit, revocable authority.** Kernel capabilities grant access to named
   objects and are tied to domain generations for cleanup after failure.
 - **OCI as transport, not runtime.** OCI delivers and assembles filesystems;
-  Ginux domains provide execution and isolation.
+  Linox domains provide execution and isolation.
 - **Compatibility as an observable contract.** Real Alpine and Rocky Linux
   workloads supplement synthetic ABI tests.
 
@@ -72,7 +72,7 @@ and Greg. To keep the author's ego within its configured resource limit, the
 +-----------------------------------------------------------------------+
 | Native domains: ownership | capabilities | resources | failure policy  |
 +-----------------------------------------------------------------------+
-| Ginux kernel: processes | VFS | networking | scheduling | memory | IPC |
+| Linox kernel: processes | VFS | networking | scheduling | memory | IPC |
 +-----------------------------------------------------------------------+
 | UEFI firmware and the validated x86-64 QEMU hardware profile           |
 +-----------------------------------------------------------------------+
@@ -80,7 +80,7 @@ and Greg. To keep the author's ego within its configured resource limit, the
 
 ### Boot architecture and controller
 
-UEFI loads one `GINUX.EFI` image containing the kernel, boot catalog, and
+UEFI loads one `LINOX.EFI` image containing the kernel, boot catalog, and
 authenticated controller payload. Small assembly boundaries enter and leave
 UEFI, install exception, interrupt, and syscall entries, and switch privilege
 and address-space state; policy and most mechanisms are implemented in Rust.
@@ -99,7 +99,7 @@ by the sealed boot envelope, but it cannot create new kernel authority.
 
 ### Domains and personalities
 
-A **domain** is a native Ginux kernel object and the outer unit of isolation,
+A **domain** is a native Linox kernel object and the outer unit of isolation,
 ownership, accounting, scheduling, lifecycle, and failure containment. A
 domain owns or is granted:
 
@@ -112,10 +112,10 @@ domain owns or is granted:
 - lifecycle and failure policy.
 
 Domains are stronger boundaries than OCI containers or Linux namespaces. OCI
-supplies an initial filesystem; Ginux supplies isolation and execution. A
+supplies an initial filesystem; Linox supplies isolation and execution. A
 single Linux-personality domain can look like a conventional computer, with
 systemd as PID 1 and a distribution userspace above it. Multiple domains share
-one Ginux kernel while retaining separate kernel-owned state.
+one Linox kernel while retaining separate kernel-owned state.
 
 A **personality** is the userspace contract visible inside a domain: executable
 format, syscalls, processes, signals, VFS behavior, devices, terminals, clocks,
@@ -182,7 +182,7 @@ Requirements:
 - QEMU with x86-64 and OVMF support; and
 - GNU Make.
 
-Check the host, build Ginux, and boot it:
+Check the host, build Linox, and boot it:
 
 ```sh
 make doctor
@@ -192,7 +192,7 @@ make run
 `make run` creates a sparse development volume at `build/qemu/volume.raw`.
 `make reset-storage` deletes it; the next boot recreates a clean volume.
 
-At the `ginux>` prompt, a minimal Alpine workflow is:
+At the `linox>` prompt, a minimal Alpine workflow is:
 
 ```text
 domain new alpine
@@ -228,21 +228,21 @@ boundary.
 ### Wayland desktop
 
 [`userland`](userland) is a Wayland desktop written in Rust that runs inside a
-domain: `ginux-wm`, a compositor and stacking window manager built on the
-pure-Rust `wayland-server` backend, and `ginux-term`, a terminal client;
-`ginux-fetch` prints a neofetch-style system summary. They are static
+domain: `linox-wm`, a compositor and stacking window manager built on the
+pure-Rust `wayland-server` backend, and `linox-term`, a terminal client;
+`linox-fetch` prints a neofetch-style system summary. They are static
 `x86_64-unknown-linux-musl` binaries in their own Cargo workspace, so their
 crates.io dependencies stay out of the kernel build. The compositor
 draws in software onto `/dev/fb0`, the firmware framebuffer or a virtio-gpu
 surface ([docs/GRAPHICS.md](docs/GRAPHICS.md)) exposed through Linux fbdev,
 and reads keyboards and pointers from `/dev/input/eventN`, which
 the kernel feeds from USB keyboards, boot mice and QEMU's USB tablet. Clients
-share window buffers through memfd pools passed with `SCM_RIGHTS`; Ginux maps
+share window buffers through memfd pools passed with `SCM_RIGHTS`; Linox maps
 a memfd's own pages into every process that maps it.
 
 ```sh
 just desktop            # build, boot in a QEMU window and start the desktop
-make userland           # build ginux-wm, ginux-term, ginux-fetch and ginux-init
+make userland           # build linox-wm, linox-term, linox-fetch and linox-init
 make userland-check     # format check, clippy and unit tests on the host
 make test-desktop       # type into the terminal on USB, check a screendump
 make test-desktop-virtio-gpu # the same on a virtio-gpu display, no VGA
@@ -252,7 +252,7 @@ make test-rust-userland # boot the all-Rust domain and run brush and uutils
 ### All-Rust userland
 
 `make rust-rootfs` builds `build/rootfs-rust.tar.gz`, a root filesystem whose
-programs are all Rust: `ginux-init` as process 1, the bash-compatible
+programs are all Rust: `linox-init` as process 1, the bash-compatible
 [brush](https://github.com/reubeno/brush) shell as `/bin/sh`, the
 [uutils](https://github.com/uutils/coreutils) coreutils multicall binary with a
 link per utility, and the desktop programs. When it exists, the boot image
@@ -260,12 +260,12 @@ embeds it, and a domain set to `image=builtin://rust init=/sbin/init` boots it
 directly, with no registry pull; `just desktop` and the desktop test use it.
 The programs are static musl binaries, so libc is still musl, a C library.
 
-In the domain's shell, run `ginux-wm --terminal ginux-term --spawn
-ginux-term &` to start the desktop. Windows get server-side title bars with close and maximize
+In the domain's shell, run `linox-wm --terminal linox-term --spawn
+linox-term &` to start the desktop. Windows get server-side title bars with close and maximize
 buttons; drag a window by its title bar or with Alt and the left button.
 Alt+Enter opens a terminal, Alt+Tab cycles focus, Alt+Q closes and Alt+M
 maximizes; Control+Alt+Backspace quits. To see and use it in a window, boot
-with `GINUX_QEMU_DISPLAY=gtk GINUX_QEMU_USB_INPUT=1 make run`. The terminal has no
+with `LINOX_QEMU_DISPLAY=gtk LINOX_QEMU_USB_INPUT=1 make run`. The terminal has no
 pseudo-terminal yet, so it runs the shell over pipes with its own line
 editing, and keys reach clients as raw evdev codes unless `--keymap` supplies
 an XKB keymap. There is no GPU acceleration, clipboard or popup placement.
@@ -274,39 +274,39 @@ an XKB keymap. There is no GPU acceleration, clipboard or popup placement.
 
 `make boot-media` packages the EFI image as removable media in `build/media`:
 
-- `ginux.iso` is a UEFI-bootable hybrid ISO. It can be burned to optical media
+- `linox.iso` is a UEFI-bootable hybrid ISO. It can be burned to optical media
   or written directly to a USB stick.
-- `ginux-usb.img` is a raw GPT disk image with one EFI system partition, for
+- `linox-usb.img` is a raw GPT disk image with one EFI system partition, for
   firmware that does not boot hybrid ISOs from USB.
 
 Write either one to a stick (this erases the stick) and boot it in UEFI mode
 with Secure Boot disabled:
 
 ```sh
-sudo dd if=build/media/ginux-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=build/media/linox-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 `make test-boot-media` boots both images in QEMU as a CD-ROM and as a USB stick
 on an xHCI controller, and requires each boot to reach the controller prompt.
 
-To install Ginux next to an existing Linux system on the target computer, run
+To install Linox next to an existing Linux system on the target computer, run
 `sudo tools/images/install-to-esp.sh --boot-next` there. It copies the image to
-`EFI/ginux/ginux.efi` on the EFI system partition and registers a firmware boot
-entry outside the default boot order, so `--boot-next` boots Ginux once and the
+`EFI/linox/linox.efi` on the EFI system partition and registers a firmware boot
+entry outside the default boot order, so `--boot-next` boots Linox once and the
 following reboot returns to the existing system.
 
 Physical hardware is not fully supported yet. The full system still requires
-the QEMU virtio devices and an Intel VT-d IOMMU. On any other machine Ginux
+the QEMU virtio devices and an Intel VT-d IOMMU. On any other machine Linox
 enters **hardware bring-up mode**: it shows its console on the UEFI framebuffer
 (no serial port needed), reports memory, ACPI tables, CPUs, the IOMMU type, and
 every PCI device, and runs the physical-hardware drivers in `kernel/src/drivers`:
 
-- AMD-Vi DMA remapping: each device Ginux drives can reach only its driver's
+- AMD-Vi DMA remapping: each device Linox drives can reach only its driver's
   buffers, display controllers keep untranslated access for the firmware
   framebuffer, and every other device is blocked. A self-test asks the NVMe
   controller to write outside its buffers and checks that the write is stopped.
 - NVMe and AHCI (SATA) drivers that list GPT partitions. The NVMe driver
-  writes only inside partitions of the Ginux volume type
+  writes only inside partitions of the Linox volume type
   (`80769f29-5413-45a3-abab-5b44b6125922`), and only on the disk whose
   partition table defines them; the table's header and entry array must pass
   their CRCs and the partition may overlap no other. AHCI is read-only.
@@ -322,7 +322,7 @@ every PCI device, and runs the physical-hardware drivers in `kernel/src/drivers`
   descriptors; class 2 playback has not run on hardware yet. On the QEMU
   reference machine the same driver hands USB keyboards and pointers to
   domains as Linux evdev devices (`/dev/input/eventN`), with the report
-  decoding in `crates/usb-hid`; `GINUX_QEMU_USB_INPUT=1 make run` adds a USB
+  decoding in `crates/usb-hid`; `LINOX_QEMU_USB_INPUT=1 make run` adds a USB
   keyboard and tablet.
 - An HD Audio driver for Intel-compatible controllers (including AMD HD Audio
   and GPU HDMI/DP audio) that resets each controller, lists its codecs and
@@ -333,7 +333,7 @@ every PCI device, and runs the physical-hardware drivers in `kernel/src/drivers`
 
 With a keyboard or serial port it then offers a small bring-up shell (`help`,
 `pci`, `acpi`, `mem`, `disks`, `disktest`, `net`, `beep`, `reboot`, `poweroff`). Only
-`disktest` writes to storage: on each Ginux volume partition it writes a block,
+`disktest` writes to storage: on each Linox volume partition it writes a block,
 reads it back, restores it, and checks that a write past the partition is
 refused; disks without one are not written. `make test-hardware-profile` boots a QEMU machine with an
 AMD IOMMU, an e1000e on a DHCP network, an HD Audio codec, a USB audio device,
@@ -387,8 +387,8 @@ for the full target and environment-variable list.
 - [`services`](services) contains isolated native-service runtimes.
 - [`crates`](crates) contains shared `no_std` contracts and state machines.
 - [`userland`](userland) contains Linux programs for domains, built as static
-  musl binaries: the Rust Wayland compositor (`ginux-wm`), terminal
-  (`ginux-term`) and system summary (`ginux-fetch`).
+  musl binaries: the Rust Wayland compositor (`linox-wm`), terminal
+  (`linox-term`) and system summary (`linox-fetch`).
 - [`specs`](specs) records versioned boot, kernel, ABI, domain, image, and
   service contracts.
 - [`tests`](tests) contains ABI, lifecycle, and end-to-end QEMU gates.
@@ -482,7 +482,7 @@ never asks for a token to be pasted into the conversation.
 
 ## Research background
 
-Ginux was built to test whether a coding agent, directed by someone with the
+Linox was built to test whether a coding agent, directed by someone with the
 relevant systems experience, could construct an independent kernel that runs
 existing Linux userspace. Over eleven days, one persistent OpenAI Codex task
 using GPT-5.6 Sol produced approximately 139,000 retained lines of
@@ -504,7 +504,7 @@ The technical report documents the method, architecture, evaluation, and
 limitations:
 
 - [DOI: 10.5281/zenodo.23682548](https://doi.org/10.5281/zenodo.23682548)
-- [LaTeX source](docs/paper/ginux-ai-systems-report.tex)
+- [LaTeX source](docs/paper/linox-ai-systems-report.tex)
 - [Steering chronology](docs/paper/STEERING-PROVENANCE.md)
 - [Benchmark artifacts](docs/paper/artifact/benchmark-2026-10-23)
 
@@ -518,9 +518,9 @@ checkpoint.
 Please cite the technical report using its Zenodo record:
 
 ```bibtex
-@techreport{kurtzer2026ginux,
+@techreport{kurtzer2026linox,
   author = {Gregory M. Kurtzer},
-  title = {Ginux: Building an Independent Kernel That Runs Linux Userspace
+  title = {Linox: Building an Independent Kernel That Runs Linux Userspace
            through Human-Directed Agentic Engineering},
   year = {2026},
   doi = {10.5281/zenodo.23682548},
@@ -530,6 +530,6 @@ Please cite the technical report using its Zenodo record:
 
 ## License
 
-Ginux is licensed under the [Apache License, Version 2.0](LICENSE). See
+Linox is licensed under the [Apache License, Version 2.0](LICENSE). See
 [`NOTICE`](NOTICE) for attribution information. The technical report is
 published separately through Zenodo under its declared record license.

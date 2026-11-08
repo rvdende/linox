@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds build/rootfs-rust.tar.gz: a domain root filesystem whose programs
-# are all written in Rust, for `image=builtin://rust`. It holds ginux-init
+# are all written in Rust, for `image=builtin://rust`. It holds linox-init
 # as /sbin/init, the brush shell as /bin/sh, the uutils coreutils multicall
 # binary with a link per utility, and the Wayland desktop from userland/.
 # The tarball is POSIX ustar with fixed owners and times, so the same inputs
@@ -30,12 +30,12 @@ install_tool coreutils 0.12.0 coreutils
 (cd "$repo_root/userland" && cargo build --release --target "$target")
 
 rm -rf "$stage"
-mkdir -p "$stage"/{bin,sbin,etc/ginux,root,tmp,dev,proc,sys,run}
+mkdir -p "$stage"/{bin,sbin,etc/linox,root,tmp,dev,proc,sys,run}
 chmod 1777 "$stage/tmp"
 chmod 700 "$stage/root"
 
-install -m 755 "$release/ginux-init" "$stage/sbin/init"
-for program in ginux-wm ginux-term ginux-fetch ginux-memtest ginux-threadtest; do
+install -m 755 "$release/linox-init" "$stage/sbin/init"
+for program in linox-wm linox-term linox-fetch linox-memtest linox-threadtest; do
     install -m 755 "$release/$program" "$stage/bin/$program"
 done
 install -m 755 "$tools_root/bin/brush" "$stage/bin/brush"
@@ -48,21 +48,21 @@ for utility in $("$stage/bin/coreutils" --list); do
 done
 
 cat >"$stage/etc/os-release" <<'EOF'
-NAME="Ginux Rust"
-ID=ginux-rust
-PRETTY_NAME="Ginux Rust (all-Rust userland)"
-HOME_URL="https://github.com/rvdende/ginux"
+NAME="Linox Rust"
+ID=linox-rust
+PRETTY_NAME="Linox Rust (all-Rust userland)"
+HOME_URL="https://github.com/rvdende/linox"
 EOF
 printf 'root:x:0:0:root:/root:/bin/sh\n' >"$stage/etc/passwd"
 printf 'root:x:0:\n' >"$stage/etc/group"
-printf 'ginux\n' >"$stage/etc/hostname"
-# The basic line editor works on the serial console and on ginux-term's
+printf 'linox\n' >"$stage/etc/hostname"
+# The basic line editor works on the serial console and on linox-term's
 # pipes, where brush's default editor would query a terminal.
-printf '/bin/brush -i --input-backend basic\n' >"$stage/etc/ginux/shell"
-cat >"$stage/etc/ginux/motd" <<'EOF'
-Ginux Rust: kernel, init, shell (brush), coreutils (uutils) and desktop are
+printf '/bin/brush -i --input-backend basic\n' >"$stage/etc/linox/shell"
+cat >"$stage/etc/linox/motd" <<'EOF'
+Linox Rust: kernel, init, shell (brush), coreutils (uutils) and desktop are
 all written in Rust. Start the desktop with:
-  ginux-wm --terminal ginux-term --spawn ginux-term &
+  linox-wm --terminal linox-term --spawn linox-term &
 EOF
 
 mkdir -p "$(dirname "$output")"

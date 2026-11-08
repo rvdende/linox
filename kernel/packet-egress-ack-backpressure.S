@@ -1,9 +1,9 @@
 .text
 .balign 16
-.global ginux_packet_egress_ack_backpressure_producer_start
-.global ginux_packet_egress_ack_backpressure_producer_end
+.global linox_packet_egress_ack_backpressure_producer_start
+.global linox_packet_egress_ack_backpressure_producer_end
 
-ginux_packet_egress_ack_backpressure_producer_start:
+linox_packet_egress_ack_backpressure_producer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0xa0
@@ -84,4 +84,4 @@ ginux_packet_egress_ack_backpressure_producer_start:
     .byte 10, 0, 2, 2
     .byte 0x00, 0x00, 0x41, 0x0f, 0xbe, 0xef, 0x00, 0x01
 
-ginux_packet_egress_ack_backpressure_producer_end:
+linox_packet_egress_ack_backpressure_producer_end:

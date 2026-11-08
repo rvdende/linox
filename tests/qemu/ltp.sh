@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the Linux Test Project syscall tests (tests/ltp/syscalls.list) in an
-# Alpine domain on Ginux under QEMU with the Rust harness in tests/ltp, which
+# Alpine domain on Linox under QEMU with the Rust harness in tests/ltp, which
 # makes each LTP test a libtest trial (docs/LTP.md):
 #
 #   test accept01 ... ok
@@ -37,13 +37,13 @@ Options (and the environment variables they set):
   --tests "A B"          only these tests                           LTP_TESTS
   --filter REGEX         only tests whose name matches              LTP_FILTER
   --variant NAME         use build/ltp-NAME, suffix the outputs     LTP_VARIANT
-  --esp-dir DIR          the ESP to boot (build/esp)                GINUX_ESP_DIR
+  --esp-dir DIR          the ESP to boot (build/esp)                LINOX_ESP_DIR
   --default-budget N     seconds for a test without a budget (60)   LTP_BUDGET
   --grace N              seconds past a budget before a reboot (30) LTP_GRACE
   --between-tests N      seconds between tests (60)                 LTP_BETWEEN_TESTS
   --setup-timeout N      seconds to start the runner (600)          LTP_SETUP_TIMEOUT
   --max-boots N          stop after N boots (400)                   LTP_MAX_BOOTS
-  --memory SIZE          QEMU memory (6G)                           GINUX_MEMORY
+  --memory SIZE          QEMU memory (6G)                           LINOX_MEMORY
   --domain-memory-mib N  the domain's memory (4096)                 LTP_DOMAIN_MEMORY_MIB
   --domain-cpus N        CPUs of the guest and domain, 1, 2 or 4 (4) LTP_DOMAIN_CPUS
   --image IMAGE          the domain's image (alpine:3.22)           LTP_IMAGE
@@ -75,13 +75,13 @@ while (($# > 0)); do
                 --tests) export LTP_TESTS=$2 ;;
                 --filter) export LTP_FILTER=$2 ;;
                 --variant) export LTP_VARIANT=$2 ;;
-                --esp-dir) export GINUX_ESP_DIR=$2 ;;
+                --esp-dir) export LINOX_ESP_DIR=$2 ;;
                 --default-budget) export LTP_BUDGET=$2 ;;
                 --grace) export LTP_GRACE=$2 ;;
                 --between-tests) export LTP_BETWEEN_TESTS=$2 ;;
                 --setup-timeout) export LTP_SETUP_TIMEOUT=$2 ;;
                 --max-boots) export LTP_MAX_BOOTS=$2 ;;
-                --memory) export GINUX_MEMORY=$2 ;;
+                --memory) export LINOX_MEMORY=$2 ;;
                 --domain-memory-mib) export LTP_DOMAIN_MEMORY_MIB=$2 ;;
                 --domain-cpus) export LTP_DOMAIN_CPUS=$2 ;;
                 --image) export LTP_IMAGE=$2 ;;
@@ -115,7 +115,7 @@ done
 
 # Relative paths are relative to where this script was started; the harness
 # would take them from the repository root.
-for name in LTP_LIST GINUX_ESP_DIR LTP_BASELINE; do
+for name in LTP_LIST LINOX_ESP_DIR LTP_BASELINE; do
     value=${!name:-}
     if [[ -n "$value" && "$value" != /* ]]; then
         export "$name=$PWD/$value"

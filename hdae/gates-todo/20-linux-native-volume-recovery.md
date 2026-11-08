@@ -64,8 +64,8 @@ fault-containment, or persistent-storage invariants.
 - Branch-only Ubuntu workflow -> reproduces the current failure with full logs
   before the fix, then passes after the correction.
 - `make check` -> all static, architecture, lint, and unit checks pass.
-- `make test` -> emits `GINUX_KERNEL_OK` and `Boot test passed.` locally.
-- GitHub Ubuntu/QEMU TCG job -> emits `GINUX_KERNEL_OK` and completes the boot
+- `make test` -> emits `LINOX_KERNEL_OK` and `Boot test passed.` locally.
+- GitHub Ubuntu/QEMU TCG job -> emits `LINOX_KERNEL_OK` and completes the boot
   test without native-volume fallback.
 
 ## Evidence
@@ -96,7 +96,7 @@ fault-containment, or persistent-storage invariants.
   baseline and all architecture, lint, unit, and ABI checks.
 - Three consecutive local `make test` runs on QEMU 10.1.2/TCG -> passed;
   every run completed the intentional fault and forced-cancellation recovery
-  paths, emitted `GINUX_KERNEL_OK`, and reported `Boot test passed.`
+  paths, emitted `LINOX_KERNEL_OK`, and reported `Boot test passed.`
 - [Ubuntu correction run 41367841412](https://github.com/gmkurtzer/ginux/actions/runs/41367841412)
   built commit `17284060` successfully but again timed out after 300 seconds
   before emitting any serial output. This is an earlier Linux/OVMF boot stall,

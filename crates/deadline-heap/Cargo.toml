@@ -1,5 +1,5 @@
 [package]
-name = "ginux-deadline-heap"
+name = "linox-deadline-heap"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true

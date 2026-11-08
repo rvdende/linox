@@ -2209,7 +2209,7 @@ pub(crate) fn report_linux_low_template() {
             } & PRESENT
                 != 0
     };
-    crate::serial_write("ginux: kernel ranges in Linux address spaces:");
+    crate::serial_write("linox: kernel ranges in Linux address spaces:");
     let mut run_start = None;
     for region in 0..=DIRECTORY_COUNT * ENTRY_COUNT {
         match (kept(region), run_start) {

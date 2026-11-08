@@ -7,12 +7,12 @@
 //! keyboard, boot mouse and QEMU USB tablet interface, and installs
 //! [`pump`]. The controllers run without interrupts: readers of
 //! /dev/input/eventN call the pump, which takes the reports that have
-//! arrived and turns them into input events with `ginux_usb_hid`.
+//! arrived and turns them into input events with `linox_usb_hid`.
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use ginux_usb_hid as usb_hid;
+use linox_usb_hid as usb_hid;
 
 use super::{pci, say, xhci};
 use crate::linux_input;
@@ -174,7 +174,7 @@ pub(crate) fn start(
 ) {
     let found = &hosts.hosts[..hosts.count];
     if found.is_empty() {
-        say!("ginux: no xHCI controller; USB input unavailable\n");
+        say!("linox: no xHCI controller; USB input unavailable\n");
         return;
     }
     let functions = hosts.hosts.map(|host| {
@@ -188,7 +188,7 @@ pub(crate) fn start(
     });
     let regions = xhci::dma_regions().map(|region| (region.start, region.length));
     if !admit(&functions[..hosts.count], &regions) {
-        say!("ginux: USB input unavailable: the I/O MMU did not admit the xHCI controllers\n");
+        say!("linox: USB input unavailable: the I/O MMU did not admit the xHCI controllers\n");
         for host in found.iter().flatten() {
             host.function.disable_bus_master();
         }
@@ -201,7 +201,7 @@ pub(crate) fn start(
         let function = host.function;
         let Some(base) = registers.get(slot).copied().flatten() else {
             say!(
-                "ginux: xHCI {:02x}:{:02x}.{}: registers not mapped\n",
+                "linox: xHCI {:02x}:{:02x}.{}: registers not mapped\n",
                 function.bus,
                 function.device,
                 function.function
@@ -216,7 +216,7 @@ pub(crate) fn start(
             Ok(controller) => controller,
             Err(error) => {
                 say!(
-                    "ginux: xHCI {:02x}:{:02x}.{}: {:?}\n",
+                    "linox: xHCI {:02x}:{:02x}.{}: {:?}\n",
                     function.bus,
                     function.device,
                     function.function,
@@ -248,14 +248,14 @@ pub(crate) fn start(
             };
             let Some(event) = linux_input::register(kind, name.as_bytes()) else {
                 say!(
-                    "ginux: input: no device left for the {} on port {}\n",
+                    "linox: input: no device left for the {} on port {}\n",
                     name,
                     input.location
                 );
                 continue;
             };
             say!(
-                "ginux: input event{}: {} {:04x}:{:04x} on port {}\n",
+                "linox: input event{}: {} {:04x}:{:04x} on port {}\n",
                 event,
                 name,
                 input.vendor,

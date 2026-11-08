@@ -1,13 +1,13 @@
 # Gate 11 Matched Topology Benchmarks
 
 Gate 11 measures the same Rocky Linux 10 userspace and pinned x86-64 sysbench
-binary on Linux and Ginux under matched one-, two-, and four-vCPU QEMU TCG
+binary on Linux and Linox under matched one-, two-, and four-vCPU QEMU TCG
 configurations. It separates a fixed one-thread series from a scaled series in
 which workload threads equal the vCPU count.
 
 ## Environment and controls
 
-- Ginux commit: `d402eee55dc11aac3b2a77a88d897bacd3f65dc3`
+- Linox commit: `d402eee55dc11aac3b2a77a88d897bacd3f65dc3`
 - Host: Apple Silicon, macOS 26.6.2 (25G83)
 - Emulator: QEMU 10.1.2, x86-64 TCG
 - Machine and CPU: Q35, `max,+smep,+smap,+umip`
@@ -16,17 +16,17 @@ which workload threads equal the vCPU count.
   `7cf6b71521436bd32a8ab197851035ff1632bee383fec5a35468d61969e7c18d`
 - Samples: nine per sysbench cell and three per boot cell after warm-up
 
-The summarizer rejects missing samples, mismatched Linux/Ginux binary hashes,
+The summarizer rejects missing samples, mismatched Linux/Linox binary hashes,
 multiple hashes across cells, and unexpected topology metadata. Every check
 passed. QEMU children were reaped and the benchmark volume had no remaining
 owner.
 
 ## Fixed one-thread results
 
-The ratio favors Ginux: throughput uses Ginux/Linux, while mutex time uses
-Linux/Ginux because lower time is better.
+The ratio favors Linox: throughput uses Linox/Linux, while mutex time uses
+Linux/Linox because lower time is better.
 
-| vCPUs | Workload | Linux | Ginux | Ginux/Linux |
+| vCPUs | Workload | Linux | Linox | Linox/Linux |
 |---:|---|---:|---:|---:|
 | 1 | CPU events/s | 229.030 | 273.090 | 1.192x |
 | 1 | Memory MiB/s | 670.400 | 800.260 | 1.194x |
@@ -43,7 +43,7 @@ Linux/Ginux because lower time is better.
 
 ## Scaled-thread results
 
-| vCPUs/threads | Workload | Linux | Ginux | Ginux/Linux |
+| vCPUs/threads | Workload | Linux | Linox | Linox/Linux |
 |---:|---|---:|---:|---:|
 | 1/1 | CPU events/s | 229.030 | 273.090 | 1.192x |
 | 1/1 | Memory MiB/s | 670.400 | 800.260 | 1.194x |
@@ -58,29 +58,29 @@ Linux/Ginux because lower time is better.
 | 4/4 | Threads events/s | 1016.582 | 85.929 | 0.085x |
 | 4/4 | Mutex s/event | 1.214 | 2.857 | 0.425x |
 
-Relative to each system's own one-vCPU result, Ginux reaches 3.265x CPU and
+Relative to each system's own one-vCPU result, Linox reaches 3.265x CPU and
 2.061x memory throughput at four vCPUs/four threads. Linux reaches 5.912x and
-2.934x respectively. Ginux thread-yield throughput falls to 0.301x its
-one-vCPU result at four threads, while Linux reaches 3.480x. Ginux mutex
+2.934x respectively. Linox thread-yield throughput falls to 0.301x its
+one-vCPU result at four threads, while Linux reaches 3.480x. Linox mutex
 performance also falls to 0.497x its baseline, versus Linux at 1.292x.
 
 The fixed CPU, memory, and mutex results are close in this translated test
 environment, and the two-thread scaled results remain within a narrower range.
-The four-thread series exposes a substantial Ginux scheduling and yield
+The four-thread series exposes a substantial Linox scheduling and yield
 scalability limitation, especially in the threads workload. Gate 11 records
 that limitation; performance tuning was explicitly outside its measurement
 scope.
 
 ## Boot observations
 
-| vCPUs | Rocky on Linux | Rocky on Ginux |
+| vCPUs | Rocky on Linux | Rocky on Linox |
 |---:|---:|---:|
 | 1 | 46.721 s | 14.517 s |
 | 2 | 34.268 s | 16.032 s |
 | 4 | 31.825 s | 15.940 s |
 
 These boot values are repeatable observations, not a kernel-speed comparison.
-Linux and Ginux use different firmware, kernel, initramfs, device-discovery,
+Linux and Linox use different firmware, kernel, initramfs, device-discovery,
 storage-image, and userspace-startup paths. They answer how long each complete
 tested path took under the frozen environment, not why one path was faster.
 

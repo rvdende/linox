@@ -5,7 +5,7 @@ and deterministic registry coverage remain active.
 
 ## Executive finding
 
-Ginux now models the executable Linux runtime as a domain-owned object. Runtime
+Linox now models the executable Linux runtime as a domain-owned object. Runtime
 extents, mutable ELF/Linux ABI state, root/mount/process views, retained CPU
 state, and console continuations are selected by domain. Detach schedules the
 resident PID-1 controller instead of recursively relaunching it. The concurrent

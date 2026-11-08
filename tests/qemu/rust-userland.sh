@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Boots Ginux and starts a domain on the boot image's all-Rust root
-# filesystem (image=builtin://rust): ginux-init as process 1, the brush
-# shell, uutils coreutils and ginux-fetch. No registry pull or Alpine is
+# Boots Linox and starts a domain on the boot image's all-Rust root
+# filesystem (image=builtin://rust): linox-init as process 1, the brush
+# shell, uutils coreutils and linox-fetch. No registry pull or Alpine is
 # involved. Commands typed on the console must run in that userland, and
 # leaving the shell must stop the domain cleanly.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-userland.XXXXXX")
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-userland-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rust-userland-pid.XXXXXX")
+output_file=$(mktemp "${TMPDIR:-/tmp}/linox-rust-userland.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-rust-userland-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-rust-userland-pid.XXXXXX")
 qemu_pid=""
 
 stop_qemu() {
@@ -38,7 +38,7 @@ wait_for() {
     local seconds=${2:-120}
     for _ in $(seq 1 "$seconds"); do
         grep -aEq "$marker" "$output_file" && return 0
-        if grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
+        if grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
             break
         fi
         sleep 1
@@ -51,7 +51,7 @@ wait_for() {
 
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
-    wait_for 'ginux> ' 300
+    wait_for 'linox> ' 300
     printf '%s\n' \
         'domain new rust' \
         'domain set rust image=builtin://rust init=/sbin/init' \
@@ -62,14 +62,14 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     printf '%s\n' \
         'cat /etc/os-release' \
         'ls /bin | wc -l' \
-        'ginux-fetch' \
+        'linox-fetch' \
         'echo RUST_USERLAND"_OK" $(uname -s)'
     wait_for '^RUST_USERLAND_OK' 120
     printf '%s\n' 'exit 0'
-    wait_for 'ginux: Linux init exited cleanly' 120
+    wait_for 'linox: Linux init exited cleanly' 120
     sleep 2
     printf '%s\n' 'shutdown'
-} | GINUX_MEMORY=2G GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_MEMORY=2G LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
@@ -87,8 +87,8 @@ fi
 wait "$qemu_pid" || true
 qemu_pid=""
 
-for marker in 'ginux: builtin Rust root filesystem staged' 'NAME="Ginux Rust"' \
-    '^RUST_USERLAND_OK' 'Kernel: ' 'ginux: Linux init exited cleanly'; do
+for marker in 'linox: builtin Rust root filesystem staged' 'NAME="Linox Rust"' \
+    '^RUST_USERLAND_OK' 'Kernel: ' 'linox: Linux init exited cleanly'; do
     if ! grep -aEq "$marker" "$output_file"; then
         tail -n 60 "$output_file"
         echo "Rust userland test failed: missing '$marker'." >&2

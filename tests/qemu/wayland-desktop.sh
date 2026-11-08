@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
-# Boots Ginux, starts a domain on the boot image's all-Rust root filesystem
-# (image=builtin://rust: ginux-init, brush, uutils and the programs from
-# userland/), and runs the Rust Wayland desktop: ginux-wm composes onto
-# /dev/fb0 and ginux-term
+# Boots Linox, starts a domain on the boot image's all-Rust root filesystem
+# (image=builtin://rust: linox-init, brush, uutils and the programs from
+# userland/), and runs the Rust Wayland desktop: linox-wm composes onto
+# /dev/fb0 and linox-term
 # connects over a Wayland socket, sharing its window buffers through memfd
 # pools passed with SCM_RIGHTS. Keys typed on QEMU's USB keyboard travel
 # through xHCI, evdev and the compositor to the terminal's shell, which
 # must echo a marker to the serial console, and a QEMU screendump of the
 # real framebuffer must show the compositor's title bar and the terminal.
 #
-# With GINUX_QEMU_GPU=virtio (make test-desktop-virtio-gpu) the machine has
-# no VGA at all, only a virtio-gpu: Ginux must drive it as the display, in
-# the mode the host reports (GINUX_QEMU_GPU_SIZE), and the screendump of its
+# With LINOX_QEMU_GPU=virtio (make test-desktop-virtio-gpu) the machine has
+# no VGA at all, only a virtio-gpu: Linox must drive it as the display, in
+# the mode the host reports (LINOX_QEMU_GPU_SIZE), and the screendump of its
 # scanout shows only what the driver flushed from /dev/fb0.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/ginux-desktop.XXXXXX")
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/linox-desktop.XXXXXX")
 output_file="$work_dir/serial.log"
 volume_image="$work_dir/volume.raw"
 qemu_pid_file="$work_dir/qemu.pid"
 screenshot="$work_dir/screen.ppm"
-gpu="${GINUX_QEMU_GPU:-std}"
+gpu="${LINOX_QEMU_GPU:-std}"
 artifact="wayland-desktop"
 if [[ "$gpu" != std ]]; then
     artifact+="-$gpu"
@@ -57,7 +57,7 @@ wait_for() {
     local seconds=${2:-120}
     for _ in $(seq 1 "$seconds"); do
         grep -aEq "$marker" "$output_file" && return 0
-        if grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
+        if grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC|domain marked failed' "$output_file"; then
             break
         fi
         sleep 1
@@ -95,15 +95,15 @@ type_text() {
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 : >"$output_file"
 {
-    wait_for 'ginux> ' 300
+    wait_for 'linox> ' 300
     printf '%s\n' \
         'domain new desktop' \
         'domain set desktop image=builtin://rust init=/sbin/init' \
         'domain start desktop --attach'
     wait_for 'all written in Rust' 300
     sleep 2
-    printf '%s\n' "ginux-wm --terminal ginux-term --spawn ginux-term &"
-    wait_for 'GINUX_WM_READY' 60
+    printf '%s\n' "linox-wm --terminal linox-term --spawn linox-term &"
+    wait_for 'LINOX_WM_READY' 60
     # Give the terminal time to connect, draw and take keyboard focus.
     sleep 15
     type_text 'echo KEYBOARD_INPUT_OK >/dev/console'
@@ -117,11 +117,11 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     # cleanly: the kernel kills the remaining processes, as Linux does when
     # a PID namespace's init exits.
     printf '%s\n' 'exit 0'
-    wait_for 'ginux: Linux init exited cleanly' 120
+    wait_for 'linox: Linux init exited cleanly' 120
     sleep 2
     printf '%s\n' 'shutdown'
-} | GINUX_MEMORY=4G GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
-    GINUX_QEMU_MONITOR="$monitor" GINUX_QEMU_USB_INPUT=1 "$repo_root/tools/qemu/run.sh" >>"$output_file" 2>&1 &
+} | LINOX_MEMORY=4G LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
+    LINOX_QEMU_MONITOR="$monitor" LINOX_QEMU_USB_INPUT=1 "$repo_root/tools/qemu/run.sh" >>"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in $(seq 1 1800); do
@@ -143,7 +143,7 @@ if ! grep -aq 'KEYBOARD_INPUT_OK' "$output_file"; then
     echo "Wayland desktop test failed: typed input did not reach the terminal's shell." >&2
     exit 1
 fi
-if ! grep -aq 'ginux: Linux init exited cleanly' "$output_file"; then
+if ! grep -aq 'linox: Linux init exited cleanly' "$output_file"; then
     tail -n 60 "$output_file"
     echo "Wayland desktop test failed: the domain did not shut down cleanly." >&2
     exit 1
@@ -164,8 +164,8 @@ if [[ "$gpu" != std ]]; then
         echo "Wayland desktop test failed: virtio-gpu did not become the display." >&2
         exit 1
     fi
-    if [[ -n "${GINUX_QEMU_GPU_SIZE:-}" && "$expected_mode" != "$GINUX_QEMU_GPU_SIZE" ]]; then
-        echo "Wayland desktop test failed: virtio-gpu mode $expected_mode, host asked for $GINUX_QEMU_GPU_SIZE." >&2
+    if [[ -n "${LINOX_QEMU_GPU_SIZE:-}" && "$expected_mode" != "$LINOX_QEMU_GPU_SIZE" ]]; then
+        echo "Wayland desktop test failed: virtio-gpu mode $expected_mode, host asked for $LINOX_QEMU_GPU_SIZE." >&2
         exit 1
     fi
 fi

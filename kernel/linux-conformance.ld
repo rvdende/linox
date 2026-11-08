@@ -1,4 +1,4 @@
-ENTRY(ginux_linux_conformance)
+ENTRY(linox_linux_conformance)
 
 PHDRS
 {

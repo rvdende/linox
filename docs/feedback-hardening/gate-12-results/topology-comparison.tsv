@@ -1,4 +1,4 @@
-mode	vcpus	threads	workload	metric	linux_n	linux_median	ginux_n	ginux_median	ginux_over_linux
+mode	vcpus	threads	workload	metric	linux_n	linux_median	linox_n	linox_median	linox_over_linux
 fixed	1	1	CPU	events/s	9	244.830	9	535.060	2.185x
 fixed	1	1	Memory	MiB/s	9	704.340	9	1649.740	2.342x
 fixed	1	1	Threads	events/s	9	369.470	9	484.871	1.312x

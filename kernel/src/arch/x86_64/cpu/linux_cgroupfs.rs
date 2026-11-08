@@ -19,7 +19,7 @@
 use super::*;
 
 use crate::linux_cgroup::{self as cgroup, Event, Limit, Slot, NO_SLOT};
-use ginux_cgroup::{Controllers, Output};
+use linox_cgroup::{Controllers, Output};
 
 const ROOT: &[u8] = b"sys/fs/cgroup";
 
@@ -410,7 +410,7 @@ fn write_control(slot: Slot, control: Control, output: &mut Output<'_>) -> bool 
             }
             written
         }
-        Control::Events => ginux_cgroup::write_cgroup_events(cgroup_populated(slot), output),
+        Control::Events => linox_cgroup::write_cgroup_events(cgroup_populated(slot), output),
         Control::Controllers => cgroup::controllers(slot).write_names(output),
         Control::Subtree => cgroup::subtree_control(slot).write_names(output),
         Control::Kill | Control::MemoryReclaim => true,
@@ -435,52 +435,52 @@ fn write_control(slot: Slot, control: Control, output: &mut Output<'_>) -> bool 
                 && output.decimal(descendants)
                 && output.push(b"\nnr_dying_descendants 0\n")
         }
-        Control::MemoryCurrent => ginux_cgroup::write_bytes(cgroup::usage(slot), output),
+        Control::MemoryCurrent => linox_cgroup::write_bytes(cgroup::usage(slot), output),
         Control::MemoryMin => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Min), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Min), output)
         }
         Control::MemoryLow => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Low), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Low), output)
         }
         Control::MemoryHigh => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::High), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::High), output)
         }
         Control::MemoryMax => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Max), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::Max), output)
         }
-        Control::MemoryPeak => ginux_cgroup::write_bytes(cgroup::peak(slot, false), output),
+        Control::MemoryPeak => linox_cgroup::write_bytes(cgroup::peak(slot, false), output),
         Control::MemoryEvents => {
-            ginux_cgroup::write_memory_events(&cgroup::events(slot, false), output)
+            linox_cgroup::write_memory_events(&cgroup::events(slot, false), output)
         }
         Control::MemoryEventsLocal => {
-            ginux_cgroup::write_memory_events(&cgroup::events(slot, true), output)
+            linox_cgroup::write_memory_events(&cgroup::events(slot, true), output)
         }
-        Control::MemoryStat => ginux_cgroup::write_memory_stat(&cgroup::stat(slot), output),
+        Control::MemoryStat => linox_cgroup::write_memory_stat(&cgroup::stat(slot), output),
         Control::MemoryOomGroup => output.push(if cgroup::oom_group(slot) {
             b"1\n"
         } else {
             b"0\n"
         }),
-        Control::SwapCurrent => ginux_cgroup::write_bytes(cgroup::swap_usage(slot), output),
+        Control::SwapCurrent => linox_cgroup::write_bytes(cgroup::swap_usage(slot), output),
         Control::SwapHigh => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::SwapHigh), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::SwapHigh), output)
         }
         Control::SwapMax => {
-            ginux_cgroup::write_memory_limit(cgroup::limit(slot, Limit::SwapMax), output)
+            linox_cgroup::write_memory_limit(cgroup::limit(slot, Limit::SwapMax), output)
         }
-        Control::SwapPeak => ginux_cgroup::write_bytes(cgroup::peak(slot, true), output),
+        Control::SwapPeak => linox_cgroup::write_bytes(cgroup::peak(slot, true), output),
         Control::SwapEvents => {
             let [high, max, fail] = cgroup::swap_events(slot);
-            ginux_cgroup::write_swap_events(high, max, fail, output)
+            linox_cgroup::write_swap_events(high, max, fail, output)
         }
     }
 }
 
-fn rules_error(error: ginux_cgroup::Error) -> u64 {
+fn rules_error(error: linox_cgroup::Error) -> u64 {
     match error {
-        ginux_cgroup::Error::Invalid => LINUX_EINVAL,
-        ginux_cgroup::Error::NotAvailable => LINUX_ENOENT,
-        ginux_cgroup::Error::Busy => LINUX_EBUSY,
+        linox_cgroup::Error::Invalid => LINUX_EINVAL,
+        linox_cgroup::Error::NotAvailable => LINUX_ENOENT,
+        linox_cgroup::Error::Busy => LINUX_EBUSY,
     }
 }
 
@@ -515,7 +515,7 @@ pub(super) fn linux_cgroup_user_write(
 
 fn apply_control(slot: Slot, control: Control, input: &[u8]) -> Result<(), u64> {
     match control {
-        Control::Procs => move_process(slot, ginux_cgroup::parse_pid(input).map_err(rules_error)?),
+        Control::Procs => move_process(slot, linox_cgroup::parse_pid(input).map_err(rules_error)?),
         Control::Subtree => change_subtree_control(slot, input),
         Control::Kill => {
             if trimmed(input) != b"1" {
@@ -569,7 +569,7 @@ fn apply_control(slot: Slot, control: Control, input: &[u8]) -> Result<(), u64> 
                 .split(|byte| byte.is_ascii_whitespace())
                 .next()
                 .unwrap_or_default();
-            let pages = ginux_cgroup::parse_memory_limit(amount).map_err(rules_error)?;
+            let pages = linox_cgroup::parse_memory_limit(amount).map_err(rules_error)?;
             if pages == 0 || linux_memcg_reclaim(slot, pages, 0) >= pages {
                 Ok(())
             } else {
@@ -601,7 +601,7 @@ fn trimmed(input: &[u8]) -> &[u8] {
 }
 
 fn set_limit(slot: Slot, limit: Limit, input: &[u8]) -> Result<(), u64> {
-    let pages = ginux_cgroup::parse_memory_limit(input).map_err(rules_error)?;
+    let pages = linox_cgroup::parse_memory_limit(input).map_err(rules_error)?;
     cgroup::set_limit(slot, limit, pages)
         .then_some(())
         .ok_or(LINUX_ENODEV)
@@ -638,7 +638,7 @@ fn move_process(slot: Slot, pid: u32) -> Result<(), u64> {
     {
         return Err(LINUX_ESRCH);
     }
-    ginux_cgroup::may_hold_processes(cgroup::is_root(slot), cgroup::subtree_control(slot))
+    linox_cgroup::may_hold_processes(cgroup::is_root(slot), cgroup::subtree_control(slot))
         .map_err(rules_error)?;
     let generation = if cgroup::is_root(slot) {
         0
@@ -655,18 +655,18 @@ fn move_process(slot: Slot, pid: u32) -> Result<(), u64> {
 }
 
 fn change_subtree_control(slot: Slot, input: &[u8]) -> Result<(), u64> {
-    let change = ginux_cgroup::parse_subtree_control(input).map_err(rules_error)?;
+    let change = linox_cgroup::parse_subtree_control(input).map_err(rules_error)?;
     let children_delegate = cgroup::children(slot).fold(Controllers::NONE, |all, child| {
         all.union(cgroup::subtree_control(child))
     });
-    let state = ginux_cgroup::SubtreeState {
+    let state = linox_cgroup::SubtreeState {
         current: cgroup::subtree_control(slot),
         available: cgroup::controllers(slot),
         root: cgroup::is_root(slot),
         has_processes: cgroup_has_processes(slot),
         children_delegate,
     };
-    let updated = ginux_cgroup::apply_subtree_change(state, change).map_err(rules_error)?;
+    let updated = linox_cgroup::apply_subtree_change(state, change).map_err(rules_error)?;
     if !cgroup::set_subtree_control(slot, updated) {
         return Err(LINUX_ENODEV);
     }
@@ -1114,14 +1114,14 @@ pub(super) fn linux_memcg_oom_kill(slot: Slot, current: u32) -> Option<u32> {
         };
         candidates[count] = (
             pid,
-            ginux_cgroup::oom_badness(resident.unwrap_or(0), 0, 0, oom_score_adj, total),
+            linox_cgroup::oom_badness(resident.unwrap_or(0), 0, 0, oom_score_adj, total),
         );
         count += 1;
     }
-    let victim = ginux_cgroup::choose_oom_victim(candidates[..count].iter().copied())?;
+    let victim = linox_cgroup::choose_oom_victim(candidates[..count].iter().copied())?;
     let victim_memcg = process_memcg(victim).unwrap_or(slot);
     let group = cgroup::oom_group(victim_memcg);
-    serial_write("ginux: memory cgroup out of memory: killed process ");
+    serial_write("linox: memory cgroup out of memory: killed process ");
     serial_write_u64(u64::from(victim));
     serial_write("\r\n");
     if group {

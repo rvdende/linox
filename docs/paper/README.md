@@ -1,7 +1,7 @@
-# Ginux AI Systems Engineering Report
+# Linox AI Systems Engineering Report
 
 This directory contains the arXiv-style technical-report draft describing the
-Ginux experiment at commit `d11c126a048a51fe7eb9c4105f31760add1027ea`.
+Linox experiment at commit `d11c126a048a51fe7eb9c4105f31760add1027ea`.
 `AI-WRITING-TELLS.md` records the sourced style checklist and the before-and-
 after audit used to edit the draft.
 
@@ -16,15 +16,15 @@ The simplest build uses Tectonic:
 
 ```sh
 cd docs/paper
-tectonic ginux-ai-systems-report.tex
+tectonic linox-ai-systems-report.tex
 ```
 
-The resulting `ginux-ai-systems-report.pdf` is ready to open in any PDF
+The resulting `linox-ai-systems-report.pdf` is ready to open in any PDF
 viewer. A standard LaTeX distribution also works:
 
 ```sh
 cd docs/paper
-latexmk -pdf ginux-ai-systems-report.tex
+latexmk -pdf linox-ai-systems-report.tex
 ```
 
 Before publication, update the commands near the top of the TeX source,

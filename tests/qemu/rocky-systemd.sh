@@ -2,15 +2,15 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file="${GINUX_ROCKY_LOG:-$repo_root/build/qemu/rocky-systemd.log}"
-volume_image="${GINUX_VOLUME_IMAGE:-$repo_root/build/qemu/rocky-systemd-volume.raw}"
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rocky-systemd-pid.XXXXXX")
-success_file=$(mktemp "${TMPDIR:-/tmp}/ginux-rocky-systemd-success.XXXXXX")
+output_file="${LINOX_ROCKY_LOG:-$repo_root/build/qemu/rocky-systemd.log}"
+volume_image="${LINOX_VOLUME_IMAGE:-$repo_root/build/qemu/rocky-systemd-volume.raw}"
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-rocky-systemd-pid.XXXXXX")
+success_file=$(mktemp "${TMPDIR:-/tmp}/linox-rocky-systemd-success.XXXXXX")
 qemu_pid=""
-rocky_image="${GINUX_ROCKY_IMAGE:-rockylinux/rockylinux:10-ubi-init}"
-rocky_init="${GINUX_ROCKY_INIT:-/sbin/init}"
-start_mode="${GINUX_ROCKY_START_MODE:-attached}"
-metrics_file="${GINUX_ROCKY_METRICS_FILE:-}"
+rocky_image="${LINOX_ROCKY_IMAGE:-rockylinux/rockylinux:10-ubi-init}"
+rocky_init="${LINOX_ROCKY_INIT:-/sbin/init}"
+start_mode="${LINOX_ROCKY_START_MODE:-attached}"
+metrics_file="${LINOX_ROCKY_METRICS_FILE:-}"
 
 stop_qemu() {
     local pid=""
@@ -49,7 +49,7 @@ wait_for() {
     local limit=${2:-120}
     for ((attempt = 0; attempt < limit; attempt++)); do
         grep -Fq "$marker" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
             break
         fi
         sleep 1
@@ -75,7 +75,7 @@ wait_for_count() {
         if (( $(grep -Fc "$marker" "$output_file" || true) >= expected )); then
             return 0
         fi
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
             break
         fi
         sleep 1
@@ -119,7 +119,7 @@ wait_for_pattern_ms() {
             now_ms
             return 0
         fi
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
             return 1
         fi
         now=$(now_ms)
@@ -139,16 +139,16 @@ diagnose_login_timeout() {
             'ps'
         sleep 2
         printf '%s\n' shutdown
-        wait_for 'GINUX_KERNEL_OK' 15 || true
+        wait_for 'LINOX_KERNEL_OK' 15 || true
     fi
     fail "timed out waiting for 'login:'"
 }
 
 wait_for_login() {
-    local limit=${GINUX_ROCKY_LOGIN_TIMEOUT:-180}
+    local limit=${LINOX_ROCKY_LOGIN_TIMEOUT:-180}
     for ((attempt = 0; attempt < limit; attempt++)); do
-        grep -Eq 'ginux login:' "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|rocky: (failed|stopped)' "$output_file"; then
+        grep -Eq 'linox login:' "$output_file" && return 0
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|rocky: (failed|stopped)' "$output_file"; then
             break
         fi
         sleep 1
@@ -158,43 +158,43 @@ wait_for_login() {
 
 mkdir -p "$(dirname "$volume_image")"
 : >"$output_file"
-if [[ -n "${GINUX_BENCHMARK_SYSBENCH_SHA256:-}" ]]; then
-    printf 'GINUX_BENCH_SYSBENCH_SHA256 %s\n' "$GINUX_BENCHMARK_SYSBENCH_SHA256" >>"$output_file"
+if [[ -n "${LINOX_BENCHMARK_SYSBENCH_SHA256:-}" ]]; then
+    printf 'LINOX_BENCH_SYSBENCH_SHA256 %s\n' "$LINOX_BENCHMARK_SYSBENCH_SHA256" >>"$output_file"
 fi
 if [[ ! -f "$volume_image" ]]; then
-    truncate -s "${GINUX_ROCKY_VOLUME_SIZE:-64G}" "$volume_image"
+    truncate -s "${LINOX_ROCKY_VOLUME_SIZE:-64G}" "$volume_image"
 fi
 qemu_started_at_ms=$(now_ms)
 {
-    wait_for 'ginux> '
+    wait_for 'linox> '
     domain_started_at=$(date +%s)
     printf '%s\n' \
         'domain new rocky' \
-        "domain set rocky image=$rocky_image init=$rocky_init cpu=${GINUX_CPUS:-2}"
+        "domain set rocky image=$rocky_image init=$rocky_init cpu=${LINOX_CPUS:-2}"
     if [[ "$start_mode" == detached || "$start_mode" == detached-return || "$start_mode" == responsive || "$start_mode" == stop-restart ]]; then
         printf '%s\n' 'domain start rocky'
     else
         printf '%s\n' 'domain start rocky --attach'
     fi
-    if [[ "${GINUX_BENCHMARK_SYSBENCH:-0}" == 1 ]]; then
+    if [[ "${LINOX_BENCHMARK_SYSBENCH:-0}" == 1 ]]; then
         # The attached start blocks the controller while the domain owns the
         # console. Queue the first shell command now so it is already waiting
         # when Bash performs its initial read.
-        printf '%s\n' 'echo GINUX_BENCH_IMAGE_READY >&2'
+        printf '%s\n' 'echo LINOX_BENCH_IMAGE_READY >&2'
     fi
     if [[ "$start_mode" == detached-return ]]; then
         wait_for 'rocky: starting (detached)' 10
-        wait_for_count 'ginux> ' 2 10
+        wait_for_count 'linox> ' 2 10
         printf '%s\n' 'domain status rocky'
         wait_for 'State:       starting' 240
         printf '%s\n' 'domain list' 'domain status rocky'
         wait_for 'rocky           booting' 120
         wait_for 'State:       booting' 10
         wait_for 'Execution:   booting' 10
-        if grep -Eq 'ginux: (checking OCI cache|OCI cache hit|OCI unpacking image|starting configured runtime domain|entering configured Linux init)' "$output_file"; then
+        if grep -Eq 'linox: (checking OCI cache|OCI cache hit|OCI unpacking image|starting configured runtime domain|entering configured Linux init)' "$output_file"; then
             fail 'detached lifecycle output leaked onto the controller console'
         fi
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
             fail 'background domain did not return cleanly to the controller'
         fi
         printf '%s\n' ok >"$success_file"
@@ -203,7 +203,7 @@ qemu_started_at_ms=$(now_ms)
     fi
     if [[ "$start_mode" == responsive ]]; then
         wait_for 'rocky: starting (detached)' 10
-        wait_for_count 'ginux> ' 2 10
+        wait_for_count 'linox> ' 2 10
         # Advance cache restore and publication as separate background stages.
         sleep 1
         printf '%s\n' 'domain status rocky'
@@ -213,79 +213,79 @@ qemu_started_at_ms=$(now_ms)
         wait_for 'State:       booting' 120
         # The first Linux timer handoff existed before this regression test.
         # Consume it, resume Linux, and measure the required recurring handoff.
-        local_catalog_count=$(grep -Fc 'GINUX.EFI component catalog v0:' "$output_file" || true)
+        local_catalog_count=$(grep -Fc 'LINOX.EFI component catalog v0:' "$output_file" || true)
         sleep 0.1
         printf '%s\n' components
-        wait_for_count 'GINUX.EFI component catalog v0:' "$((local_catalog_count + 1))" 10
+        wait_for_count 'LINOX.EFI component catalog v0:' "$((local_catalog_count + 1))" 10
         local_catalog_count=$((local_catalog_count + 1))
         sleep 0.1
         printf '%s\n' components
-        if ! boot_response_ms=$(wait_for_count_ms 'GINUX.EFI component catalog v0:' "$((local_catalog_count + 1))" 1000); then
+        if ! boot_response_ms=$(wait_for_count_ms 'LINOX.EFI component catalog v0:' "$((local_catalog_count + 1))" 1000); then
             fail 'controller did not respond within 1000 ms while detached Linux work was running'
         fi
         printf '%s\n' shutdown
-        wait_for 'GINUX_KERNEL_OK' 15
+        wait_for 'LINOX_KERNEL_OK' 15
         printf '%s\n' "$boot_response_ms" >"$success_file"
         stop_qemu
         exit 0
     fi
     if [[ "$start_mode" != detached && "$start_mode" != stop-restart ]]; then
-        wait_for 'ginux: OCI image ready' 240
-        wait_for 'ginux: entering configured Linux init' 30
+        wait_for 'linox: OCI image ready' 240
+        wait_for 'linox: entering configured Linux init' 30
     fi
-    if [[ "${GINUX_BENCHMARK_SYSBENCH:-0}" == 1 ]]; then
-        wait_for_line 'GINUX_BENCH_IMAGE_READY' 120
-        for workload in ${GINUX_BENCHMARK_WORKLOAD:-cpu memory threads mutex}; do
-            for ((benchmark_run = 1; benchmark_run <= ${GINUX_BENCHMARK_WORKLOAD_RUNS:-3}; benchmark_run++)); do
+    if [[ "${LINOX_BENCHMARK_SYSBENCH:-0}" == 1 ]]; then
+        wait_for_line 'LINOX_BENCH_IMAGE_READY' 120
+        for workload in ${LINOX_BENCHMARK_WORKLOAD:-cpu memory threads mutex}; do
+            for ((benchmark_run = 1; benchmark_run <= ${LINOX_BENCHMARK_WORKLOAD_RUNS:-3}; benchmark_run++)); do
                 case "$workload" in
                     cpu)
-                        command="/usr/bin/sysbench cpu --threads=${GINUX_BENCHMARK_THREADS:-1} --time=${GINUX_BENCHMARK_WORKLOAD_SECONDS:-3} --cpu-max-prime=20000 run"
+                        command="/usr/bin/sysbench cpu --threads=${LINOX_BENCHMARK_THREADS:-1} --time=${LINOX_BENCHMARK_WORKLOAD_SECONDS:-3} --cpu-max-prime=20000 run"
                         ;;
                     memory)
-                        command="/usr/bin/sysbench memory --threads=${GINUX_BENCHMARK_THREADS:-1} --time=${GINUX_BENCHMARK_WORKLOAD_SECONDS:-3} --memory-block-size=${GINUX_BENCHMARK_MEMORY_BLOCK_SIZE:-1K} --memory-total-size=100G run"
+                        command="/usr/bin/sysbench memory --threads=${LINOX_BENCHMARK_THREADS:-1} --time=${LINOX_BENCHMARK_WORKLOAD_SECONDS:-3} --memory-block-size=${LINOX_BENCHMARK_MEMORY_BLOCK_SIZE:-1K} --memory-total-size=100G run"
                         ;;
                     threads)
-                        command="/usr/bin/sysbench threads --threads=${GINUX_BENCHMARK_THREADS:-1} --time=${GINUX_BENCHMARK_WORKLOAD_SECONDS:-3} run"
+                        command="/usr/bin/sysbench threads --threads=${LINOX_BENCHMARK_THREADS:-1} --time=${LINOX_BENCHMARK_WORKLOAD_SECONDS:-3} run"
                         ;;
                     mutex)
-                        command="/usr/bin/sysbench mutex --threads=${GINUX_BENCHMARK_THREADS:-1} --time=${GINUX_BENCHMARK_WORKLOAD_SECONDS:-3} run"
+                        command="/usr/bin/sysbench mutex --threads=${LINOX_BENCHMARK_THREADS:-1} --time=${LINOX_BENCHMARK_WORKLOAD_SECONDS:-3} run"
                         ;;
                 esac
-                marker="GINUX_BENCH_WORKLOAD_END_${workload}_${benchmark_run}="
+                marker="LINOX_BENCH_WORKLOAD_END_${workload}_${benchmark_run}="
                 shell_prompt_count=$(grep -Foc 'sh-5.2#' "$output_file" || true)
-                printf '%s\n' "echo GINUX_BENCH_WORKLOAD_BEGIN_${workload}_${benchmark_run} >&2; $command >&2; status=\$?; echo ${marker}\$status >&2"
+                printf '%s\n' "echo LINOX_BENCH_WORKLOAD_BEGIN_${workload}_${benchmark_run} >&2; $command >&2; status=\$?; echo ${marker}\$status >&2"
                 wait_for_count 'sh-5.2#' "$((shell_prompt_count + 1))" 600
                 if ! grep -Fq "${marker}0" "$output_file"; then
                     fail "sysbench workload $workload run $benchmark_run failed"
                 fi
-                if [[ "${GINUX_BENCHMARK_SINGLE_RUN:-0}" == 1 ]]; then
+                if [[ "${LINOX_BENCHMARK_SINGLE_RUN:-0}" == 1 ]]; then
                     printf '%s\n' ok >"$success_file"
                     stop_qemu
                     exit 0
                 fi
-                if [[ "${GINUX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 ]]; then
+                if [[ "${LINOX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 ]]; then
                     continue
                 fi
-                controller_prompt_count=$(grep -Foc 'ginux>' "$output_file" || true)
+                controller_prompt_count=$(grep -Foc 'linox>' "$output_file" || true)
                 printf '%s\n' exit
-                wait_for_count 'ginux>' "$((controller_prompt_count + 1))" 30
-                if [[ "$workload" != mutex || "$benchmark_run" -lt ${GINUX_BENCHMARK_WORKLOAD_RUNS:-3} ]]; then
-                    printf '%s\n' 'domain start rocky --attach' 'echo GINUX_BENCH_IMAGE_READY >&2'
-                    wait_for_line 'GINUX_BENCH_IMAGE_READY' 120
+                wait_for_count 'linox>' "$((controller_prompt_count + 1))" 30
+                if [[ "$workload" != mutex || "$benchmark_run" -lt ${LINOX_BENCHMARK_WORKLOAD_RUNS:-3} ]]; then
+                    printf '%s\n' 'domain start rocky --attach' 'echo LINOX_BENCH_IMAGE_READY >&2'
+                    wait_for_line 'LINOX_BENCH_IMAGE_READY' 120
                 fi
             done
         done
-        if [[ "${GINUX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 ]]; then
-            controller_prompt_count=$(grep -Foc 'ginux>' "$output_file" || true)
+        if [[ "${LINOX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 ]]; then
+            controller_prompt_count=$(grep -Foc 'linox>' "$output_file" || true)
             printf '%s\n' exit
-            wait_for_count 'ginux>' "$((controller_prompt_count + 1))" 30
+            wait_for_count 'linox>' "$((controller_prompt_count + 1))" 30
             printf '%s\n' ok >"$success_file"
             stop_qemu
             exit 0
         fi
-        wait_for 'ginux> ' 30
+        wait_for 'linox> ' 30
         printf '%s\n' shutdown
-        wait_for 'GINUX_KERNEL_OK' 30
+        wait_for 'LINOX_KERNEL_OK' 30
         printf '%s\n' ok >"$success_file"
         stop_qemu
         exit 0
@@ -303,17 +303,17 @@ qemu_started_at_ms=$(now_ms)
         sleep 1
         printf '%s\n' 'domain start rocky --attach'
         for _ in {1..30}; do
-            (( $(grep -Fc 'ginux: entering configured Linux init' "$output_file" || true) >= 2 )) && break
+            (( $(grep -Fc 'linox: entering configured Linux init' "$output_file" || true) >= 2 )) && break
             sleep 1
         done
-        if (( $(grep -Fc 'ginux: entering configured Linux init' "$output_file" || true) < 2 )); then
+        if (( $(grep -Fc 'linox: entering configured Linux init' "$output_file" || true) < 2 )); then
             fail "restart did not enter Linux init"
         fi
         for _ in {1..90}; do
-            grep -Fq 'ginux login:' "$output_file" && break
+            grep -Fq 'linox login:' "$output_file" && break
             sleep 1
         done
-        grep -Fq 'ginux login:' "$output_file" || fail "restart did not reach login prompt"
+        grep -Fq 'linox login:' "$output_file" || fail "restart did not reach login prompt"
     elif [[ "$start_mode" == detached ]]; then
         for _ in {1..90}; do
             printf '%s\n' 'domain status rocky'
@@ -334,7 +334,7 @@ qemu_started_at_ms=$(now_ms)
         printf 'qemu_start_to_multi_user_ms\t%s\n' "$qemu_to_multi_user_ms" >"$metrics_file"
     fi
     wait_for_login
-    if ! grep -Eq '^ginux: timing Linux-init-to-console: [0-9]+ ms' "$output_file"; then
+    if ! grep -Eq '^linox: timing Linux-init-to-console: [0-9]+ ms' "$output_file"; then
         fail 'kernel did not report Linux init timing'
     fi
     if [[ "$start_mode" != detached ]] \
@@ -347,19 +347,19 @@ qemu_started_at_ms=$(now_ms)
     if grep -Fq 'FlushToVar() varlink call: Connection reset by peer' "$output_file"; then
         fail 'systemd journal varlink transport regressed'
     fi
-    if grep -Eq '\[root@ginux[^]]*\]#|bash-[0-9.]+#' "$output_file"; then
+    if grep -Eq '\[root@linox[^]]*\]#|bash-[0-9.]+#' "$output_file"; then
         fail 'domain console bypassed login authentication'
     fi
     if grep -q 'FAILED.*Failed to start' "$output_file"; then
         fail 'systemd reported a failed boot unit'
     fi
-    if grep -Fq 'ginux: Linux child exited with status' "$output_file"; then
+    if grep -Fq 'linox: Linux child exited with status' "$output_file"; then
         fail 'kernel leaked an anonymous userspace child exit'
     fi
-    if [[ "${GINUX_TEST_DOMAIN_EXEC:-0}" == 1 ]]; then
+    if [[ "${LINOX_TEST_DOMAIN_EXEC:-0}" == 1 ]]; then
         printf '\035'
         wait_for "[detached from domain; use 'domain attach NAME' to return]" 10
-        wait_for_count 'ginux> ' 2 10
+        wait_for_count 'linox> ' 2 10
         printf '%s\n' 'domain exec rocky /bin/echo DOMAIN_EXEC_OK'
         wait_for 'DOMAIN_EXEC_OK' 30
         wait_for 'rocky: command completed' 30
@@ -370,43 +370,43 @@ qemu_started_at_ms=$(now_ms)
         printf '%s\n' "printf '\\nDOMAIN_EXEC_INTERACTIVE_OK\\n'"
         wait_for_line 'DOMAIN_EXEC_INTERACTIVE_OK' 30
         printf '%s\n' 'exit'
-        wait_for_count 'ginux> ' 3 30
+        wait_for_count 'linox> ' 3 30
     fi
     if [[ "$start_mode" == detached ]]; then
         printf '\035'
         wait_for '[detached from domain; use '\''domain attach NAME'\'' to return]' 10
-        wait_for_count 'ginux> ' 3 10
+        wait_for_count 'linox> ' 3 10
         printf '%s\n' 'domain status rocky'
         sleep 1
         printf '%s\n' 'domain attach rocky'
-        wait_for_count 'ginux login:' 1 10
+        wait_for_count 'linox login:' 1 10
     fi
     login_reached_at=$(date +%s)
-    init_to_console_ms=$(grep -E '^ginux: timing Linux-init-to-console: [0-9]+ ms' "$output_file" | tail -n 1 | awk '{print $4}')
+    init_to_console_ms=$(grep -E '^linox: timing Linux-init-to-console: [0-9]+ ms' "$output_file" | tail -n 1 | awk '{print $4}')
     echo "Rocky timing Linux-init-to-console: ${init_to_console_ms} ms" >&2
     echo "Rocky timing domain-start-to-login: $((login_reached_at - domain_started_at)) s" >&2
     echo "Rocky timing Linux-init-to-login: $((login_reached_at - init_started_at)) s" >&2
-    if [[ -n "${GINUX_MAX_LINUX_INIT_MS:-}" ]] \
-        && ((init_to_console_ms > GINUX_MAX_LINUX_INIT_MS)); then
-        fail "Linux init exceeded ${GINUX_MAX_LINUX_INIT_MS} ms budget (${init_to_console_ms} ms)"
+    if [[ -n "${LINOX_MAX_LINUX_INIT_MS:-}" ]] \
+        && ((init_to_console_ms > LINOX_MAX_LINUX_INIT_MS)); then
+        fail "Linux init exceeded ${LINOX_MAX_LINUX_INIT_MS} ms budget (${init_to_console_ms} ms)"
     fi
-    if [[ "${GINUX_REQUIRE_OCI_CACHE_HIT:-0}" == 1 ]] \
-        && ! grep -Fq 'ginux: OCI cache hit (' "$output_file"; then
+    if [[ "${LINOX_REQUIRE_OCI_CACHE_HIT:-0}" == 1 ]] \
+        && ! grep -Fq 'linox: OCI cache hit (' "$output_file"; then
         fail 'warm boot did not restore the image from the OCI cache'
     fi
     lifecycle_failure='rocky: (failed|stopped)'
     [[ "$start_mode" == stop-restart ]] && lifecycle_failure='rocky: failed'
-    if grep -Eq "^GINUX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|Linux child exec rejected|systemd-system-update-generator failed|$lifecycle_failure" "$output_file"; then
+    if grep -Eq "^LINOX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|Linux child exec rejected|systemd-system-update-generator failed|$lifecycle_failure" "$output_file"; then
         fail 'systemd failed before the console login target'
     fi
     printf '%s\n' ok >"$success_file"
     stop_qemu
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
     "$repo_root/tools/qemu/run.sh" >>"$output_file" 2>&1 &
 qemu_pid=$!
 
-for ((attempt = 0; attempt < ${GINUX_ROCKY_RUNTIME_TIMEOUT:-420}; attempt++)); do
-    if grep -Fq 'GINUX_KERNEL_OK' "$output_file" || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+for ((attempt = 0; attempt < ${LINOX_ROCKY_RUNTIME_TIMEOUT:-420}; attempt++)); do
+    if grep -Fq 'LINOX_KERNEL_OK' "$output_file" || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         break
     fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
@@ -426,17 +426,17 @@ fi
 wait "$qemu_pid" || true
 qemu_pid=""
 
-if [[ "${GINUX_BENCHMARK_SINGLE_RUN:-0}" == 1 && -s "$success_file" ]] \
-    && grep -Eq 'GINUX_BENCH_WORKLOAD_END_[a-z]+_[0-9]+=0' "$output_file" \
-    && ! grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault' "$output_file"; then
-    echo 'Ginux sysbench sample completed.'
+if [[ "${LINOX_BENCHMARK_SINGLE_RUN:-0}" == 1 && -s "$success_file" ]] \
+    && grep -Eq 'LINOX_BENCH_WORKLOAD_END_[a-z]+_[0-9]+=0' "$output_file" \
+    && ! grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault' "$output_file"; then
+    echo 'Linox sysbench sample completed.'
     exit 0
 fi
 
-if [[ "${GINUX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 && -s "$success_file" ]] \
-    && grep -Eq 'GINUX_BENCH_WORKLOAD_END_[a-z]+_[0-9]+=0' "$output_file" \
-    && ! grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault' "$output_file"; then
-    echo 'Ginux batched sysbench samples completed.'
+if [[ "${LINOX_BENCHMARK_REUSE_DOMAIN:-0}" == 1 && -s "$success_file" ]] \
+    && grep -Eq 'LINOX_BENCH_WORKLOAD_END_[a-z]+_[0-9]+=0' "$output_file" \
+    && ! grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault' "$output_file"; then
+    echo 'Linox batched sysbench samples completed.'
     exit 0
 fi
 
@@ -444,14 +444,14 @@ if [[ "$start_mode" == detached-return && -s "$success_file" ]] \
     && grep -Fq 'rocky: starting (detached)' "$output_file" \
     && grep -Fq 'rocky           booting' "$output_file" \
     && grep -Fq 'State:       booting' "$output_file" \
-    && ! grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+    && ! grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
     echo 'Rocky background start returned to the controller with observable boot state.'
     exit 0
 fi
 
 if [[ "$start_mode" == responsive && -s "$success_file" ]] \
-    && grep -Fq 'GINUX_KERNEL_OK' "$output_file" \
-    && ! grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|^ginux: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
+    && grep -Fq 'LINOX_KERNEL_OK' "$output_file" \
+    && ! grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|^linox: Linux user fault|Linux init (execution|setup) failed|rocky: (failed|stopped)' "$output_file"; then
     read -r boot_response_ms <"$success_file"
     echo "Controller remained responsive while detached Linux work was running (${boot_response_ms} ms)."
     exit 0
@@ -460,14 +460,14 @@ fi
 final_lifecycle_failure='rocky: (failed|stopped)'
 [[ "$start_mode" == stop-restart ]] && final_lifecycle_failure='rocky: failed'
 if [[ -s "$success_file" ]] \
-    && grep -Fq 'ginux login:' "$output_file" \
-    && ! grep -Eq "^GINUX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|Linux child exec rejected|systemd-system-update-generator failed|$final_lifecycle_failure" "$output_file"; then
+    && grep -Fq 'linox login:' "$output_file" \
+    && ! grep -Eq "^LINOX_(BOOT|KERNEL)_PANIC|Linux init (execution|setup) failed|Linux init exited with status|Linux child exec rejected|systemd-system-update-generator failed|$final_lifecycle_failure" "$output_file"; then
     echo 'Rocky systemd console login target passed.'
     exit 0
 fi
 
-if ! grep -Fq 'GINUX_KERNEL_OK' "$output_file" \
-    || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+if ! grep -Fq 'LINOX_KERNEL_OK' "$output_file" \
+    || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
     fail 'clean-shutdown marker was not observed'
 fi
 

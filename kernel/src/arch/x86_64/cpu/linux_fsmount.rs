@@ -43,7 +43,7 @@ const PARAMETER_CAPACITY: usize = 256;
 fn linux_may_mount() -> bool {
     current_container_slot().is_some()
         && linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageMounts)
-        && linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        && linux_has_capability(linox_credentials::capability::SYS_ADMIN)
 }
 
 /// The filesystem context a descriptor is open on.
@@ -442,7 +442,7 @@ fn linux_fs_context_reconfigure(id: u64) -> u64 {
     if phase != Phase::Reconfigure {
         return LINUX_EBUSY;
     }
-    if !linux_has_capability(ginux_credentials::capability::SYS_ADMIN) {
+    if !linux_has_capability(linox_credentials::capability::SYS_ADMIN) {
         fscontext::set_phase(id, Phase::Failed);
         return LINUX_EPERM;
     }

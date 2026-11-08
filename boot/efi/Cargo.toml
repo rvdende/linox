@@ -1,5 +1,5 @@
 [package]
-name = "ginux-boot"
+name = "linox-boot"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -7,12 +7,12 @@ publish = false
 
 [features]
 default = []
-verification-boot = ["ginux-kernel/verification-boot"]
-linux-boot-profile = ["ginux-kernel/linux-boot-profile"]
+verification-boot = ["linox-kernel/verification-boot"]
+linux-boot-profile = ["linox-kernel/linux-boot-profile"]
 
 [[bin]]
-name = "ginux-boot"
+name = "linox-boot"
 path = "src/main.rs"
 
 [dependencies]
-ginux-kernel = { path = "../../kernel" }
+linox-kernel = { path = "../../kernel" }

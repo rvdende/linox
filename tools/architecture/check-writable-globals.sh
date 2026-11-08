@@ -4,10 +4,10 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 manifest="$root/docs/feedback-hardening/writable-globals.tsv"
-inventory=$(mktemp "${TMPDIR:-/tmp}/ginux-global-inventory.XXXXXX")
-actual=$(mktemp "${TMPDIR:-/tmp}/ginux-global-actual.XXXXXX")
-expected=$(mktemp "${TMPDIR:-/tmp}/ginux-global-expected.XXXXXX")
-negative=$(mktemp "${TMPDIR:-/tmp}/ginux-global-negative.XXXXXX")
+inventory=$(mktemp "${TMPDIR:-/tmp}/linox-global-inventory.XXXXXX")
+actual=$(mktemp "${TMPDIR:-/tmp}/linox-global-actual.XXXXXX")
+expected=$(mktemp "${TMPDIR:-/tmp}/linox-global-expected.XXXXXX")
+negative=$(mktemp "${TMPDIR:-/tmp}/linox-global-negative.XXXXXX")
 trap 'rm -f "$inventory" "$actual" "$expected" "$negative"' EXIT
 
 fail() {

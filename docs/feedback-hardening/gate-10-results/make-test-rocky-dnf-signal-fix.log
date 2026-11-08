@@ -1,16 +1,16 @@
     Finished `release` profile [optimized] target(s) in 0.02s
 Built build/linux-probe.elf and build/linux-dynamic
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-controller-runtime
+Built target/x86_64-unknown-none/release/linox-controller-runtime
     Finished `release` profile [optimized] target(s) in 0.02s
-Built target/x86_64-unknown-none/release/ginux-network-service-runtime
+Built target/x86_64-unknown-none/release/linox-network-service-runtime
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-protocol-service-runtime
+Built target/x86_64-unknown-none/release/linox-protocol-service-runtime
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-volume-service-runtime
+Built target/x86_64-unknown-none/release/linox-volume-service-runtime
 Generated boot/efi/src/generated_boot.rs from control-plane/bootstrap.hex signed by the development-only RFC test key
-Building Ginux for x86_64-unknown-uefi (release)
-   Compiling ginux-boot v0.1.0 (/Users/gmk/git/ginux/boot/efi)
+Building Linox for x86_64-unknown-uefi (release)
+   Compiling linox-boot v0.1.0 (/Users/gmk/git/linox/boot/efi)
     Finished `release` profile [optimized] target(s) in 5.15s
 Built build/esp/EFI/BOOT/BOOTX64.EFI
 sh-5.2# /usr/bin/dnf -y update; printf 'DNF_UPDATE_EXIT=%s\n' "$?"
@@ -170,9 +170,9 @@ Rocky Linux 10 - App     [               ===  ] 8.0 kB/s | 2.8 kB     --:-- ETA
 (47/47): xz-libs-5.6.2-4.el10_2.1.x86_64.rpm    678 kB/s | 111 kB     00:00    
 --------------------------------------------------------------------------------
 Total                                           6.4 MB/s |  31 MB     00:04     
-ginux: Linux runtime exceeded sixty seconds; execution snapshot: pid=9 tid=9 rip=4339136 rsp=8914944 syscalls=180054 epoll-fd/events=18446744073709551615/0 name=rpmkeys
+linox: Linux runtime exceeded sixty seconds; execution snapshot: pid=9 tid=9 rip=4339136 rsp=8914944 syscalls=180054 epoll-fd/events=18446744073709551615/0 name=rpmkeys
 
-ginux: Linux init recent syscall/result pairs: 3/0 16/0 1/80 13/0 13/0 44/48 45/5 45/34 45/18446744073709551605 44/24 45/18446744073709551605 44/65 45/18446744073709551605 44/24 45/18446744073709551605 44/48 45/18446744073709551605 44/24 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 3/0 3/0 3/0 13/0 3/0 13/0 87/0 16/0 39/8 1/81 8/58740 1/111 39/8 1/81 8/58851 1/111 96/0 201/1793366552 257/16 262/0 21/0 262/0 39/8 8/58962 1/93 262/0 293/0 5/0 16/1 8/1 293/0 14/0 58/18446744073709547520 3/0 3/0 33/0 33/1 80/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 14/0 436/0 436/0 59/0
+linox: Linux init recent syscall/result pairs: 3/0 16/0 1/80 13/0 13/0 44/48 45/5 45/34 45/18446744073709551605 44/24 45/18446744073709551605 44/65 45/18446744073709551605 44/24 45/18446744073709551605 44/48 45/18446744073709551605 44/24 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 3/0 3/0 3/0 13/0 3/0 13/0 87/0 16/0 39/8 1/81 8/58740 1/111 39/8 1/81 8/58851 1/111 96/0 201/1793366552 257/16 262/0 21/0 262/0 39/8 8/58962 1/93 262/0 293/0 5/0 16/1 8/1 293/0 14/0 58/18446744073709547520 3/0 3/0 33/0 33/1 80/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 14/0 436/0 436/0 59/0
 
 Rocky dnf test failed: timed out waiting for 'rocky: stopped'
 sh-5.2# /usr/bin/dnf -y update; printf 'DNF_UPDATE_EXIT=%s\n' "$?"
@@ -331,9 +331,9 @@ Rocky Linux 10 - App     [               ===  ] 8.0 kB/s | 2.8 kB     --:-- ETA
 (47/47): xz-libs-5.6.2-4.el10_2.1.x86_64.rpm    678 kB/s | 111 kB     00:00    
 --------------------------------------------------------------------------------
 Total                                           6.4 MB/s |  31 MB     00:04     
-ginux: Linux runtime exceeded sixty seconds; execution snapshot: pid=9 tid=9 rip=4339136 rsp=8914944 syscalls=180054 epoll-fd/events=18446744073709551615/0 name=rpmkeys
+linox: Linux runtime exceeded sixty seconds; execution snapshot: pid=9 tid=9 rip=4339136 rsp=8914944 syscalls=180054 epoll-fd/events=18446744073709551615/0 name=rpmkeys
 
-ginux: Linux init recent syscall/result pairs: 3/0 16/0 1/80 13/0 13/0 44/48 45/5 45/34 45/18446744073709551605 44/24 45/18446744073709551605 44/65 45/18446744073709551605 44/24 45/18446744073709551605 44/48 45/18446744073709551605 44/24 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 3/0 3/0 3/0 13/0 3/0 13/0 87/0 16/0 39/8 1/81 8/58740 1/111 39/8 1/81 8/58851 1/111 96/0 201/1793366552 257/16 262/0 21/0 262/0 39/8 8/58962 1/93 262/0 293/0 5/0 16/1 8/1 293/0 14/0 58/18446744073709547520 3/0 3/0 33/0 33/1 80/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 14/0 436/0 436/0 59/0
+linox: Linux init recent syscall/result pairs: 3/0 16/0 1/80 13/0 13/0 44/48 45/5 45/34 45/18446744073709551605 44/24 45/18446744073709551605 44/65 45/18446744073709551605 44/24 45/18446744073709551605 44/48 45/18446744073709551605 44/24 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 45/18446744073709551605 3/0 3/0 3/0 13/0 3/0 13/0 87/0 16/0 39/8 1/81 8/58740 1/111 39/8 1/81 8/58851 1/111 96/0 201/1793366552 257/16 262/0 21/0 262/0 39/8 8/58962 1/93 262/0 293/0 5/0 16/1 8/1 293/0 14/0 58/18446744073709547520 3/0 3/0 33/0 33/1 80/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 13/0 14/0 436/0 436/0 59/0
 
 qemu-system-x86_64: terminating on signal 15 from pid 7959 (<unknown process>)
 Rocky dnf test failed: dnf update did not complete cleanly

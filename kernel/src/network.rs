@@ -106,7 +106,7 @@ pub(crate) fn inventory(cursor: usize) -> Option<InventoryRecord> {
         }
         let uplink = usize::from(NETWORKS.virtual_uplinks[slot].load(Ordering::Acquire));
         let state = if NETWORKS.virtual_links[slot].load(Ordering::Acquire) {
-            ginux_native_abi::NATIVE_NETWORK_FLAG_UP
+            linox_native_abi::NATIVE_NETWORK_FLAG_UP
         } else {
             0
         };
@@ -114,7 +114,7 @@ pub(crate) fn inventory(cursor: usize) -> Option<InventoryRecord> {
             slot + 1,
             name,
             name_size,
-            ginux_native_abi::NATIVE_NETWORK_KIND_VIRTUAL | state,
+            linox_native_abi::NATIVE_NETWORK_KIND_VIRTUAL | state,
             uplink.checked_sub(1),
         )
     };
@@ -355,7 +355,7 @@ pub(crate) fn set_dhcp_configuration(enabled: bool) {
 
 pub(crate) fn export_persistent_configuration(output: &mut [u8; PERSISTENT_NETWORK_CONFIG_SIZE]) {
     output.fill(0);
-    output[..8].copy_from_slice(b"GINUXNW1");
+    output[..8].copy_from_slice(b"LINOXNW1");
     output[8..12].copy_from_slice(&1_u32.to_le_bytes());
     output[12..14].copy_from_slice(&(VIRTUAL_NETWORK_CAPACITY as u16).to_le_bytes());
     output[16] = u8::from(NETWORKS.dhcp_configuration.load(Ordering::Acquire));
@@ -388,7 +388,7 @@ pub(crate) fn export_persistent_configuration(output: &mut [u8; PERSISTENT_NETWO
 pub(crate) fn import_persistent_configuration(
     input: &[u8; PERSISTENT_NETWORK_CONFIG_SIZE],
 ) -> bool {
-    if &input[..8] != b"GINUXNW1"
+    if &input[..8] != b"LINOXNW1"
         || u32::from_le_bytes(input[8..12].try_into().unwrap_or([0; 4])) != 1
         || usize::from(u16::from_le_bytes(
             input[12..14].try_into().unwrap_or([0; 2]),

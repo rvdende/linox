@@ -2,13 +2,13 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-output_file=$(mktemp "${TMPDIR:-/tmp}/ginux-alpine-shell.XXXXXX")
-volume_image=$(mktemp "${TMPDIR:-/tmp}/ginux-alpine-shell-volume.XXXXXX")
-qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/ginux-alpine-shell-pid.XXXXXX")
+output_file=$(mktemp "${TMPDIR:-/tmp}/linox-alpine-shell.XXXXXX")
+volume_image=$(mktemp "${TMPDIR:-/tmp}/linox-alpine-shell-volume.XXXXXX")
+qemu_pid_file=$(mktemp "${TMPDIR:-/tmp}/linox-alpine-shell-pid.XXXXXX")
 # The host port forwarded to the guest's listener: a free one the host
 # picks, unless one is given, so runs in parallel (other worktrees, other
 # suites) do not collide on a fixed one.
-host_socket_port="${GINUX_ALPINE_SOCKET_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+host_socket_port="${LINOX_ALPINE_SOCKET_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 qemu_pid=""
 
 stop_qemu() {
@@ -35,7 +35,7 @@ wait_for() {
     local marker=$1
     for _ in {1..60}; do
         grep -Fq "$marker" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -51,7 +51,7 @@ wait_for_line() {
     for _ in {1..60}; do
         # Controller lines end in CR LF; ERE has no \r escape, so use a real CR.
         grep -Eq "^${marker}"$'\r'"?\$" "$output_file" && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -77,7 +77,7 @@ wait_for_count() {
         local observed
         observed=$(grep -Fc "$marker" "$output_file" || true)
         [[ "$observed" -ge "$expected" ]] && return 0
-        if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+        if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
             break
         fi
         sleep 1
@@ -90,7 +90,7 @@ wait_for_count() {
 
 dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
 {
-    wait_for 'ginux> '
+    wait_for 'linox> '
     printf '%s\n' \
         'domain new alpine' \
         'domain set alpine image=alpine:latest init=/bin/sh' \
@@ -98,12 +98,12 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     wait_for 'docker.io/library/alpine:latest'
     printf '%s\n' \
         'domain start alpine --attach'
-    wait_for 'ginux: entering configured Linux init'
-    wait_for 'ginux: OCI image ready'
+    wait_for 'linox: entering configured Linux init'
+    wait_for 'linox: OCI image ready'
     printf '%s\n' \
         "printf 'LIBC_RUNTIME_OK\\n'" \
         "test -f /bin/busybox && printf 'STAT_ABI_OK\\n'" \
-        "mknod /tmp/ginux-fifo p && test -p /tmp/ginux-fifo && rm /tmp/ginux-fifo && printf 'MKNOD_FIFO_OK\\n'" \
+        "mknod /tmp/linox-fifo p && test -p /tmp/linox-fifo && rm /tmp/linox-fifo && printf 'MKNOD_FIFO_OK\\n'" \
         "mkdir -p /mnt/etc-bind /mnt/bin-bind && mount --bind /etc /mnt/etc-bind && mount --bind /bin /mnt/bin-bind && cmp /etc/alpine-release /mnt/etc-bind/alpine-release && ls /mnt/etc-bind | grep -qx alpine-release && (cd /mnt/etc-bind && test -f ./alpine-release) && /mnt/bin-bind/busybox true && (cd /mnt/etc-bind/apk && test \"\$(/bin/pwd -P)\" = /mnt/etc-bind/apk && test \"\$(readlink /proc/self/cwd)\" = /mnt/etc-bind/apk) && (exec 3</mnt/etc-bind/alpine-release && test \"\$(readlink /proc/self/fd/3)\" = /mnt/etc-bind/alpine-release) && umount /mnt/bin-bind /mnt/etc-bind && ! test -e /mnt/etc-bind/alpine-release && printf 'BIND_IMAGE_OK\\n'" \
         "while IFS= read -r line; do echo \"\$line\"; done < /etc/os-release" \
         'echo /*' \
@@ -150,7 +150,7 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     printf 'q'
     printf '%s\n' \
         "test \"\$(uname -s)\" = Linux && printf 'UNAME_SYSNAME_OK\\n'" \
-        "case \"\$(uname -a)\" in Linux\\ *-ginux.*) printf 'UNAME_ALL_PREFIX_OK\\n';; esac"
+        "case \"\$(uname -a)\" in Linux\\ *-linox.*) printf 'UNAME_ALL_PREFIX_OK\\n';; esac"
     wait_for_line 'UNAME_SYSNAME_OK'
     wait_for_line 'UNAME_ALL_PREFIX_OK'
     printf '%s\n' \
@@ -185,42 +185,42 @@ dd if=/dev/zero of="$volume_image" bs=1048576 count=1 2>/dev/null
     wait_for_line 'OCI_FILESYSTEM_OK'
     printf '\035'
     wait_for "[detached from domain; use 'domain attach NAME' to return]"
-    wait_for_count 'ginux> ' 2
+    wait_for_count 'linox> ' 2
     printf '%s\n' 'domain list'
     wait_for 'alpine          running     linux'
     printf '%s\n' 'domain attach alpine'
     wait_for_count $'\033[2J\033[H' 1
     printf '%s\n' 'exit 0'
-    wait_for_count 'ginux: Linux init exited cleanly' 1
-    wait_for_count 'ginux> ' 3
+    wait_for_count 'linox: Linux init exited cleanly' 1
+    wait_for_count 'linox> ' 3
     printf '%s\n' 'domain list'
     wait_for 'alpine          stopped     linux'
-    wait_for_count 'ginux> ' 4
+    wait_for_count 'linox> ' 4
     printf '%s\n' 'domain start alpine --attach'
-    wait_for_count 'ginux: entering configured Linux init' 2
+    wait_for_count 'linox: entering configured Linux init' 2
     printf '%s\n' \
         "printf 'OCI_RESTART_OK\\n'" \
         '/bin/ls /etc/os-release' \
         'exit 0'
     wait_for_line 'OCI_RESTART_OK'
-    wait_for_count 'ginux: Linux init exited cleanly' 2
-    wait_for_count 'ginux> ' 5
+    wait_for_count 'linox: Linux init exited cleanly' 2
+    wait_for_count 'linox> ' 5
     printf '%s\n' \
         'domain set alpine personality=linux init=/missing' \
         'domain start alpine --attach'
-    wait_for 'ginux: Linux init execution failed; domain marked failed'
-    wait_for_count 'ginux> ' 6
+    wait_for 'linox: Linux init execution failed; domain marked failed'
+    wait_for_count 'linox> ' 6
     printf '%s\n' 'domain status alpine'
     wait_for_line 'alpine: failed'
-    wait_for_count 'ginux> ' 7
+    wait_for_count 'linox> ' 7
     printf '%s\n' 'shutdown'
-} | GINUX_VOLUME_IMAGE="$volume_image" GINUX_QEMU_PID_FILE="$qemu_pid_file" \
-    GINUX_QEMU_HOSTFWD="tcp:127.0.0.1:${host_socket_port}-:8080" \
+} | LINOX_VOLUME_IMAGE="$volume_image" LINOX_QEMU_PID_FILE="$qemu_pid_file" \
+    LINOX_QEMU_HOSTFWD="tcp:127.0.0.1:${host_socket_port}-:8080" \
     "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
 qemu_pid=$!
 
 for _ in {1..300}; do
-    if grep -Fq 'GINUX_KERNEL_OK' "$output_file" || grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC' "$output_file"; then
+    if grep -Fq 'LINOX_KERNEL_OK' "$output_file" || grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC' "$output_file"; then
         break
     fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
@@ -243,7 +243,7 @@ wait "$qemu_pid" || true
 qemu_pid=""
 
 for expected in \
-    'ginux: entering configured Linux init' \
+    'linox: entering configured Linux init' \
     'LIBC_RUNTIME_OK' \
     'STAT_ABI_OK' \
     'MKNOD_FIFO_OK' \
@@ -266,10 +266,10 @@ for expected in \
     'PROCFS_SYSTEM_OK' \
     'OCI_FILESYSTEM_OK' \
     'OCI_RESTART_OK' \
-    'ginux: Linux init execution failed; domain marked failed' \
+    'linox: Linux init execution failed; domain marked failed' \
     'alpine: failed' \
-    'ginux: Linux init exited cleanly' \
-    'GINUX_KERNEL_OK'; do
+    'linox: Linux init exited cleanly' \
+    'LINOX_KERNEL_OK'; do
     if ! grep -Fq "$expected" "$output_file"; then
         tail -n 120 "$output_file"
         echo "Alpine shell test failed: missing '$expected'." >&2
@@ -283,14 +283,14 @@ if grep -Fq 'live registry refresh snapshot failed' "$output_file"; then
     exit 1
 fi
 
-if grep -Eq '^GINUX_(BOOT|KERNEL)_PANIC|ginux: unsupported Linux syscall' "$output_file"; then
+if grep -Eq '^LINOX_(BOOT|KERNEL)_PANIC|linox: unsupported Linux syscall' "$output_file"; then
     tail -n 120 "$output_file"
     echo "Alpine shell test failed: kernel panic or syscall debug noise detected." >&2
     exit 1
 fi
 
-if [[ $(grep -Fc 'ginux: entering configured Linux init' "$output_file") -ne 3 ]] \
-    || [[ $(grep -Fc 'ginux: Linux init exited cleanly' "$output_file") -ne 2 ]]; then
+if [[ $(grep -Fc 'linox: entering configured Linux init' "$output_file") -ne 3 ]] \
+    || [[ $(grep -Fc 'linox: Linux init exited cleanly' "$output_file") -ne 2 ]]; then
     tail -n 120 "$output_file"
     echo "Alpine shell test failed: restart lifecycle counts were incorrect." >&2
     exit 1

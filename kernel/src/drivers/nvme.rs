@@ -1,6 +1,6 @@
 //! Polling NVMe driver.
 //!
-//! This driver reads anywhere but writes only inside a Ginux volume
+//! This driver reads anywhere but writes only inside a Linox volume
 //! partition, given as a [`WritableExtent`] for the same disk, so it is safe
 //! to run against a disk that holds another operating system. It uses one
 //! admin queue pair and one I/O queue pair without interrupts.

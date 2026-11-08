@@ -1014,7 +1014,7 @@ pub(crate) fn expire_linux_waits_from_timer(frame: &mut UserInterruptFrame) {
             .LINUX_RUNTIME_STALLED_DIAGNOSTIC_WRITTEN
             .swap(true, Ordering::SeqCst)
     {
-        serial_write("ginux: Linux runtime exceeded sixty seconds; execution snapshot:");
+        serial_write("linox: Linux runtime exceeded sixty seconds; execution snapshot:");
         serial_write(" pid=");
         serial_write_u64(u64::from(current_linux_process_pid()));
         serial_write(" tid=");
@@ -1080,7 +1080,7 @@ pub(crate) fn expire_linux_waits_from_timer(frame: &mut UserInterruptFrame) {
             if state == LINUX_THREAD_FREE {
                 continue;
             }
-            serial_write("ginux: Linux stalled thread slot/tid/state/wait/remote: ");
+            serial_write("linox: Linux stalled thread slot/tid/state/wait/remote: ");
             serial_write_u64(slot as u64);
             serial_write("/");
             serial_write_u64(u64::from(
@@ -1978,7 +1978,7 @@ pub(super) fn linux_ptrace(request: u64, pid: u64, address: u64, data: u64) -> u
             return LINUX_EPERM;
         }
         let may_trace = super::current_linux_credentials().is_some_and(|credentials| {
-            credentials.has(ginux_credentials::capability::SYS_PTRACE)
+            credentials.has(linox_credentials::capability::SYS_PTRACE)
                 || pid != 1
                     && linux_process::live_process_credentials(pid)
                         .is_some_and(|target| target.user.real == credentials.user.real)
@@ -2866,7 +2866,7 @@ pub(super) fn linux_tgkill(
         && thread_group as u32 != current_linux_process_pid()
         && result != 0
     {
-        serial_write("ginux: cross-process tgkill rejected pid/tid/signal/error ");
+        serial_write("linox: cross-process tgkill rejected pid/tid/signal/error ");
         serial_write_u64(u64::from(thread_group as u32));
         serial_write(" ");
         serial_write_u64(u64::from(thread as u32));
@@ -3136,7 +3136,7 @@ pub(super) fn terminate_linux_process_out_of_memory() -> bool {
         return false;
     }
     let free_kib = memory::frame_counts().map_or(0, |(_, free)| free * 4);
-    serial_write("ginux: out of memory: killed process ");
+    serial_write("linox: out of memory: killed process ");
     serial_write_u64(u64::from(pid));
     serial_write(" (free kB ");
     serial_write_u64(free_kib);

@@ -242,8 +242,8 @@ fn linux_perf_slot(descriptor: u64) -> Option<usize> {
 /// Whether the caller holds CAP_PERFMON (or CAP_SYS_ADMIN, which implies
 /// it): Linux's perfmon_capable.
 fn linux_perfmon_capable() -> bool {
-    linux_has_capability(ginux_credentials::capability::PERFMON)
-        || linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+    linux_has_capability(linox_credentials::capability::PERFMON)
+        || linux_has_capability(linox_credentials::capability::SYS_ADMIN)
 }
 
 fn linux_perf_paranoid() -> i64 {

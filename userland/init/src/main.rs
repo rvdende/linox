@@ -1,12 +1,12 @@
-//! ginux-init: process 1 of a Rust-only Ginux domain. It sets up the
+//! linox-init: process 1 of a Rust-only Linox domain. It sets up the
 //! environment, runs an interactive shell on the console, reaps orphaned
 //! processes, and exits with the shell's status so the domain stops when the
 //! shell does.
 //!
-//! The shell command line comes from `/etc/ginux/shell` (program and
+//! The shell command line comes from `/etc/linox/shell` (program and
 //! arguments separated by spaces), else the first of `/bin/brush` and
-//! `/bin/sh` that exists; `/etc/ginux/motd` is printed first if present.
-//! The same command line is exported as `SHELL`, which ginux-term runs.
+//! `/bin/sh` that exists; `/etc/linox/motd` is printed first if present.
+//! The same command line is exported as `SHELL`, which linox-term runs.
 
 use std::{
     os::unix::process::CommandExt,
@@ -19,7 +19,7 @@ use rustix::process::{wait, Pid, WaitOptions};
 const PATH: &str = "/bin:/sbin";
 
 fn shell() -> String {
-    std::fs::read_to_string("/etc/ginux/shell")
+    std::fs::read_to_string("/etc/linox/shell")
         .ok()
         .map(|text| text.trim().to_string())
         .filter(|command| {
@@ -38,7 +38,7 @@ fn shell() -> String {
 }
 
 fn main() -> ExitCode {
-    if let Ok(motd) = std::fs::read_to_string("/etc/ginux/motd") {
+    if let Ok(motd) = std::fs::read_to_string("/etc/linox/motd") {
         print!("{motd}");
     }
     let shell = shell();
@@ -59,7 +59,7 @@ fn main() -> ExitCode {
     let shell_pid = match spawned {
         Ok(child) => Pid::from_child(&child),
         Err(error) => {
-            eprintln!("ginux-init: cannot start {shell}: {error}");
+            eprintln!("linox-init: cannot start {shell}: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -74,7 +74,7 @@ fn main() -> ExitCode {
             Ok(_) => {}
             Err(rustix::io::Errno::INTR) => {}
             Err(error) => {
-                eprintln!("ginux-init: wait: {error}");
+                eprintln!("linox-init: wait: {error}");
                 return ExitCode::FAILURE;
             }
         }

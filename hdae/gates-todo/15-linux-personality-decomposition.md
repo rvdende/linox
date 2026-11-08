@@ -45,7 +45,7 @@ observable behavior.
 ## Evidence
 
 - `make check` -> passed.
-- `make test` -> passed with `GINUX_KERNEL_OK` and `Boot test passed.`
+- `make test` -> passed with `LINOX_KERNEL_OK` and `Boot test passed.`
 - `wc -l` -> `cpu.rs` 42,752 lines; extracted module 121 lines.
 
 ## Decisions and limitations

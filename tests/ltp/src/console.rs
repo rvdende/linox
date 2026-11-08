@@ -22,9 +22,9 @@ static MARKER: LazyLock<Regex> = LazyLock::new(|| {
 });
 /// A kernel or boot panic.
 pub static PANIC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"GINUX_(?:BOOT|KERNEL)_PANIC").expect("valid panic pattern"));
+    LazyLock::new(|| Regex::new(r"LINOX_(?:BOOT|KERNEL)_PANIC").expect("valid panic pattern"));
 static DOMAIN_DOWN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"ginux: Linux init (?:exited|execution failed)|domain marked failed")
+    Regex::new(r"linox: Linux init (?:exited|execution failed)|domain marked failed")
         .expect("valid domain-down pattern")
 });
 
@@ -124,7 +124,7 @@ pub struct Qemu {
 }
 
 impl Qemu {
-    /// Boots Ginux. Console output is appended to `log`.
+    /// Boots Linox. Console output is appended to `log`.
     pub fn start(config: &Config, boot: u32, log: &Arc<File>) -> io::Result<Qemu> {
         let header = format!(
             "\n===== ltp driver: boot {boot} at {} =====\n",
@@ -134,11 +134,11 @@ impl Qemu {
         let (output, writer) = io::pipe()?;
         let mut command = Command::new(config.repo.join("tools/qemu/run.sh"));
         command
-            .env("GINUX_ESP_DIR", &config.esp_dir)
-            .env("GINUX_MEMORY", &config.memory)
-            .env("GINUX_CPUS", config.domain_cpus.to_string())
-            .env("GINUX_VOLUME_IMAGE", config.volume())
-            .env("GINUX_QEMU_PID_FILE", config.pid_file())
+            .env("LINOX_ESP_DIR", &config.esp_dir)
+            .env("LINOX_MEMORY", &config.memory)
+            .env("LINOX_CPUS", config.domain_cpus.to_string())
+            .env("LINOX_VOLUME_IMAGE", config.volume())
+            .env("LINOX_QEMU_PID_FILE", config.pid_file())
             .stdin(Stdio::piped())
             .stdout(writer.try_clone()?)
             .stderr(writer)
@@ -389,13 +389,13 @@ mod tests {
 
     #[test]
     fn kernel_failures() {
-        let panic = b"ginux: fatal exception GINUX_KERNEL_PANIC";
+        let panic = b"linox: fatal exception LINOX_KERNEL_PANIC";
         assert_eq!(scan_line(panic).unwrap().0, EventKind::Panic);
         assert_eq!(
-            scan_line(b"GINUX_BOOT_PANIC: no volume").unwrap().0,
+            scan_line(b"LINOX_BOOT_PANIC: no volume").unwrap().0,
             EventKind::Panic
         );
-        let down = b"ginux: Linux init execution failed; domain marked failed";
+        let down = b"linox: Linux init execution failed; domain marked failed";
         assert_eq!(
             scan_line(down).unwrap(),
             (
@@ -404,17 +404,17 @@ mod tests {
             )
         );
         assert_eq!(
-            scan_line(b"ginux: Linux init exited with 0").unwrap().0,
+            scan_line(b"linox: Linux init exited with 0").unwrap().0,
             EventKind::DomainDown
         );
-        assert_eq!(scan_line(b"ginux: Linux init started"), None);
+        assert_eq!(scan_line(b"linox: Linux init started"), None);
     }
 
     #[test]
     fn reader_offsets_events_by_console_position() {
         let console = Console::default();
         let directory =
-            std::env::temp_dir().join(format!("ginux-ltp-console-{}", std::process::id()));
+            std::env::temp_dir().join(format!("linox-ltp-console-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let log_path = directory.join("serial.log");
         let log = File::create(&log_path).unwrap();

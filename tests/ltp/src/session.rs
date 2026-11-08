@@ -1,4 +1,4 @@
-//! The QEMU session: boots Ginux, starts the domain and the runner, turns
+//! The QEMU session: boots Linox, starts the domain and the runner, turns
 //! the runner's events into results, and recovers from crashes and hangs by
 //! rebooting. It runs on a background thread and hands each trial its
 //! result over a channel.
@@ -79,7 +79,7 @@ pub fn render_results(
     let state = if complete { "complete" } else { "in progress" };
     let counts = count(tests, results);
     let mut text = format!(
-        "# Ginux LTP results ({state}), {timestamp}\n# {run_line}\n# total={} {}\n# name result seconds detail\n",
+        "# Linox LTP results ({state}), {timestamp}\n# {run_line}\n# total={} {}\n# name result seconds detail\n",
         tests.len(),
         count_line(&counts)
     );
@@ -120,7 +120,7 @@ pub fn new_volume(path: &Path) -> io::Result<()> {
     File::create(path)?.set_len(8 << 30)
 }
 
-/// The commit Ginux was built from, `-dirty` with uncommitted changes.
+/// The commit Linox was built from, `-dirty` with uncommitted changes.
 pub fn git_rev(repo: &Path) -> String {
     let git = |args: &[&str]| {
         Command::new("git")
@@ -282,7 +282,7 @@ impl Run {
         &self.results
     }
 
-    /// How many times Ginux was booted.
+    /// How many times Linox was booted.
     pub fn boots(&self) -> u32 {
         self.boots
     }
@@ -389,7 +389,7 @@ impl Run {
             }
             self.boots += 1;
             self.progress
-                .step(&format!("boot {}: booting Ginux", self.boots));
+                .step(&format!("boot {}: booting Linox", self.boots));
             let (outcome, next, progressed) = self.boot(base_url, position)?;
             position = next;
             if outcome == "done" {
@@ -457,13 +457,13 @@ impl Run {
         let config = Arc::clone(&self.config);
         let interrupted = Arc::clone(&self.interrupted);
         let boot = self.boots;
-        let mut offset = qemu.wait_for(b"ginux> ", 120, 0, &interrupted)?;
+        let mut offset = qemu.wait_for(b"linox> ", 120, 0, &interrupted)?;
         self.progress
             .step(&format!("boot {boot}: configuring the ltp domain"));
         // The volume keeps domain configurations across reboots, so after the
         // first boot the domain already exists and creating it is rejected.
         qemu.send("domain new ltp");
-        offset = qemu.wait_for(b"ginux> ", 30, offset, &interrupted)?;
+        offset = qemu.wait_for(b"linox> ", 30, offset, &interrupted)?;
         // LTP's credential tests switch between root and other users (nobody,
         // bin), which a domain allows only with user-switching=true.
         qemu.send(&format!(
@@ -477,7 +477,7 @@ impl Run {
         ));
         qemu.send("domain start ltp --attach");
         offset = qemu.wait_for(
-            b"ginux: entering configured Linux init",
+            b"linox: entering configured Linux init",
             900,
             offset,
             &interrupted,
@@ -486,7 +486,7 @@ impl Run {
         self.progress.step(&format!(
             "boot {boot}: unpacking LTP and starting the runner"
         ));
-        // The runner cannot replace the init shell: Ginux fails execve in a
+        // The runner cannot replace the init shell: Linox fails execve in a
         // domain's init process (ENOENT). The quotes keep the shell's echo of
         // this line from looking like a marker.
         qemu.send(&format!(
@@ -755,7 +755,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "# Ginux LTP results (in progress), 2026-11-01T13:04:25\n\
+            "# Linox LTP results (in progress), 2026-11-01T13:04:25\n\
              # list=l ltp=v kernel=k boots=1 elapsed=5s\n\
              # total=4 TPASS=0 TFAIL=1 TBROK=0 TCONF=0 TWARN=0 CRASH=0 HANG=1 SKIP=1 NOTRUN=1\n\
              # name result seconds detail\n\
@@ -765,7 +765,7 @@ mod tests {
              fork14 HANG 90.04 host-watchdog 60+30s (guest wedged)\n"
         );
         assert!(render_results(true, "t", "r", &tests, &results)
-            .starts_with("# Ginux LTP results (complete), t\n"));
+            .starts_with("# Linox LTP results (complete), t\n"));
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn a_new_volume_is_sparse_and_replaces_the_old() {
-        let path = std::env::temp_dir().join(format!("ginux-ltp-volume-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("linox-ltp-volume-{}", std::process::id()));
         fs::write(&path, b"old").unwrap();
         new_volume(&path).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().len(), 8 << 30);

@@ -1,6 +1,6 @@
-//! Linux security modules as Ginux has them: the capability module every
+//! Linux security modules as Linox has them: the capability module every
 //! Linux has, and Landlock (`crate::linux_landlock`, policy in
-//! `ginux_landlock`). This holds their system calls (landlock_*, lsm_*),
+//! `linox_landlock`). This holds their system calls (landlock_*, lsm_*),
 //! securityfs's `/sys/kernel/security/lsm`, and the checks the file,
 //! socket and signal paths ask Landlock.
 //!
@@ -9,7 +9,7 @@
 //! threads share one domain.
 
 use super::*;
-use ginux_landlock::access as landlock;
+use linox_landlock::access as landlock;
 
 /// The active modules' ids (LSM_ID_CAPABILITY, LSM_ID_LANDLOCK), in the
 /// order `/sys/kernel/security/lsm` names them.
@@ -136,7 +136,7 @@ pub(super) fn linux_lsm_list_modules(identifiers: u64, size: u64, flags: u64) ->
     LINUX_LSM_IDS.len() as u64
 }
 
-fn linux_landlock_error(error: ginux_landlock::Error) -> u64 {
+fn linux_landlock_error(error: linox_landlock::Error) -> u64 {
     error.errno().wrapping_neg()
 }
 
@@ -175,7 +175,7 @@ pub(super) fn linux_landlock_create_ruleset(attribute: u64, size: u64, flags: u6
     let flags = u64::from(flags as u32);
     if flags != 0 {
         return if flags == LANDLOCK_CREATE_RULESET_VERSION && attribute == 0 && size == 0 {
-            u64::from(ginux_landlock::ABI_VERSION)
+            u64::from(linox_landlock::ABI_VERSION)
         } else {
             LINUX_EINVAL
         };
@@ -302,7 +302,7 @@ fn linux_landlock_rule_file(
 /// sandbox cannot confuse a privileged program it starts.
 pub(super) fn linux_landlock_restrict_self(descriptor: u64, flags: u64) -> u64 {
     if !X86_RUNTIME.ELF_PROBE_NO_NEW_PRIVS.load(Ordering::SeqCst)
-        && !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        && !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -494,7 +494,7 @@ pub(super) fn linux_landlock_check_ioctl(descriptor: u64, request: u64) -> Resul
 /// Landlock's check of making a node of type `mode` (S_IFMT bits; 0 is a
 /// regular file) at canonical `path`.
 pub(super) fn linux_landlock_check_make(path: &[u8], mode: u32) -> Result<(), u64> {
-    linux_landlock_check(linux_parent_path(path), ginux_landlock::make_right(mode))
+    linux_landlock_check(linux_parent_path(path), linox_landlock::make_right(mode))
 }
 
 /// Landlock's check of unlink (`directory` false) or rmdir of canonical
@@ -502,7 +502,7 @@ pub(super) fn linux_landlock_check_make(path: &[u8], mode: u32) -> Result<(), u6
 pub(super) fn linux_landlock_check_remove(path: &[u8], directory: bool) -> Result<(), u64> {
     linux_landlock_check(
         linux_parent_path(path),
-        ginux_landlock::remove_right(directory),
+        linox_landlock::remove_right(directory),
     )
 }
 
@@ -513,7 +513,7 @@ pub(super) fn linux_landlock_check_link(old: &[u8], new: &[u8]) -> Result<(), u6
         old,
         new,
         0,
-        ginux_landlock::make_right(file_type),
+        linox_landlock::make_right(file_type),
         linux_landlock_moved_rights(file_type),
     )
 }
@@ -532,13 +532,13 @@ pub(super) fn linux_landlock_check_rename(
     }
     let old_type = linux_landlock_file_type(old).unwrap_or(S_IFREG);
     let new_type = linux_landlock_file_type(new);
-    let removal = |file_type: u32| ginux_landlock::remove_right(file_type == S_IFDIR);
+    let removal = |file_type: u32| linox_landlock::remove_right(file_type == S_IFDIR);
     let mut from_access = removal(old_type);
-    let mut to_access = ginux_landlock::make_right(old_type);
+    let mut to_access = linox_landlock::make_right(old_type);
     if let Some(new_type) = new_type {
         to_access |= removal(new_type);
         if exchange {
-            from_access |= ginux_landlock::make_right(new_type);
+            from_access |= linox_landlock::make_right(new_type);
         }
     }
     linux_landlock_check_move(
@@ -574,8 +574,8 @@ fn linux_landlock_check_move(
         file_rights,
     )
     .map_err(|denial| match denial {
-        ginux_landlock::Denial::Access => LINUX_EACCES,
-        ginux_landlock::Denial::Reparent => LINUX_EXDEV,
+        linox_landlock::Denial::Access => LINUX_EACCES,
+        linox_landlock::Denial::Reparent => LINUX_EXDEV,
     })
 }
 
@@ -664,7 +664,7 @@ pub(super) fn linux_landlock_exit(pid: u32) {
 /// The boot check of the calls that have no effect: the ABI version, and
 /// Linux's first errors.
 pub(super) fn verify_linux_landlock_syscalls() -> bool {
-    linux_landlock_create_ruleset(0, 0, 1) == u64::from(ginux_landlock::ABI_VERSION)
+    linux_landlock_create_ruleset(0, 0, 1) == u64::from(linox_landlock::ABI_VERSION)
         && linux_landlock_create_ruleset(0, 0, 3) == LINUX_EINVAL
         && linux_landlock_create_ruleset(0, 8, 0) == LINUX_EFAULT
         && linux_landlock_add_rule(0, 1, 0, 1) == LINUX_EINVAL

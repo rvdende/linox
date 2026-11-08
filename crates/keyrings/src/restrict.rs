@@ -12,7 +12,7 @@ pub(crate) enum Restriction {
     /// Nothing at all.
     Everything,
     /// Asymmetric keys signed by a key in the kernel's built-in (or
-    /// secondary) trusted keyring. Ginux builds no certificates in, so
+    /// secondary) trusted keyring. Linox builds no certificates in, so
     /// those keyrings are empty and no key is ever accepted.
     BuiltinTrusted,
     /// "key_or_keyring:SERIAL[:chain]": asymmetric keys signed by the key

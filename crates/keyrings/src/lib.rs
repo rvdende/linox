@@ -242,7 +242,7 @@ pub enum Error {
     TooDeep,
     /// EBADMSG: no parser recognises an asymmetric key's data.
     BadMessage,
-    /// ENOPKG: an asymmetric key or signature of an algorithm Ginux lacks.
+    /// ENOPKG: an asymmetric key or signature of an algorithm Linox lacks.
     NoPackage,
     /// EKEYREJECTED: a certificate's signature does not verify.
     KeyRejected,

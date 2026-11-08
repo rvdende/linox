@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ginux_gfx::Canvas;
+use linox_gfx::Canvas;
 use wayland_protocols::xdg::shell::server::{xdg_surface::XdgSurface, xdg_toplevel};
 use wayland_server::{
     backend::ObjectId,
@@ -200,7 +200,7 @@ impl State {
             .spawn()
         {
             Ok(child) => self.children.push(child),
-            Err(error) => eprintln!("ginux-wm: cannot start {command}: {error}"),
+            Err(error) => eprintln!("linox-wm: cannot start {command}: {error}"),
         }
     }
 
@@ -993,7 +993,7 @@ fn background(width: i32, height: i32) -> Vec<u32> {
     canvas.text(
         16,
         height - 24,
-        "Ginux - Alt+Enter terminal, Alt+Tab cycle, Alt+Q close, Alt+M maximize",
+        "Linox - Alt+Enter terminal, Alt+Tab cycle, Alt+Q close, Alt+M maximize",
         0xff9f_b3c8,
         1,
         width - 32,

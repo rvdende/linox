@@ -27,7 +27,7 @@ the admitted ioctl profile, sysfs, mount/namespace APIs, sockets, cgroups,
 seccomp/audit/LSM interfaces, vDSO/vvar, and the Linux module userspace API.
 
 A set bit prints PASS and means the boot verifier proved the currently bounded
-Ginux contract for that interface. It does not mean full Linux compatibility.
+Linox contract for that interface. It does not mean full Linux compatibility.
 An unset bit prints FAIL unless the interface is explicitly designated as a
 policy exemption. The Linux module userspace API is currently policy-exempt
 because module loading is reserved to the control plane.
@@ -40,7 +40,7 @@ runtime report. Runtime output has exactly three outcomes:
 - `FAIL`: the implementation or its conformance proof is incomplete, including
   absent calls that return `ENOSYS`.
 - `POLICY-EXEMPT`: the kernel recognizes and deliberately denies the operation
-  as part of the documented Ginux security policy.
+  as part of the documented Linox security policy.
 
 Dispatch presence alone must never print PASS. As behavior and tests are
 completed, one syscall at a time moves from FAIL to PASS. There is no

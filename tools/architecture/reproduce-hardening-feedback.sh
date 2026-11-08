@@ -13,7 +13,7 @@ line_of() {
     rg -n -m1 "$pattern" "$file" 2>/dev/null | cut -d: -f1 || true
 }
 
-syscall_entry=$(line_of '^ginux_linux_syscall_entry:' "$cpu")
+syscall_entry=$(line_of '^linox_linux_syscall_entry:' "$cpu")
 save_rsp=$(awk -v start="$syscall_entry" 'NR >= start && /mov gs:\[\{entry_user_rsp\}\], rsp/ { print NR; exit }' "$cpu")
 trusted_rsp=$(awk -v start="$syscall_entry" 'NR >= start && /mov rsp, gs:\[\{entry_return_stack\}\]/ { print NR; exit }' "$cpu")
 idt_policy=$(line_of '^const fn exception_ist' "$architecture")

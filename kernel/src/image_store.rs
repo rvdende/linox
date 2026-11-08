@@ -4,12 +4,12 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
-use ginux_image_store::{Digest, ImageStore, ObjectBackend, StagingHandle, StoreError};
+use linox_image_store::{Digest, ImageStore, ObjectBackend, StagingHandle, StoreError};
 
 use crate::memory::{self, FrameLease, FrameOwner};
 
 const PAGE_SIZE: usize = 4096;
-const OBJECT_LIMIT: usize = ginux_oci::OCI_LAYER_LIMIT;
+const OBJECT_LIMIT: usize = linox_oci::OCI_LAYER_LIMIT;
 pub(crate) const CACHE_QUOTA: usize = usize::MAX;
 /// The most a root filesystem may expand to, checked against the layers'
 /// untrusted size fields before anything is allocated for it. Upstream's
@@ -19,7 +19,7 @@ pub(crate) const DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES: usize = 4 * 1024 * 1024 * 10
 struct ImageStoreOwner {
     installed: AtomicBool,
     store: UnsafeCell<MaybeUninit<ImageStore<RamBackend, OBJECT_LIMIT>>>,
-    published_layers: UnsafeCell<[Digest; ginux_oci::OCI_LAYER_LIMIT]>,
+    published_layers: UnsafeCell<[Digest; linox_oci::OCI_LAYER_LIMIT]>,
     published_layer_count: AtomicUsize,
     rootfs_frame_starts: [AtomicU64; crate::control_abi::DOMAIN_LIMIT],
     rootfs_frame_counts: [AtomicUsize; crate::control_abi::DOMAIN_LIMIT],
@@ -37,7 +37,7 @@ unsafe impl Sync for ImageStoreOwner {}
 static IMAGE_STORE: ImageStoreOwner = ImageStoreOwner {
     installed: AtomicBool::new(false),
     store: UnsafeCell::new(MaybeUninit::uninit()),
-    published_layers: UnsafeCell::new([Digest([0; 32]); ginux_oci::OCI_LAYER_LIMIT]),
+    published_layers: UnsafeCell::new([Digest([0; 32]); linox_oci::OCI_LAYER_LIMIT]),
     published_layer_count: AtomicUsize::new(0),
     rootfs_frame_starts: [const { AtomicU64::new(0) }; crate::control_abi::DOMAIN_LIMIT],
     rootfs_frame_counts: [const { AtomicUsize::new(0) }; crate::control_abi::DOMAIN_LIMIT],
@@ -263,10 +263,10 @@ pub(crate) fn publish(handle: StagingHandle) -> Result<Digest, StoreError> {
         let index = IMAGE_STORE
             .published_layer_count
             .fetch_add(1, Ordering::AcqRel);
-        if index >= ginux_oci::OCI_LAYER_LIMIT {
+        if index >= linox_oci::OCI_LAYER_LIMIT {
             IMAGE_STORE
                 .published_layer_count
-                .store(ginux_oci::OCI_LAYER_LIMIT, Ordering::Release);
+                .store(linox_oci::OCI_LAYER_LIMIT, Ordering::Release);
             return Err(StoreError::QuotaExceeded);
         }
         unsafe {
@@ -356,7 +356,7 @@ pub(crate) fn begin_layer_pull() -> bool {
 
 pub(crate) fn discard_published_layers() -> bool {
     let count = IMAGE_STORE.published_layer_count.swap(0, Ordering::AcqRel);
-    if count > ginux_oci::OCI_LAYER_LIMIT {
+    if count > linox_oci::OCI_LAYER_LIMIT {
         return false;
     }
     with_store(|store| {
@@ -391,15 +391,15 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
         return false;
     }
     let layer_count = IMAGE_STORE.published_layer_count.load(Ordering::Acquire);
-    if layer_count == 0 || layer_count > ginux_oci::OCI_LAYER_LIMIT {
+    if layer_count == 0 || layer_count > linox_oci::OCI_LAYER_LIMIT {
         return false;
     }
     with_store(|store| {
-        let mut digests = [Digest([0; 32]); ginux_oci::OCI_LAYER_LIMIT];
-        let mut objects = [0_u8; ginux_oci::OCI_LAYER_LIMIT];
-        let mut compressed_lengths = [0_usize; ginux_oci::OCI_LAYER_LIMIT];
-        let mut headers = [0_usize; ginux_oci::OCI_LAYER_LIMIT];
-        let mut expected_lengths = [0_usize; ginux_oci::OCI_LAYER_LIMIT];
+        let mut digests = [Digest([0; 32]); linox_oci::OCI_LAYER_LIMIT];
+        let mut objects = [0_u8; linox_oci::OCI_LAYER_LIMIT];
+        let mut compressed_lengths = [0_usize; linox_oci::OCI_LAYER_LIMIT];
+        let mut headers = [0_usize; linox_oci::OCI_LAYER_LIMIT];
+        let mut expected_lengths = [0_usize; linox_oci::OCI_LAYER_LIMIT];
         for index in 0..layer_count {
             let digest = unsafe {
                 IMAGE_STORE
@@ -440,13 +440,13 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
         let Some((allocation_length, page_count)) =
             rootfs_unpack_allocation(&expected_lengths[..layer_count], unpack_limit_bytes)
         else {
-            crate::serial_write_bytes(b"ginux: OCI rootfs expansion exceeds unpack limit\r\n");
+            crate::serial_write_bytes(b"linox: OCI rootfs expansion exceeds unpack limit\r\n");
             return false;
         };
         let Some((first_frame, _)) =
             memory::allocate_contiguous_extent(FrameOwner::KERNEL, page_count)
         else {
-            crate::serial_write_bytes(b"ginux: OCI rootfs memory allocation failed: ");
+            crate::serial_write_bytes(b"linox: OCI rootfs memory allocation failed: ");
             crate::serial_write_u64(allocation_length as u64);
             crate::serial_write_bytes(b" bytes\r\n");
             return false;
@@ -500,7 +500,7 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
                 );
                 return false;
             }
-            let Some(layer) = ginux_oci::Rootfs::parse(&output[rootfs_length..layer_end]) else {
+            let Some(layer) = linox_oci::Rootfs::parse(&output[rootfs_length..layer_end]) else {
                 let _ = memory::scrub_and_release_contiguous_extent(
                     FrameOwner::KERNEL,
                     first_frame,
@@ -529,7 +529,7 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
         output[rootfs_length..rootfs_end].fill(0);
         let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, rootfs_end) };
         if !crate::published_rootfs::install_published_rootfs(slot, bytes) {
-            crate::serial_write_bytes(b"ginux: OCI rootfs publication failed\r\n");
+            crate::serial_write_bytes(b"linox: OCI rootfs publication failed\r\n");
             let _ = memory::scrub_and_release_contiguous_extent(
                 FrameOwner::KERNEL,
                 first_frame,

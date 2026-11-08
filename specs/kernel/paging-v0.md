@@ -95,7 +95,7 @@ active mapping hierarchy is therefore not writable through its identity alias;
 dynamically allocated domain page tables remain writable while their address
 spaces exist.
 
-Interrupts remain disabled during and after the transition. They cannot be enabled until Ginux installs its own GDT, IDT, exception handlers, and interrupt-controller policy.
+Interrupts remain disabled during and after the transition. They cannot be enabled until Linox installs its own GDT, IDT, exception handlers, and interrupt-controller policy.
 
 ## Security limitations
 

@@ -1,4 +1,4 @@
-//! Software drawing shared by the Ginux compositor and its clients: a
+//! Software drawing shared by the Linox compositor and its clients: a
 //! clipped canvas over 32-bit XRGB/ARGB pixels and an 8x8 bitmap font.
 
 use font8x8::{UnicodeFonts, BASIC_FONTS};

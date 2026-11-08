@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering};
-pub(crate) use ginux_oci::{Entry, EntryKind};
-use ginux_oci::{Rootfs, RootfsMetadata};
+pub(crate) use linox_oci::{Entry, EntryKind};
+use linox_oci::{Rootfs, RootfsMetadata};
 
 use crate::memory::{self, FrameLease, FrameOwner};
 
@@ -97,12 +97,12 @@ pub(crate) fn install_published_rootfs(slot: usize, bytes: &'static [u8]) -> boo
         return false;
     }
     let Some(rootfs) = Rootfs::parse(bytes) else {
-        crate::serial_write_bytes(b"ginux: published rootfs validation failed\r\n");
+        crate::serial_write_bytes(b"linox: published rootfs validation failed\r\n");
         return false;
     };
     let metadata = rootfs.metadata();
     if !install_path_index(slot, &rootfs) {
-        crate::serial_write_bytes(b"ginux: published rootfs pathname index allocation failed\r\n");
+        crate::serial_write_bytes(b"linox: published rootfs pathname index allocation failed\r\n");
         return false;
     }
     clear_entry_cache(slot);

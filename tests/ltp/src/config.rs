@@ -28,7 +28,7 @@ pub struct Config {
     pub setup_timeout: u64,
     /// Boots after which the run stops (`LTP_MAX_BOOTS`).
     pub max_boots: u32,
-    /// QEMU's memory (`GINUX_MEMORY`).
+    /// QEMU's memory (`LINOX_MEMORY`).
     pub memory: String,
     /// The domain's memory (`LTP_DOMAIN_MEMORY_MIB`).
     pub domain_memory_mib: u32,
@@ -41,7 +41,7 @@ pub struct Config {
     /// The LTP build to use, `build/ltp-VARIANT`, which also suffixes the
     /// outputs (`LTP_VARIANT`; the default build when empty).
     pub variant: String,
-    /// The ESP directory to boot (`GINUX_ESP_DIR`, default `build/esp`).
+    /// The ESP directory to boot (`LINOX_ESP_DIR`, default `build/esp`).
     pub esp_dir: PathBuf,
     /// Report every failure, ignoring the baseline (`LTP_STRICT=1`).
     pub strict: bool,
@@ -89,12 +89,12 @@ impl Config {
             between_tests: number("LTP_BETWEEN_TESTS", 60)?,
             setup_timeout: number("LTP_SETUP_TIMEOUT", 600)?,
             max_boots: number("LTP_MAX_BOOTS", 400)?,
-            memory: var("GINUX_MEMORY").unwrap_or_else(|| "6G".to_string()),
+            memory: var("LINOX_MEMORY").unwrap_or_else(|| "6G".to_string()),
             domain_memory_mib: number("LTP_DOMAIN_MEMORY_MIB", 4096)?,
             domain_cpus: number("LTP_DOMAIN_CPUS", 4)?,
             image: var("LTP_IMAGE").unwrap_or_else(|| "alpine:3.22".to_string()),
             variant: var("LTP_VARIANT").unwrap_or_default(),
-            esp_dir: path("GINUX_ESP_DIR", "build/esp"),
+            esp_dir: path("LINOX_ESP_DIR", "build/esp"),
             strict: strict || switch("LTP_STRICT")?,
             update_baseline: update_baseline || switch("LTP_UPDATE_BASELINE")?,
             baseline: path("LTP_BASELINE", "tests/ltp/baseline.txt"),
@@ -138,7 +138,7 @@ impl Config {
         self.work().join("logs")
     }
 
-    /// The Ginux volume, fresh for each run.
+    /// The Linox volume, fresh for each run.
     pub fn volume(&self) -> PathBuf {
         self.work().join("volume.raw")
     }
@@ -182,9 +182,9 @@ mod tests {
 
     #[test]
     fn relative_paths_like_relpath() {
-        let repo = Path::new("/home/u/ginux");
+        let repo = Path::new("/home/u/linox");
         assert_eq!(
-            relative_path(Path::new("/home/u/ginux/tests/ltp/x.list"), repo),
+            relative_path(Path::new("/home/u/linox/tests/ltp/x.list"), repo),
             Path::new("tests/ltp/x.list")
         );
         assert_eq!(

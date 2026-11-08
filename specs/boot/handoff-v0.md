@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Define the minimum contract by which the Ginux UEFI component ends firmware boot services and transfers control to the kernel. This contract is intentionally small and will remain experimental until the kernel's physical-memory and virtual-address models are specified.
+Define the minimum contract by which the Linox UEFI component ends firmware boot services and transfers control to the kernel. This contract is intentionally small and will remain experimental until the kernel's physical-memory and virtual-address models are specified.
 
 ## Entry
 

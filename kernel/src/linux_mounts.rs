@@ -538,7 +538,7 @@ pub(crate) fn bind(
             };
             (mount.superblock, bound)
         }
-        None if kernel.filesystem == b"ginux-root" => (0, Some(copy(source)?)),
+        None if kernel.filesystem == b"linox-root" => (0, Some(copy(source)?)),
         None => (0, None),
     };
     let (filesystem, mount_source, root, flags, device, sharing) = match covering {

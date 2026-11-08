@@ -364,7 +364,7 @@ fn linux_bind_memory(
         return Err(LINUX_EINVAL);
     }
     if flags & MPOL_MF_MOVE_ALL != 0
-        && !linux_has_capability(ginux_credentials::capability::SYS_NICE)
+        && !linux_has_capability(linox_credentials::capability::SYS_NICE)
     {
         return Err(LINUX_EPERM);
     }
@@ -535,7 +535,7 @@ fn linux_migrate_process_pages(
         }
     }
     if new & !LINUX_NODES_ONLINE != 0
-        && !linux_has_capability(ginux_credentials::capability::SYS_NICE)
+        && !linux_has_capability(linox_credentials::capability::SYS_NICE)
     {
         return Err(LINUX_EPERM);
     }
@@ -591,7 +591,7 @@ fn linux_move_process_pages(
         return Err(LINUX_EINVAL);
     }
     if flags & MPOL_MF_MOVE_ALL != 0
-        && !linux_has_capability(ginux_credentials::capability::SYS_NICE)
+        && !linux_has_capability(linox_credentials::capability::SYS_NICE)
     {
         return Err(LINUX_EPERM);
     }

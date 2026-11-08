@@ -1,9 +1,9 @@
 .text
 .balign 16
-.global ginux_packet_protocol_loop_producer_start
-.global ginux_packet_protocol_loop_producer_end
+.global linox_packet_protocol_loop_producer_start
+.global linox_packet_protocol_loop_producer_end
 
-ginux_packet_protocol_loop_producer_start:
+linox_packet_protocol_loop_producer_start:
     mov r12, rbx
     mov r14, rcx
     sub rsp, 0x90
@@ -90,4 +90,4 @@ ginux_packet_protocol_loop_producer_start:
     .byte 0x52, 0x54, 0x00, 0x12, 0x34, 0x56
     .byte 10, 0, 2, 15
 
-ginux_packet_protocol_loop_producer_end:
+linox_packet_protocol_loop_producer_end:

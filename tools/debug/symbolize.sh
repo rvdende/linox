@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Turns code addresses from a Ginux crash report into function names and
+# Turns code addresses from a Linox crash report into function names and
 # source lines.
 #
 # Usage: tools/debug/symbolize.sh IMAGE_BASE ADDRESS...
@@ -22,14 +22,14 @@ symbolizer=$(command -v llvm-symbolizer || command -v llvm-symbolizer-21 || true
 target_dir="$repo_root/target/symbolized"
 (
     cd "$repo_root"
-    GINUX_LINUX_PROBE_EXPORT="$repo_root/build/linux-probe.elf" \
-        GINUX_LINUX_DYNAMIC_EXPORT_DIR="$repo_root/build/linux-dynamic" \
+    LINOX_LINUX_PROBE_EXPORT="$repo_root/build/linux-probe.elf" \
+        LINOX_LINUX_DYNAMIC_EXPORT_DIR="$repo_root/build/linux-dynamic" \
         CARGO_TARGET_DIR="$target_dir" CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
         CARGO_PROFILE_RELEASE_STRIP=none \
-        cargo build --quiet --release --package ginux-boot --target x86_64-unknown-uefi
+        cargo build --quiet --release --package linox-boot --target x86_64-unknown-uefi
 )
 # llvm-symbolizer finds the PDB by the relative name recorded in the image,
-# so it runs from the deps directory against ../ginux-boot.efi.
+# so it runs from the deps directory against ../linox-boot.efi.
 deps="$target_dir/x86_64-unknown-uefi/release/deps"
 
 # The PE header's preferred base; addresses are rebased onto it.
@@ -39,4 +39,4 @@ shift
 for address in "$@"; do
     value=$((16#${address#0x}))
     printf '0x%x ' "$((value - loaded_base + pe_base))"
-done | (cd "$deps" && xargs "$symbolizer" --obj=../ginux-boot.efi --pretty-print --functions=linkage)
+done | (cd "$deps" && xargs "$symbolizer" --obj=../linox-boot.efi --pretty-print --functions=linkage)

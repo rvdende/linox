@@ -3,7 +3,7 @@
 **Status:** A measured Rust protocol service constructs and delegates one
 ICMPv4 echo reply between isolated ring-3 domains under QEMU/TCG.
 
-The memory-safe `ginux-protocol-state` builder first applies the complete v4
+The memory-safe `linox-protocol-state` builder first applies the complete v4
 Ethernet, IPv4, and ICMP echo-request validation without mutation. On success
 it swaps Ethernet and IPv4 endpoints, changes ICMP type 8 to type 0, preserves
 code, identifier, sequence, and payload, and recomputes both IPv4 and ICMP

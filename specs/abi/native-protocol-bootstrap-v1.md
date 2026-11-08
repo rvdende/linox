@@ -8,7 +8,7 @@ reserved bytes with a bounded packet count:
 
 | Offset | Width | Field |
 |---:|---:|---|
-| 0 | 8 | magic `GINUXPB0` |
+| 0 | 8 | magic `LINOXPB0` |
 | 8 | 2 | version `1` |
 | 10 | 2 | size `56` |
 | 12 | 4 | exact feature bits: packet consumer, Ethernet/ARP, and wait loop |

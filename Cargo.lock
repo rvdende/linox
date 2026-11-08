@@ -437,235 +437,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ginux-boot"
-version = "0.1.0"
-dependencies = [
- "ginux-kernel",
-]
-
-[[package]]
-name = "ginux-cgroup"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-command"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-controller-runtime"
-version = "0.1.0"
-dependencies = [
- "ginux-command",
- "ginux-native-abi",
-]
-
-[[package]]
-name = "ginux-credentials"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-deadline-heap"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-drm"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-ext2"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-image-store"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "ginux-kernel"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "font8x8",
- "ginux-cgroup",
- "ginux-credentials",
- "ginux-deadline-heap",
- "ginux-drm",
- "ginux-ext2",
- "ginux-image-store",
- "ginux-kernel-policy",
- "ginux-keyrings",
- "ginux-ktls",
- "ginux-landlock",
- "ginux-memory-areas",
- "ginux-native-abi",
- "ginux-oci",
- "ginux-oci-cache",
- "ginux-rtnetlink",
- "ginux-seccomp",
- "ginux-slab",
- "ginux-tty",
- "ginux-tun",
- "ginux-udplite",
- "ginux-usb-audio",
- "ginux-usb-hid",
- "ginux-virtio-gpu",
- "ginux-volume-format",
- "ginux-volume-service",
- "miniz_oxide",
- "smoltcp",
-]
-
-[[package]]
-name = "ginux-kernel-policy"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-keyrings"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-ktls"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
-]
-
-[[package]]
-name = "ginux-landlock"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-manifest-tool"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "ginux-oci",
- "ginux-oci-cache",
- "ginux-volume-format",
- "ginux-volume-service",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "ginux-memory-areas"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-native-abi"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-network-service-runtime"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "embedded-io",
- "embedded-tls",
- "ginux-native-abi",
- "ginux-oci",
- "heapless",
- "p256",
- "rand_chacha",
- "rand_core",
- "smoltcp",
-]
-
-[[package]]
-name = "ginux-oci"
-version = "0.1.0"
-dependencies = [
- "heapless",
- "serde",
- "serde-json-core",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "ginux-oci-cache"
-version = "0.1.0"
-dependencies = [
- "ginux-oci",
-]
-
-[[package]]
-name = "ginux-protocol-service-runtime"
-version = "0.1.0"
-dependencies = [
- "ginux-native-abi",
- "ginux-protocol-state",
-]
-
-[[package]]
-name = "ginux-protocol-state"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-rtnetlink"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-runtime-memory"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-seccomp"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-slab"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-tty"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-tun"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-udplite"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-usb-audio"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-usb-hid"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-virtio-gpu"
-version = "0.1.0"
-
-[[package]]
-name = "ginux-volume-format"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "ginux-volume-service"
-version = "0.1.0"
-dependencies = [
- "ginux-volume-format",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "ginux-volume-service-runtime"
-version = "0.1.0"
-dependencies = [
- "ginux-native-abi",
- "ginux-volume-format",
- "ginux-volume-service",
-]
-
-[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,6 +523,235 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "linox-boot"
+version = "0.1.0"
+dependencies = [
+ "linox-kernel",
+]
+
+[[package]]
+name = "linox-cgroup"
+version = "0.1.0"
+
+[[package]]
+name = "linox-command"
+version = "0.1.0"
+
+[[package]]
+name = "linox-controller-runtime"
+version = "0.1.0"
+dependencies = [
+ "linox-command",
+ "linox-native-abi",
+]
+
+[[package]]
+name = "linox-credentials"
+version = "0.1.0"
+
+[[package]]
+name = "linox-deadline-heap"
+version = "0.1.0"
+
+[[package]]
+name = "linox-drm"
+version = "0.1.0"
+
+[[package]]
+name = "linox-ext2"
+version = "0.1.0"
+
+[[package]]
+name = "linox-image-store"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "linox-kernel"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "font8x8",
+ "linox-cgroup",
+ "linox-credentials",
+ "linox-deadline-heap",
+ "linox-drm",
+ "linox-ext2",
+ "linox-image-store",
+ "linox-kernel-policy",
+ "linox-keyrings",
+ "linox-ktls",
+ "linox-landlock",
+ "linox-memory-areas",
+ "linox-native-abi",
+ "linox-oci",
+ "linox-oci-cache",
+ "linox-rtnetlink",
+ "linox-seccomp",
+ "linox-slab",
+ "linox-tty",
+ "linox-tun",
+ "linox-udplite",
+ "linox-usb-audio",
+ "linox-usb-hid",
+ "linox-virtio-gpu",
+ "linox-volume-format",
+ "linox-volume-service",
+ "miniz_oxide",
+ "smoltcp",
+]
+
+[[package]]
+name = "linox-kernel-policy"
+version = "0.1.0"
+
+[[package]]
+name = "linox-keyrings"
+version = "0.1.0"
+
+[[package]]
+name = "linox-ktls"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+]
+
+[[package]]
+name = "linox-landlock"
+version = "0.1.0"
+
+[[package]]
+name = "linox-manifest-tool"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "linox-oci",
+ "linox-oci-cache",
+ "linox-volume-format",
+ "linox-volume-service",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "linox-memory-areas"
+version = "0.1.0"
+
+[[package]]
+name = "linox-native-abi"
+version = "0.1.0"
+
+[[package]]
+name = "linox-network-service-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "embedded-io",
+ "embedded-tls",
+ "heapless",
+ "linox-native-abi",
+ "linox-oci",
+ "p256",
+ "rand_chacha",
+ "rand_core",
+ "smoltcp",
+]
+
+[[package]]
+name = "linox-oci"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "serde",
+ "serde-json-core",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "linox-oci-cache"
+version = "0.1.0"
+dependencies = [
+ "linox-oci",
+]
+
+[[package]]
+name = "linox-protocol-service-runtime"
+version = "0.1.0"
+dependencies = [
+ "linox-native-abi",
+ "linox-protocol-state",
+]
+
+[[package]]
+name = "linox-protocol-state"
+version = "0.1.0"
+
+[[package]]
+name = "linox-rtnetlink"
+version = "0.1.0"
+
+[[package]]
+name = "linox-runtime-memory"
+version = "0.1.0"
+
+[[package]]
+name = "linox-seccomp"
+version = "0.1.0"
+
+[[package]]
+name = "linox-slab"
+version = "0.1.0"
+
+[[package]]
+name = "linox-tty"
+version = "0.1.0"
+
+[[package]]
+name = "linox-tun"
+version = "0.1.0"
+
+[[package]]
+name = "linox-udplite"
+version = "0.1.0"
+
+[[package]]
+name = "linox-usb-audio"
+version = "0.1.0"
+
+[[package]]
+name = "linox-usb-hid"
+version = "0.1.0"
+
+[[package]]
+name = "linox-virtio-gpu"
+version = "0.1.0"
+
+[[package]]
+name = "linox-volume-format"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "linox-volume-service"
+version = "0.1.0"
+dependencies = [
+ "linox-volume-format",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "linox-volume-service-runtime"
+version = "0.1.0"
+dependencies = [
+ "linox-native-abi",
+ "linox-volume-format",
+ "linox-volume-service",
+]
 
 [[package]]
 name = "managed"

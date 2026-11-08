@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Landlock, Linux's unprivileged sandboxing, as Ginux enforces it: the
+//! Landlock, Linux's unprivileged sandboxing, as Linox enforces it: the
 //! rulesets a process builds (`landlock_create_ruleset`,
 //! `landlock_add_rule`), the domain of stacked layers it restricts itself
 //! to (`landlock_restrict_self`), and the questions the kernel asks before

@@ -1,14 +1,14 @@
 # Linux x86-64 Userspace Compatibility Matrix
 
 This document is the compatibility ledger for running unmodified Linux x86-64
-userspace on Ginux. It records the target contract, the current implementation,
+userspace on Linox. It records the target contract, the current implementation,
 and the remaining work. It is an index, not a substitute for the detailed
 behavioral specifications and tests.
 
 ## Contract and authorities
 
 There is no single document that defines the complete Linux userspace ABI.
-Ginux uses this authority order:
+Linox uses this authority order:
 
 1. The pinned [Linux v6.12 x86-64 syscall table](https://github.com/torvalds/linux/blob/v6.12/arch/x86/entry/syscalls/syscall_64.tbl)
    defines native x86-64 syscall names and numbers.
@@ -187,13 +187,13 @@ kept. File-backed, shared, and secret mappings are rejected with `EINVAL`.
 first; it is not inherited by children. Boot verification writes, frees and
 confirms the page and its contents stay.
 `MADV_DONTNEED_LOCKED` is supported by both `madvise` and `process_madvise`.
-Because Ginux currently has no separate `mlock` or reclaim state, it follows
+Because Linox currently has no separate `mlock` or reclaim state, it follows
 the same immediate discard and zero-fill-on-demand path as `MADV_DONTNEED`.
 Boot verification covers direct advice and a multi-vector process operation,
 including release of physical backing and the subsequent zero-filled read.
 The reversible VMA hints `MADV_MERGEABLE`, `MADV_UNMERGEABLE`,
 `MADV_HUGEPAGE`, `MADV_NOHUGEPAGE`, `MADV_DONTDUMP`, and `MADV_DODUMP` are
-accepted after validating the complete mapped range. Ginux currently uses
+accepted after validating the complete mapped range. Linox currently uses
 base pages, does not deduplicate memory across domains, and has no core-dump
 engine, so these hints do not alter backing or weaken isolation. Mergeability
 hints are restricted to private anonymous mappings. Boot verification covers
@@ -208,7 +208,7 @@ physical allocation. Boot verification seals a writable anonymous mapping and
 exercises each prohibited mutation; sealed mappings remain owned until process
 teardown releases them.
 `MADV_COLD` and `MADV_PAGEOUT` validate mapped ranges and are accepted through
-both `madvise` and `process_madvise`. They are best-effort no-ops while Ginux
+both `madvise` and `process_madvise`. They are best-effort no-ops while Linox
 has neither swap nor a page-reclaim queue; secret mappings remain rejected and
 unmapped ranges report `ENOMEM`.
 Anonymous `mmap` accepts `MAP_POPULATE` and prefaults demand-backed pages using
@@ -216,7 +216,7 @@ the same access-aware path. As on Linux, inability to prefault does not fail
 the mapping, and `MAP_NONBLOCK` suppresses the prefault work. Boot verification
 distinguishes physically populated pages from the nonblocking reserved form.
 `MAP_EXECUTABLE` is accepted as Linux's ignored compatibility flag.
-`MAP_LOCKED` performs best-effort prefaulting; because Ginux has no swap or
+`MAP_LOCKED` performs best-effort prefaulting; because Linox has no swap or
 page-reclaim path, successfully backed pages remain resident without separate
 locking metadata. The verifier covers both flags on an anonymous mapping.
 Runtime `mincore` now queries every mapped VMA rather than only the dynamic
@@ -260,7 +260,7 @@ bad pointers, and Linux error ordering.
 RPM-based images that omit `/etc/rpm/platform` receive the standard
 architecture/personality value `x86_64-linux` in their domain-local overlay.
 This lets RPM select Linux packages while `uname` continues to identify the
-actual kernel as Ginux; an image-provided platform file is never replaced.
+actual kernel as Linox; an image-provided platform file is never replaced.
 Pipe and zero-copy boundaries convert `pipe2`, `splice`, `tee`, `vmsplice`, and
 `copy_file_range` descriptors and flag words from their Linux 32-bit types.
 Boot verification creates a close-on-exec pipe and exercises zero-length
@@ -275,7 +275,7 @@ or write does unless `SPLICE_F_NONBLOCK` or `O_NONBLOCK` makes them fail
 with EAGAIN; filling a pipe with no reader raises SIGPIPE. Splicing from a
 directory or an unconnected Unix socket is EINVAL.
 Keys (`add_key`, `request_key`, `keyctl`) live in the host-tested
-`ginux-keyrings` crate, one set per domain: "user", "logon" and "keyring"
+`linox-keyrings` crate, one set per domain: "user", "logon" and "keyring"
 keys with owners, permission masks, possession, quotas, timeouts,
 revocation and invalidation; the thread, process, session, user and
 user-session keyrings, shared at fork and thread creation and dropped at
@@ -317,7 +317,7 @@ register bits at each boundary.
 x86-64 function-2 compatibility read, including its 128-byte maximum,
 zero-fill behavior, short reads, zero-length handling, bad-pointer errors, and
 32-bit function selector conversion. Boot verification covers each boundary.
-Functions 1 and `0x11` remain unsupported until Ginux has per-mm LDT storage,
+Functions 1 and `0x11` remain unsupported until Linox has per-mm LDT storage,
 safe descriptor validation, LDTR loading, fork inheritance, and context-switch
 integration; segmented 16/32-bit execution is therefore still outside the
 current long-mode profile.
@@ -326,7 +326,7 @@ current long-mode profile.
 process-name access, dumpability state, statistical timing, strict-seccomp
 entry and mode queries, and irreversible `no_new_privs`. Dumpability is
 process-local, inherited across fork, retained across the current
-non-credential-changing exec path, and restored when Ginux switches between
+non-credential-changing exec path, and restored when Linox switches between
 live processes. Boot verification covers valid transitions, invalid modes,
 unused-argument behavior, userspace faults, dirty upper register bits, and
 state restoration. `PR_SET_CHILD_SUBREAPER` marks a process whose
@@ -362,7 +362,7 @@ names.
 
 `arch_prctl(ARCH_SET_FS/ARCH_GET_FS)` treats the FS base as opaque architectural
 thread state rather than requiring it to identify a mapped kernel-owned TLS
-extent. Any address in Ginux's x86-64 userspace range, including zero and an
+extent. Any address in Linox's x86-64 userspace range, including zero and an
 unmapped address, is accepted; an address at or above the task boundary is
 rejected with `EPERM`. Optional owned TLS allocation metadata remains separate
 and survives an FS-base change. The option follows its Linux `int` width, and
@@ -374,8 +374,8 @@ remain unsupported, so `arch_prctl` remains Partial.
 The ring-3 controller directly verifies its Linux PID/TID, parent,
 process-group, session, UID/GID, supplementary-group, scheduler-yield, and
 `uname` contracts, including invalid PID, count, and userspace-address errors.
-The Linux-compatible `uname` syscall identifies the kernel as `Ginux`; it does
-not claim that Ginux is Linux. Programs may separately append a compile-time
+The Linux-compatible `uname` syscall identifies the kernel as `Linox`; it does
+not claim that Linox is Linux. Programs may separately append a compile-time
 operating-system label (for example, Alpine BusyBox prints `Linux` for `-o`),
 which is userspace output rather than a field supplied by the kernel.
 It also directly exercises realtime and monotonic `clock_gettime`,
@@ -396,7 +396,7 @@ remain Partial.
 previous value on a successful change, implements the `0xffffffff` query, and
 converts the request through Linux's 32-bit interface. `PER_LINUX` and the
 `UNAME26` flag are supported; `UNAME26` changes `uname` release reporting from
-`6.12.0-ginux.0.1` to `2.6.52.0-ginux.0.1`. State is inherited across fork,
+`6.12.0-linox.0.1` to `2.6.52.0-linox.0.1`. State is inherited across fork,
 retained across exec, and restored across process switches. Boot verification
 covers transitions, dirty upper register bits, invalid personalities,
 observable uname output, and state restoration. Flags that require different
@@ -431,8 +431,8 @@ Partial.
 readable without changing system time: realtime, monotonic, process/thread CPU,
 monotonic raw, realtime/monotonic coarse, boottime, realtime/boottime alarm,
 and TAI. Clock IDs and `clock_nanosleep` flags use Linux's 32-bit UAPI
-conversion rules. Coarse clocks use and report the Ginux 100 Hz clock-tick resolution;
-boottime equals monotonic because Ginux does not yet suspend, and TAI equals
+conversion rules. Coarse clocks use and report the Linox 100 Hz clock-tick resolution;
+boottime equals monotonic because Linox does not yet suspend, and TAI equals
 realtime until a trusted time service supplies a TAI offset. Dynamic clock IDs
 and exact multi-process/thread CPU accounting remain pending, so both syscalls
 remain Partial.
@@ -449,7 +449,7 @@ process/thread semantics cover the complete Linux contract.
 `GRND_INSECURE`, rejects unknown flags and the invalid
 `GRND_RANDOM|GRND_INSECURE` combination, preserves a successful partial copy
 when a later user range faults, and is directly exercised by the ring-3
-controller. Ginux currently treats hardware RNG availability as its ready
+controller. Linox currently treats hardware RNG availability as its ready
 entropy source; a mixed, reseeding kernel CSPRNG and interruptible large reads
 remain pending, so the syscall remains Partial.
 
@@ -466,7 +466,7 @@ weighting remain pending; admitted process priorities currently select the
 highest-priority ready process first. Both syscalls therefore remain Partial.
 
 `getrlimit` now accepts every Linux resource number from `RLIMIT_CPU` through
-`RLIMIT_RTTIME`. Finite limits reflect Ginux's actual process, descriptor,
+`RLIMIT_RTTIME`. Finite limits reflect Linox's actual process, descriptor,
 signal, nice, and realtime-priority boundaries; resources without a present
 quota report infinity. The ring-3 controller verifies the full query range,
 ordering, and error behavior. Linux programs can lower and restore the soft
@@ -973,7 +973,7 @@ NAME|NUMBER` select detailed results. The command name is intentionally
 environment-specific so future compatibility profiles, such as BSD, can have
 independent tests and contracts.
 
-For grouped interfaces, PASS reports that the current bounded Ginux profile was
+For grouped interfaces, PASS reports that the current bounded Linox profile was
 verified during boot; it does not upgrade that interface to complete Linux
 compatibility. For individual syscalls, only a complete runtime conformance
 probe may print PASS. Partial or missing behavior prints FAIL, and deliberate

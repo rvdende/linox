@@ -1,5 +1,5 @@
 [package]
-name = "ginux-fuzz"
+name = "linox-fuzz"
 version = "0.0.0"
 publish = false
 license = "Apache-2.0"
@@ -10,12 +10,12 @@ cargo-fuzz = true
 
 [dependencies]
 # In-repo path dependencies: the harnesses exercise the parser crates exactly
-# as the kernel consumes them. ginux-oci drops default features and re-adds
+# as the kernel consumes them. linox-oci drops default features and re-adds
 # "sha256" explicitly (the kernel-faithful feature set; see crates/oci
 # `default = ["sha256"]`).
-ginux-oci = { path = "../crates/oci", default-features = false, features = ["sha256"] }
-ginux-protocol-state = { path = "../crates/protocol-state" }
-ginux-volume-format = { path = "../crates/volume-format" }
+linox-oci = { path = "../crates/oci", default-features = false, features = ["sha256"] }
+linox-protocol-state = { path = "../crates/protocol-state" }
+linox-volume-format = { path = "../crates/volume-format" }
 
 # Pinned to the exact version used in the verification runs recorded on
 # issue #58 (cargo-fuzz 0.13.2; see fuzz/README.md).

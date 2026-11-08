@@ -65,7 +65,7 @@ memory limit, while host overlay setup retains kernel-owned allocation.
 - `make check` -> passed, including formatting, architecture, unsafe inventory,
   and workspace unit checks.
 - `make test` -> passed the complete two-vCPU QEMU and Linux runtime suite; the
-  new deterministic marker is `ginux: Linux overlay domain quota lifecycle
+  new deterministic marker is `linox: Linux overlay domain quota lifecycle
   enforced`.
 - Source inspection after implementation -> node, mapping, data, and xattr
   frames all use the same fail-closed domain policy; every rollback and teardown

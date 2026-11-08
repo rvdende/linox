@@ -23,7 +23,7 @@ probe:
 - broadcast destination `ff:ff:ff:ff:ff:ff`;
 - pinned source `52:54:00:12:34:56`;
 - experimental EtherType `0x88b5`; and
-- payload `GINUX`.
+- payload `LINOX`.
 
 Distinct canaries bound the byte immediately before and after the descriptor
 range. The available ring publishes only descriptor zero. After the queue is

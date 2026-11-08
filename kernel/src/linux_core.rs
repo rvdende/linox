@@ -66,7 +66,7 @@ pub(crate) struct Process<'a> {
 
 /// The core file name `pattern` gives `process`, with `.PID` added when
 /// `uses_pid` (core_uses_pid) and the pattern names no pid; None for a
-/// pattern that pipes the core to a program ("|..."), which Ginux does
+/// pattern that pipes the core to a program ("|..."), which Linox does
 /// not run.
 pub(crate) fn file_name(pattern: &[u8], uses_pid: bool, process: &Process) -> Option<Vec<u8>> {
     if pattern.first() == Some(&b'|') {

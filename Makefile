@@ -3,31 +3,31 @@ SHELL := /bin/bash
 TARGET := x86_64-unknown-uefi
 PROFILE ?= release
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
-EFI_SOURCE := target/$(TARGET)/$(PROFILE)/ginux-boot.efi
+EFI_SOURCE := target/$(TARGET)/$(PROFILE)/linox-boot.efi
 ESP_DIR := build/esp
 EFI_DESTINATION := $(ESP_DIR)/EFI/BOOT/BOOTX64.EFI
 LINUX_PROBE := build/linux-probe.elf
 LINUX_DYNAMIC_DIR := build/linux-dynamic
-VOLUME_SERVICE := target/x86_64-unknown-none/$(PROFILE)/ginux-volume-service-runtime
-CONTROLLER_RUNTIME := target/x86_64-unknown-none/$(PROFILE)/ginux-controller-runtime
-NETWORK_SERVICE := target/x86_64-unknown-none/$(PROFILE)/ginux-network-service-runtime
-PROTOCOL_SERVICE := target/x86_64-unknown-none/$(PROFILE)/ginux-protocol-service-runtime
+VOLUME_SERVICE := target/x86_64-unknown-none/$(PROFILE)/linox-volume-service-runtime
+CONTROLLER_RUNTIME := target/x86_64-unknown-none/$(PROFILE)/linox-controller-runtime
+NETWORK_SERVICE := target/x86_64-unknown-none/$(PROFILE)/linox-network-service-runtime
+PROTOCOL_SERVICE := target/x86_64-unknown-none/$(PROFILE)/linox-protocol-service-runtime
 INITRAMFS := build/initramfs-v0.cpio
 SYSTEM_PROFILE := profiles/minimal-system-v0/profile.tsv
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor manifest system-image test-alpine test-rocky-shell test-rocky-dnf test-multi-domain test-multi-domain-detached test-linux-abi test-linux-runtime test-storage test-oci-cache test-smp test-rocky-smp-futex test-rocky-smp-shared-page test-rocky-smp-thread-context probe-rocky-systemd test-rocky-systemd test-rocky-detached test-domain-responsiveness benchmark-rocky-systemd benchmark-prepare-linux benchmark-prepare-ginux benchmark-linux-comparison benchmark-ginux-boot benchmark-boot-comparison benchmark-ginux-sysbench benchmark-compare benchmark-topology-matrix benchmark-topology-compare profile-rocky-systemd rocky-image rocky-image-check linux-probe controller-runtime network-service protocol-service volume-service abi-conformance architecture-check linux-compat-check build build-verification build-linux-profile run reset-storage test-qemu-smoke test-efi-load-above-4g boot-media test-boot-media test-hardware-profile test-rust-workloads test-desktop test-desktop-virtio-gpu test-multicore test-multithread test-bigmem test-quick test-rust-userland rust-rootfs userland userland-check ltp test-ltp ltp-check test test-c1 test-c2 fmt gate clean
+.PHONY: help doctor manifest system-image test-alpine test-rocky-shell test-rocky-dnf test-multi-domain test-multi-domain-detached test-linux-abi test-linux-runtime test-storage test-oci-cache test-smp test-rocky-smp-futex test-rocky-smp-shared-page test-rocky-smp-thread-context probe-rocky-systemd test-rocky-systemd test-rocky-detached test-domain-responsiveness benchmark-rocky-systemd benchmark-prepare-linux benchmark-prepare-linox benchmark-linux-comparison benchmark-linox-boot benchmark-boot-comparison benchmark-linox-sysbench benchmark-compare benchmark-topology-matrix benchmark-topology-compare profile-rocky-systemd rocky-image rocky-image-check linux-probe controller-runtime network-service protocol-service volume-service abi-conformance architecture-check linux-compat-check build build-verification build-linux-profile run reset-storage test-qemu-smoke test-efi-load-above-4g boot-media test-boot-media test-hardware-profile test-rust-workloads test-desktop test-desktop-virtio-gpu test-multicore test-multithread test-bigmem test-quick test-rust-userland rust-rootfs userland userland-check ltp test-ltp ltp-check test test-c1 test-c2 fmt gate clean
 
 help:
-	@echo "Ginux development targets"
+	@echo "Linox development targets"
 	@echo
 	@echo "  make doctor  Check the local development prerequisites"
 	@echo "  make manifest Regenerate the signed development boot inputs"
 	@echo "  make system-image Build the pinned minimal system-container candidate"
 	@echo "  make test-alpine Download Alpine at runtime and verify its real shell in QEMU"
 	@echo "  make test-rust-workloads Build and run Rust stress programs and a serde cargo build in rust:alpine"
-	@echo "  make userland            Build the Rust Wayland desktop (ginux-wm, ginux-term) for musl"
+	@echo "  make userland            Build the Rust Wayland desktop (linox-wm, linox-term) for musl"
 	@echo "  make userland-check      Lint and test the Rust Wayland desktop on the host"
 	@echo "  make rust-rootfs         Build the all-Rust root filesystem embedded as image=builtin://rust"
 	@echo "  make test-rust-userland  Boot a builtin://rust domain and run its brush/uutils test"
@@ -52,11 +52,11 @@ help:
 	@echo "  make benchmark-boot-comparison Compare matched QEMU-to-multi-user boot times"
 	@echo "  make benchmark-prepare-linux Prepare the pinned Rocky Linux comparison image"
 	@echo "  make benchmark-linux-comparison Run Rocky Linux boot and sysbench measurements"
-	@echo "  make benchmark-prepare-ginux Build and seed the matched Ginux sysbench image"
-	@echo "  make benchmark-ginux-sysbench Run the matching workload under Ginux"
+	@echo "  make benchmark-prepare-linox Build and seed the matched Linox sysbench image"
+	@echo "  make benchmark-linox-sysbench Run the matching workload under Linox"
 	@echo "  make benchmark-compare Verify matched benchmark inputs and show result paths"
-	@echo "  make benchmark-topology-matrix Compare Linux/Ginux at 1, 2, and 4 vCPUs"
-	@echo "  make profile-rocky-systemd   Profile Rocky init inside the Ginux kernel"
+	@echo "  make benchmark-topology-matrix Compare Linux/Linox at 1, 2, and 4 vCPUs"
+	@echo "  make profile-rocky-systemd   Profile Rocky init inside the Linox kernel"
 	@echo "  make rocky-image Fetch and export the pinned Rocky 10 x86-64 system image"
 	@echo "  make rocky-image-check Verify the prepared Rocky image without downloading"
 	@echo "  make linux-probe Build the static probe and dynamic Linux ELF fixtures"
@@ -70,7 +70,7 @@ help:
 	@echo "  make test-linux-abi     Run the complete controller Linux ABI report"
 	@echo "  make test-linux-runtime Verify ELF, loader, PIE, TLS, heap, and memory behavior"
 	@echo "  make build   Build the x86-64 UEFI image"
-	@echo "  make run     Build Ginux and boot it in headless QEMU"
+	@echo "  make run     Build Linox and boot it in headless QEMU"
 	@echo "  make reset-storage Delete the default persistent volume"
 	@echo "  make boot-media Build a UEFI hybrid ISO and a raw USB image in build/media"
 	@echo "  make test-boot-media Boot the ISO and USB image in QEMU as CD-ROM and USB stick"
@@ -96,7 +96,7 @@ doctor:
 
 manifest: linux-probe controller-runtime network-service protocol-service volume-service
 	@mkdir -p "$(dir $(INITRAMFS))"
-	@cargo run --quiet --package ginux-manifest-tool -- boot/manifest-v0.conf control-plane/bootstrap.hex "$(INITRAMFS)" "$(LINUX_DYNAMIC_DIR)" "$(CONTROLLER_RUNTIME)" "$(NETWORK_SERVICE)" "$(PROTOCOL_SERVICE)" "$(VOLUME_SERVICE)" "$(SYSTEM_PROFILE)" boot/efi/src/generated_boot.rs
+	@cargo run --quiet --package linox-manifest-tool -- boot/manifest-v0.conf control-plane/bootstrap.hex "$(INITRAMFS)" "$(LINUX_DYNAMIC_DIR)" "$(CONTROLLER_RUNTIME)" "$(NETWORK_SERVICE)" "$(PROTOCOL_SERVICE)" "$(VOLUME_SERVICE)" "$(SYSTEM_PROFILE)" boot/efi/src/generated_boot.rs
 	@test -s "$(INITRAMFS)"
 
 system-image: manifest
@@ -110,13 +110,13 @@ rocky-image-check:
 
 linux-probe:
 	@mkdir -p "$(dir $(LINUX_PROBE))"
-	@GINUX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" GINUX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package ginux-kernel --target $(TARGET) $(CARGO_PROFILE_FLAG)
+	@LINOX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" LINOX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package linox-kernel --target $(TARGET) $(CARGO_PROFILE_FLAG)
 	@test -f "$(LINUX_PROBE)"
 	@test -f "$(LINUX_DYNAMIC_DIR)/linux-linked-main.elf"
 	@test -f "$(LINUX_DYNAMIC_DIR)/linux-linked-graph-main.elf"
-	@test -f "$(LINUX_DYNAMIC_DIR)/libginux.so"
-	@test -f "$(LINUX_DYNAMIC_DIR)/libginux-aux.so"
-	@test -f "$(LINUX_DYNAMIC_DIR)/ld-ginux.so"
+	@test -f "$(LINUX_DYNAMIC_DIR)/liblinox.so"
+	@test -f "$(LINUX_DYNAMIC_DIR)/liblinox-aux.so"
+	@test -f "$(LINUX_DYNAMIC_DIR)/ld-linox.so"
 	@test -f "$(LINUX_DYNAMIC_DIR)/linux-exec-second.elf"
 	@test -f "$(LINUX_DYNAMIC_DIR)/linux-signal-probe.elf"
 	@test -f "$(LINUX_DYNAMIC_DIR)/linux-conformance.elf"
@@ -124,22 +124,22 @@ linux-probe:
 	@echo "Built $(LINUX_PROBE) and $(LINUX_DYNAMIC_DIR)"
 
 volume-service:
-	@cargo build --package ginux-volume-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
+	@cargo build --package linox-volume-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
 	@test -f "$(VOLUME_SERVICE)"
 	@echo "Built $(VOLUME_SERVICE)"
 
 controller-runtime:
-	@cargo build --package ginux-controller-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
+	@cargo build --package linox-controller-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
 	@test -f "$(CONTROLLER_RUNTIME)"
 	@echo "Built $(CONTROLLER_RUNTIME)"
 
 network-service:
-	@cargo build --package ginux-network-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
+	@cargo build --package linox-network-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
 	@test -f "$(NETWORK_SERVICE)"
 	@echo "Built $(NETWORK_SERVICE)"
 
 protocol-service:
-	@cargo build --package ginux-protocol-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
+	@cargo build --package linox-protocol-service-runtime --target x86_64-unknown-none $(CARGO_PROFILE_FLAG)
 	@test -f "$(PROTOCOL_SERVICE)"
 	@echo "Built $(PROTOCOL_SERVICE)"
 
@@ -149,22 +149,22 @@ abi-conformance:
 	@echo "Native service ABI C conformance passed"
 
 build: manifest
-	@echo "Building Ginux for $(TARGET) ($(PROFILE))"
-	@GINUX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" GINUX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package ginux-boot --target $(TARGET) $(CARGO_PROFILE_FLAG)
+	@echo "Building Linox for $(TARGET) ($(PROFILE))"
+	@LINOX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" LINOX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package linox-boot --target $(TARGET) $(CARGO_PROFILE_FLAG)
 	@mkdir -p "$(dir $(EFI_DESTINATION))"
 	@cp "$(EFI_SOURCE)" "$(EFI_DESTINATION)"
 	@echo "Built $(EFI_DESTINATION)"
 
 build-verification: manifest
-	@echo "Building Ginux verification boot for $(TARGET) ($(PROFILE))"
-	@GINUX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" GINUX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package ginux-boot --features verification-boot --target $(TARGET) $(CARGO_PROFILE_FLAG)
+	@echo "Building Linox verification boot for $(TARGET) ($(PROFILE))"
+	@LINOX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" LINOX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package linox-boot --features verification-boot --target $(TARGET) $(CARGO_PROFILE_FLAG)
 	@mkdir -p "$(dir $(EFI_DESTINATION))"
 	@cp "$(EFI_SOURCE)" "$(EFI_DESTINATION)"
 	@echo "Built verification image $(EFI_DESTINATION)"
 
 build-linux-profile: manifest
-	@echo "Building Ginux Linux boot profiler for $(TARGET) ($(PROFILE))"
-	@GINUX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" GINUX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package ginux-boot --features linux-boot-profile --target $(TARGET) $(CARGO_PROFILE_FLAG)
+	@echo "Building Linox Linux boot profiler for $(TARGET) ($(PROFILE))"
+	@LINOX_LINUX_PROBE_EXPORT="$(abspath $(LINUX_PROBE))" LINOX_LINUX_DYNAMIC_EXPORT_DIR="$(abspath $(LINUX_DYNAMIC_DIR))" cargo build --package linox-boot --features linux-boot-profile --target $(TARGET) $(CARGO_PROFILE_FLAG)
 	@mkdir -p "$(dir $(EFI_DESTINATION))"
 	@cp "$(EFI_SOURCE)" "$(EFI_DESTINATION)"
 	@echo "Built profiling image $(EFI_DESTINATION)"
@@ -189,21 +189,21 @@ probe-rocky-systemd: build
 
 test-rocky-systemd: build
 	@tests/qemu/rocky-systemd.sh
-	@GINUX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
-	@GINUX_ROCKY_START_MODE=detached-return GINUX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
+	@LINOX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
+	@LINOX_ROCKY_START_MODE=detached-return LINOX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
 
 test-rocky-detached: build
-	@GINUX_ROCKY_START_MODE=detached-return GINUX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
+	@LINOX_ROCKY_START_MODE=detached-return LINOX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
 
 test-domain-responsiveness: build
-	@GINUX_ROCKY_START_MODE=responsive GINUX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
+	@LINOX_ROCKY_START_MODE=responsive LINOX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
 
 benchmark-rocky-systemd: build
 	@accelerator="$${QEMU_ACCEL:-$$(source tools/qemu/common.sh; default_accelerator)}"; \
 	if [[ "$$accelerator" == kvm ]]; then budget=3000; else budget=; fi; \
 	echo "Benchmarking Rocky systemd with QEMU/$$accelerator$${budget:+ (budget: $${budget} ms)}"; \
-	GINUX_VERIFY_LOGIN_SHELL=1 GINUX_REQUIRE_OCI_CACHE_HIT=1 \
-	GINUX_MAX_LINUX_INIT_MS="$$budget" tests/qemu/rocky-systemd.sh
+	LINOX_VERIFY_LOGIN_SHELL=1 LINOX_REQUIRE_OCI_CACHE_HIT=1 \
+	LINOX_MAX_LINUX_INIT_MS="$$budget" tests/qemu/rocky-systemd.sh
 
 benchmark-prepare-linux:
 	@tools/benchmarks/prepare-rocky-linux.sh
@@ -211,19 +211,19 @@ benchmark-prepare-linux:
 benchmark-linux-comparison:
 	@tools/benchmarks/run-rocky-linux.sh
 
-benchmark-prepare-ginux:
-	@tools/benchmarks/prepare-ginux-sysbench.sh
+benchmark-prepare-linox:
+	@tools/benchmarks/prepare-linox-sysbench.sh
 
-benchmark-ginux-boot: build
-	@tools/benchmarks/run-ginux-boot.sh
+benchmark-linox-boot: build
+	@tools/benchmarks/run-linox-boot.sh
 
 benchmark-boot-comparison: build benchmark-prepare-linux
 	@BENCHMARK_BOOT_ONLY=1 tools/benchmarks/run-rocky-linux.sh
-	@tools/benchmarks/run-ginux-boot.sh
+	@tools/benchmarks/run-linox-boot.sh
 	@tools/benchmarks/summarize-boot.sh
 
-benchmark-ginux-sysbench: build
-	@tools/benchmarks/run-ginux.sh
+benchmark-linox-sysbench: build
+	@tools/benchmarks/run-linox.sh
 
 benchmark-compare:
 	@tools/benchmarks/compare.sh
@@ -235,7 +235,7 @@ benchmark-topology-compare:
 	@tools/benchmarks/summarize-topology-matrix.py
 
 profile-rocky-systemd: build-linux-profile
-	@GINUX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
+	@LINOX_REQUIRE_OCI_CACHE_HIT=1 tests/qemu/rocky-systemd.sh
 
 run: build
 	@tools/qemu/run.sh
@@ -275,7 +275,7 @@ ltp:
 # LTP_ARGS passes options to tests/qemu/ltp.sh (e.g. LTP_ARGS='-- -q');
 # see docs/LTP.md.
 test-ltp: build
-	@GINUX_ESP_DIR="$${GINUX_ESP_DIR:-$(abspath $(ESP_DIR))}" tests/qemu/ltp.sh $(LTP_ARGS)
+	@LINOX_ESP_DIR="$${LINOX_ESP_DIR:-$(abspath $(ESP_DIR))}" tests/qemu/ltp.sh $(LTP_ARGS)
 
 # The LTP harness's own checks: formatting, clippy and its unit tests.
 ltp-check:
@@ -292,7 +292,7 @@ test-desktop: rust-rootfs build
 # The same desktop with a virtio-gpu as the only display adapter, in a mode
 # the host picks (not the firmware's 1280x800).
 test-desktop-virtio-gpu: rust-rootfs build
-	@GINUX_QEMU_GPU=virtio GINUX_QEMU_GPU_SIZE=1024x768 tests/qemu/wayland-desktop.sh
+	@LINOX_QEMU_GPU=virtio LINOX_QEMU_GPU_SIZE=1024x768 tests/qemu/wayland-desktop.sh
 
 # A domain given four CPUs runs four CPU-bound processes at once (tests/smp).
 test-multicore: rust-rootfs build
@@ -365,68 +365,68 @@ check: manifest architecture-check linux-compat-check
 	@$(MAKE) abi-conformance
 	@cargo fmt --all -- --check
 	@$(MAKE) check-pe
-	@cargo clippy --package ginux-boot --target $(TARGET) -- -D warnings
-	@cargo clippy --package ginux-kernel --target x86_64-unknown-none -- -D warnings
-	@cargo clippy --package ginux-native-abi -- -D warnings
-	@cargo test --package ginux-native-abi
-	@cargo clippy --package ginux-kernel-policy -- -D warnings
-	@cargo test --package ginux-kernel-policy
-	@cargo clippy --package ginux-command -- -D warnings
-	@cargo test --package ginux-command
-	@cargo clippy --package ginux-oci -- -D warnings
-	@cargo test --package ginux-oci
-	@cargo test --release --package ginux-oci release_profile_traps_size_overflow
-	@cargo clippy --package ginux-oci-cache -- -D warnings
-	@cargo test --package ginux-oci-cache
-	@cargo clippy --package ginux-image-store -- -D warnings
-	@cargo test --package ginux-image-store
-	@cargo clippy --package ginux-runtime-memory -- -D warnings
-	@cargo test --package ginux-runtime-memory
-	@cargo clippy --package ginux-credentials --all-targets -- -D warnings
-	@cargo test --package ginux-credentials
-	@cargo clippy --package ginux-memory-areas --all-targets -- -D warnings
-	@cargo test --package ginux-memory-areas
-	@cargo clippy --package ginux-deadline-heap --all-targets -- -D warnings
-	@cargo test --package ginux-deadline-heap
-	@cargo clippy --package ginux-slab --all-targets -- -D warnings
-	@cargo test --package ginux-slab
-	@cargo clippy --package ginux-cgroup --all-targets -- -D warnings
-	@cargo test --package ginux-cgroup
-	@cargo clippy --package ginux-keyrings --all-targets -- -D warnings
-	@cargo test --package ginux-keyrings
-	@cargo clippy --package ginux-landlock --all-targets -- -D warnings
-	@cargo test --package ginux-landlock
-	@cargo clippy --package ginux-rtnetlink --all-targets -- -D warnings
-	@cargo test --package ginux-rtnetlink
-	@cargo clippy --package ginux-udplite --all-targets -- -D warnings
-	@cargo test --package ginux-udplite
-	@cargo clippy --package ginux-tun --all-targets -- -D warnings
-	@cargo test --package ginux-tun
-	@cargo clippy --package ginux-ktls --all-targets -- -D warnings
-	@cargo test --package ginux-ktls
-	@cargo clippy --package ginux-tty --all-targets -- -D warnings
-	@cargo test --package ginux-tty
-	@cargo clippy --package ginux-drm --all-targets -- -D warnings
-	@cargo test --package ginux-drm
-	@cargo clippy --package ginux-ext2 --all-targets -- -D warnings
-	@cargo test --package ginux-ext2
-	@cargo clippy --package ginux-usb-audio --all-targets -- -D warnings
-	@cargo test --package ginux-usb-audio
-	@cargo clippy --package ginux-usb-hid --all-targets -- -D warnings
-	@cargo test --package ginux-usb-hid
-	@cargo clippy --package ginux-virtio-gpu --all-targets -- -D warnings
-	@cargo test --package ginux-virtio-gpu
-	@cargo clippy --package ginux-controller-runtime --target x86_64-unknown-none -- -D warnings
-	@cargo clippy --package ginux-protocol-state -- -D warnings
-	@cargo test --package ginux-protocol-state
-	@cargo clippy --package ginux-volume-format -- -D warnings
-	@cargo test --package ginux-volume-format
-	@cargo clippy --package ginux-volume-service -- -D warnings
-	@cargo test --package ginux-volume-service
-	@cargo clippy --package ginux-network-service-runtime --target x86_64-unknown-none -- -D warnings
-	@cargo clippy --package ginux-protocol-service-runtime --target x86_64-unknown-none -- -D warnings
-	@cargo clippy --package ginux-volume-service-runtime --target x86_64-unknown-none -- -D warnings
-	@cargo clippy --package ginux-manifest-tool -- -D warnings
+	@cargo clippy --package linox-boot --target $(TARGET) -- -D warnings
+	@cargo clippy --package linox-kernel --target x86_64-unknown-none -- -D warnings
+	@cargo clippy --package linox-native-abi -- -D warnings
+	@cargo test --package linox-native-abi
+	@cargo clippy --package linox-kernel-policy -- -D warnings
+	@cargo test --package linox-kernel-policy
+	@cargo clippy --package linox-command -- -D warnings
+	@cargo test --package linox-command
+	@cargo clippy --package linox-oci -- -D warnings
+	@cargo test --package linox-oci
+	@cargo test --release --package linox-oci release_profile_traps_size_overflow
+	@cargo clippy --package linox-oci-cache -- -D warnings
+	@cargo test --package linox-oci-cache
+	@cargo clippy --package linox-image-store -- -D warnings
+	@cargo test --package linox-image-store
+	@cargo clippy --package linox-runtime-memory -- -D warnings
+	@cargo test --package linox-runtime-memory
+	@cargo clippy --package linox-credentials --all-targets -- -D warnings
+	@cargo test --package linox-credentials
+	@cargo clippy --package linox-memory-areas --all-targets -- -D warnings
+	@cargo test --package linox-memory-areas
+	@cargo clippy --package linox-deadline-heap --all-targets -- -D warnings
+	@cargo test --package linox-deadline-heap
+	@cargo clippy --package linox-slab --all-targets -- -D warnings
+	@cargo test --package linox-slab
+	@cargo clippy --package linox-cgroup --all-targets -- -D warnings
+	@cargo test --package linox-cgroup
+	@cargo clippy --package linox-keyrings --all-targets -- -D warnings
+	@cargo test --package linox-keyrings
+	@cargo clippy --package linox-landlock --all-targets -- -D warnings
+	@cargo test --package linox-landlock
+	@cargo clippy --package linox-rtnetlink --all-targets -- -D warnings
+	@cargo test --package linox-rtnetlink
+	@cargo clippy --package linox-udplite --all-targets -- -D warnings
+	@cargo test --package linox-udplite
+	@cargo clippy --package linox-tun --all-targets -- -D warnings
+	@cargo test --package linox-tun
+	@cargo clippy --package linox-ktls --all-targets -- -D warnings
+	@cargo test --package linox-ktls
+	@cargo clippy --package linox-tty --all-targets -- -D warnings
+	@cargo test --package linox-tty
+	@cargo clippy --package linox-drm --all-targets -- -D warnings
+	@cargo test --package linox-drm
+	@cargo clippy --package linox-ext2 --all-targets -- -D warnings
+	@cargo test --package linox-ext2
+	@cargo clippy --package linox-usb-audio --all-targets -- -D warnings
+	@cargo test --package linox-usb-audio
+	@cargo clippy --package linox-usb-hid --all-targets -- -D warnings
+	@cargo test --package linox-usb-hid
+	@cargo clippy --package linox-virtio-gpu --all-targets -- -D warnings
+	@cargo test --package linox-virtio-gpu
+	@cargo clippy --package linox-controller-runtime --target x86_64-unknown-none -- -D warnings
+	@cargo clippy --package linox-protocol-state -- -D warnings
+	@cargo test --package linox-protocol-state
+	@cargo clippy --package linox-volume-format -- -D warnings
+	@cargo test --package linox-volume-format
+	@cargo clippy --package linox-volume-service -- -D warnings
+	@cargo test --package linox-volume-service
+	@cargo clippy --package linox-network-service-runtime --target x86_64-unknown-none -- -D warnings
+	@cargo clippy --package linox-protocol-service-runtime --target x86_64-unknown-none -- -D warnings
+	@cargo clippy --package linox-volume-service-runtime --target x86_64-unknown-none -- -D warnings
+	@cargo clippy --package linox-manifest-tool -- -D warnings
 
 fmt: manifest
 	@cargo fmt --all

@@ -273,7 +273,7 @@ fn check_store<S: Store>(lengths: &[usize], full: bool) {
 
 #[test]
 fn host_record_survives_power_loss_at_every_operation() {
-    check_store::<HostRecord>(&[1, 24, ginux_volume_format::PAYLOAD_CAPACITY], true);
+    check_store::<HostRecord>(&[1, 24, linox_volume_format::PAYLOAD_CAPACITY], true);
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn oci_catalog_survives_power_loss_at_every_operation() {
 
 /// Every single and all-but-one write, full-size payloads and one more prior
 /// commit; minutes in debug builds, so run it explicitly:
-/// `cargo test -p ginux-volume-service --release -- --ignored power_loss`.
+/// `cargo test -p linox-volume-service --release -- --ignored power_loss`.
 #[test]
 #[ignore]
 fn full_capacity_stores_survive_power_loss_exhaustively() {

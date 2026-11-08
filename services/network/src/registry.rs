@@ -12,13 +12,13 @@ use embedded_tls::{
     CertificateEntryRef, CertificateRef, CertificateVerifyRef, CryptoProvider, TlsCipherSuite,
     TlsClock, TlsConfig, TlsContext, TlsError, TlsVerifier,
 };
-use ginux_native_abi::NativeNetworkBootV8;
-use ginux_native_abi::{
+use heapless::{String, Vec};
+use linox_native_abi::NativeNetworkBootV8;
+use linox_native_abi::{
     NativeImageStoreRequestV0, NATIVE_IMAGE_STORE_ABORT, NATIVE_IMAGE_STORE_OPERATION,
     NATIVE_IMAGE_STORE_PUBLISH, NATIVE_IMAGE_STORE_RESULT_FAILED, NATIVE_PROGRESS_OPERATION,
     NATIVE_TIMESTAMP_FREQUENCY_OPERATION,
 };
-use heapless::{String, Vec};
 use p256::ecdsa::DerSignature;
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
@@ -157,7 +157,7 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
     let tcp_handle = sockets.add(tcp_socket);
 
     let reference = &info.reference[..usize::from(info.reference_size)];
-    let Ok(reference) = ginux_oci::ImageReference::parse(reference) else {
+    let Ok(reference) = linox_oci::ImageReference::parse(reference) else {
         return false;
     };
     let host = if reference.registry == b"docker.io" {
@@ -203,7 +203,7 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
     token.clear();
     if response.status == 401 {
         progress(b"authenticating with registry");
-        let Some(challenge) = ginux_oci::BearerChallenge::parse(response.www_authenticate.as_str())
+        let Some(challenge) = linox_oci::BearerChallenge::parse(response.www_authenticate.as_str())
         else {
             return false;
         };
@@ -251,7 +251,7 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
                 return false;
             }
             sockets.get_mut::<tcp::Socket>(tcp_handle).abort();
-            let Some(value) = ginux_oci::parse_bearer_token(token_body.bytes()) else {
+            let Some(value) = linox_oci::parse_bearer_token(token_body.bytes()) else {
                 return false;
             };
             if token.push_str(value).is_err() {
@@ -288,8 +288,8 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
         progress(b"registry pinned manifest digest rejected");
         return false;
     }
-    let platform = ginux_oci::Platform::native_linux();
-    if let Some(selected) = ginux_oci::select_manifest(manifest_body.bytes(), platform) {
+    let platform = linox_oci::Platform::native_linux();
+    if let Some(selected) = linox_oci::select_manifest(manifest_body.bytes(), platform) {
         let Some(selected_digest) = parse_digest(selected.digest) else {
             return false;
         };
@@ -322,21 +322,21 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
         }
         sockets.get_mut::<tcp::Socket>(tcp_handle).abort();
         if manifest_body.bytes().len() != selected_size
-            || !ginux_oci::verify_sha256(manifest_body.bytes(), &selected_digest)
+            || !linox_oci::verify_sha256(manifest_body.bytes(), &selected_digest)
         {
             progress(b"selected manifest digest or size rejected");
             return false;
         }
     }
     let (config_digest_text, config_size, layers) = {
-        let Some(manifest) = ginux_oci::parse_registry_manifest(manifest_body.bytes()) else {
+        let Some(manifest) = linox_oci::parse_registry_manifest(manifest_body.bytes()) else {
             progress(b"registry manifest format rejected");
             return false;
         };
         let Ok(config_digest) = String::<72>::try_from(manifest.config.digest) else {
             return false;
         };
-        let mut layers = Vec::<(String<72>, usize), { ginux_oci::OCI_LAYER_LIMIT }>::new();
+        let mut layers = Vec::<(String<72>, usize), { linox_oci::OCI_LAYER_LIMIT }>::new();
         for layer in &manifest.layers {
             let Ok(digest) = String::<72>::try_from(layer.digest) else {
                 return false;
@@ -402,8 +402,8 @@ pub(crate) unsafe fn pull(info: &NativeNetworkBootV8) -> bool {
     }
     if response.status != 200
         || manifest_body.bytes().len() != config_size
-        || !ginux_oci::verify_sha256(manifest_body.bytes(), &config_digest)
-        || !ginux_oci::image_configuration_matches_platform(manifest_body.bytes(), platform)
+        || !linox_oci::verify_sha256(manifest_body.bytes(), &config_digest)
+        || !linox_oci::image_configuration_matches_platform(manifest_body.bytes(), platform)
     {
         progress(b"image configuration platform, digest, or size rejected");
         return false;
@@ -616,7 +616,7 @@ fn progress_status(prefix: &[u8], status: u16) {
     }
 }
 
-fn progress_platform(platform: ginux_oci::Platform<'_>) {
+fn progress_platform(platform: linox_oci::Platform<'_>) {
     let mut message = String::<96>::new();
     let _ = write!(
         message,
@@ -650,7 +650,7 @@ fn split_https_url(url: &str) -> Option<(&str, &str)> {
 }
 
 fn repository<'a>(
-    reference: ginux_oci::ImageReference<'_>,
+    reference: linox_oci::ImageReference<'_>,
     output: &'a mut String<256>,
 ) -> Option<&'a str> {
     if reference.registry == b"docker.io" && !reference.repository.contains(&b'/') {
@@ -663,7 +663,7 @@ fn repository<'a>(
 }
 
 fn write_manifest_path(
-    reference: ginux_oci::ImageReference<'_>,
+    reference: linox_oci::ImageReference<'_>,
     selector: &str,
     output: &mut String<384>,
 ) -> Option<()> {
@@ -673,7 +673,7 @@ fn write_manifest_path(
 }
 
 fn write_blob_path(
-    reference: ginux_oci::ImageReference<'_>,
+    reference: linox_oci::ImageReference<'_>,
     digest: &str,
     output: &mut String<384>,
 ) -> Option<()> {
@@ -1007,7 +1007,7 @@ impl StoreSink {
 
 impl BodySink for StoreSink {
     fn write(&mut self, bytes: &[u8]) -> bool {
-        for chunk in bytes.chunks(ginux_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT as usize) {
+        for chunk in bytes.chunks(linox_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT as usize) {
             let request = NativeImageStoreRequestV0::append(
                 self.handle,
                 chunk.as_ptr() as u64,
@@ -1172,7 +1172,7 @@ unsafe fn https_get(
     let mut request = String::<6144>::new();
     if write!(
         request,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ginux/0.1\r\nAccept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json\r\nConnection: close\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: linox/0.1\r\nAccept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json\r\nConnection: close\r\n"
     )
     .is_err()
     {

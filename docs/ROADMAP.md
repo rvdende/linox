@@ -1,4 +1,4 @@
-# Ginux Verification Roadmap
+# Linox Verification Roadmap
 
 This roadmap converts the current architecture into user-verifiable stopping points. Each checkpoint is implemented, tested, committed with sign-off, and then stopped for review. Work on the following checkpoint does not begin until the current checkpoint is accepted.
 
@@ -24,7 +24,7 @@ C4; they do not bypass either checkpoint's acceptance gate.
 
 Deliverables:
 
-- One consistent architecture for a unified `GINUX.EFI`, embedded ring-3 controller, kernel/module device boundary, Rocky Linux 10 benchmark, stable kABI, and non-precluded future `.ko` compatibility.
+- One consistent architecture for a unified `LINOX.EFI`, embedded ring-3 controller, kernel/module device boundary, Rocky Linux 10 benchmark, stable kABI, and non-precluded future `.ko` compatibility.
 - ADR 0002 records the new boot and driver boundary.
 - An automated documentation consistency check.
 
@@ -34,7 +34,7 @@ Gate: `make architecture-check` and a signed commit. No runtime behavior changes
 
 Deliverables:
 
-- `GINUX.EFI` contains an inspectable component catalog and the controller payload.
+- `LINOX.EFI` contains an inspectable component catalog and the controller payload.
 - The controller starts in ring 3 and owns the interactive console.
 - Commands include `help`, `status`, `components`, measured-root `ls`, global
   host `/proc` inspection, `ps`, and `shutdown`.

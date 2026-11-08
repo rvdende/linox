@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot Ginux on a QEMU machine shaped like a physical AMD desktop instead of the
+# Boot Linox on a QEMU machine shaped like a physical AMD desktop instead of the
 # virtio reference profile: AMD IOMMU with DMA remapping, an e1000e NIC on a
 # network with a DHCP server, an NVMe SSD with a GPT disk, AHCI,
 # xHCI with USB keyboards (one behind a hub), a VGA framebuffer, and no virtio
@@ -23,9 +23,9 @@ if [[ "$accelerator" == "tcg" ]]; then
 else
     cpu_model="${QEMU_CPU:-host,+smep,+smap,+umip}"
 fi
-esp_dir="${GINUX_ESP_DIR:-$repo_root/build/esp}"
+esp_dir="${LINOX_ESP_DIR:-$repo_root/build/esp}"
 output_dir="$repo_root/build/qemu/hardware-profile"
-timeout_seconds="${GINUX_PROFILE_TIMEOUT:-90}"
+timeout_seconds="${LINOX_PROFILE_TIMEOUT:-90}"
 work_dir="$(mktemp -d)"
 qemu_pid=""
 
@@ -44,14 +44,14 @@ if [[ ! -f "$esp_dir/EFI/BOOT/BOOTX64.EFI" ]]; then
 fi
 mkdir -p "$output_dir"
 
-# A small GPT disk like a dual-boot SSD, including a Ginux volume partition.
+# A small GPT disk like a dual-boot SSD, including a Linox volume partition.
 disk="$work_dir/nvme.raw"
 truncate -s 256M "$disk"
 sgdisk --clear \
     --new=1:2048:+32M --typecode=1:ef00 --change-name=1:"EFI System Partition" \
     --new=2:0:+128M --typecode=2:8300 --change-name=2:"ubuntu-root" \
     --new=3:0:+16M --typecode=3:8200 --change-name=3:"swap" \
-    --new=4:0:0 --typecode=4:80769f29-5413-45a3-abab-5b44b6125922 --change-name=4:"ginux-volume" \
+    --new=4:0:0 --typecode=4:80769f29-5413-45a3-abab-5b44b6125922 --change-name=4:"linox-volume" \
     "$disk" >/dev/null
 # A second data disk on the SATA controller.
 sata="$work_dir/sata.raw"
@@ -89,13 +89,13 @@ boot_profile() {
         -device usb-hub,bus=xhci2.0,port=1 \
         -device usb-kbd,bus=xhci2.0,port=1.2 \
         -drive "if=none,id=nvm,format=raw,file=$disk" \
-        -device "nvme,drive=nvm,serial=GINUXNVME01" \
+        -device "nvme,drive=nvm,serial=LINOXNVME01" \
         -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
         -drive "if=pflash,format=raw,file=$work_dir/vars.fd" \
         -drive "if=none,id=esp,format=raw,file=fat:rw:$esp_dir" \
         -device "ide-hd,drive=esp,bootindex=1" \
         -drive "if=none,id=sata,format=raw,file=$sata" \
-        -device "ide-hd,drive=sata,bus=ide.2,serial=GINUXSATA01" &
+        -device "ide-hd,drive=sata,bus=ide.2,serial=LINOXSATA01" &
     qemu_pid=$!
 }
 
@@ -131,8 +131,8 @@ disk_before=$(sha256sum "$disk" | cut -d' ' -f1)
 boot_profile serial "file:$work_dir/serial.log"
 for _ in $(seq 1 "$timeout_seconds"); do
     grep -aq 'bring-up> ' "$work_dir/serial.log" && break
-    grep -aq 'ginux: halted' "$work_dir/serial.log" && break
-    grep -aEq '^GINUX_(BOOT|KERNEL)_PANIC' "$work_dir/serial.log" && break
+    grep -aq 'linox: halted' "$work_dir/serial.log" && break
+    grep -aEq '^LINOX_(BOOT|KERNEL)_PANIC' "$work_dir/serial.log" && break
     sleep 1
 done
 # Type a command on the emulated USB keyboard.
@@ -153,13 +153,13 @@ for _ in $(seq 1 15); do
     grep -aq 'played a 440 Hz tone' "$work_dir/serial.log" && break
     sleep 1
 done
-# Write, read back and restore a block of the Ginux volume partition.
+# Write, read back and restore a block of the Linox volume partition.
 for key in d i s k t e s t ret; do
     monitor_command "sendkey $key"
     sleep 0.2
 done
 for _ in $(seq 1 15); do
-    grep -aq 'Ginux volume blocks' "$work_dir/serial.log" && break
+    grep -aq 'Linox volume blocks' "$work_dir/serial.log" && break
     sleep 1
 done
 screenshot serial >/dev/null
@@ -174,13 +174,13 @@ for expected in \
     'NVMe controller' \
     'USB controller (xHCI)' \
     'SATA controller (AHCI)' \
-    'QEMU NVMe Ctrl (serial GINUXNVME01' \
+    'QEMU NVMe Ctrl (serial LINOXNVME01' \
     'namespace 1: 524288 blocks of 512 bytes' \
     'partition 1: 32 MiB EFI system "EFI System Partition"' \
     'partition 2: 128 MiB Linux filesystem "ubuntu-root"' \
     'partition 3: 16 MiB Linux swap "swap"' \
-    'MiB Ginux volume "ginux-volume"' \
-    'QEMU HARDDISK (serial GINUXSATA01), 131072 sectors of 512 bytes (64 MiB)' \
+    'MiB Linox volume "linox-volume"' \
+    'QEMU HARDDISK (serial LINOXSATA01), 131072 sectors of 512 bytes (64 MiB)' \
     'MiB Linux filesystem "sata-data"' \
     'tablet 0627:0001 on port' \
     'by firmware, status' \
@@ -193,7 +193,7 @@ for expected in \
     'keyboard 0627:0001 on port' \
     'hub with 8 ports' \
     'keyboard 0627:0001 on port 5.2' \
-    'Ginux bring-up shell' \
+    'Linox bring-up shell' \
     'bring-up> echo usbok' \
     'usbok' \
     'bring-up> beep' \

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-test_dir="$(mktemp -d -t ginux-storage.XXXXXX)"
+test_dir="$(mktemp -d -t linox-storage.XXXXXX)"
 volume_image="$test_dir/volume.raw"
 qemu_pid_file="$test_dir/qemu.pid"
 qemu_pid=""
@@ -34,19 +34,19 @@ run_boot() {
     : >"$qemu_pid_file"
     {
         for _ in {1..120}; do
-            if grep -aFq 'ginux> ' "$output_file"; then
+            if grep -aFq 'linox> ' "$output_file"; then
                 printf '%s' "$commands"
                 exit 0
             fi
-            if grep -aFq 'GINUX_KERNEL_PANIC' "$output_file"; then
+            if grep -aFq 'LINOX_KERNEL_PANIC' "$output_file"; then
                 stop_qemu
                 exit 0
             fi
             sleep 1
         done
         stop_qemu
-    } | GINUX_VOLUME_IMAGE="$volume_image" GINUX_VOLUME_SIZE=64M \
-        GINUX_QEMU_PID_FILE="$qemu_pid_file" \
+    } | LINOX_VOLUME_IMAGE="$volume_image" LINOX_VOLUME_SIZE=64M \
+        LINOX_QEMU_PID_FILE="$qemu_pid_file" \
         "$repo_root/tools/qemu/run.sh" >"$output_file" 2>&1 &
     qemu_pid=$!
 
@@ -78,12 +78,12 @@ second_output="$test_dir/second.log"
 reset_output="$test_dir/reset.log"
 
 run_boot "$first_output" $'network new gnet0 type=virtual\ndomain new persisted\ndomain set persisted image=alpine:latest init=/bin/sh cpu=2 memory-mib=256 autostart=true network=gnet0\nshutdown\n'
-grep -aFq 'ginux: persistent storage initialized (generation 1, 131064 data sectors)' "$first_output"
-grep -aEq '^ginux: timing boot-to-controller: [0-9]+ ms' "$first_output"
-grep -aFq 'ginux: local configuration committed (generation 1)' "$first_output"
+grep -aFq 'linox: persistent storage initialized (generation 1, 131064 data sectors)' "$first_output"
+grep -aEq '^linox: timing boot-to-controller: [0-9]+ ms' "$first_output"
+grep -aFq 'linox: local configuration committed (generation 1)' "$first_output"
 
 run_boot "$second_output" $'domain list\nnetwork list\nshutdown\n'
-grep -aFq 'ginux: persistent storage recovered (generation 1, 131064 data sectors)' "$second_output"
+grep -aFq 'linox: persistent storage recovered (generation 1, 131064 data sectors)' "$second_output"
 grep -aFq 'persisted       configured' "$second_output"
 grep -aFq '/bin/sh' "$second_output"
 grep -aFq 'docker.io/library/alpine:latest' "$second_output"
@@ -91,7 +91,7 @@ grep -aFq 'gnet0' "$second_output"
 
 rm -f "$volume_image"
 run_boot "$reset_output" $'domain list\nshutdown\n'
-grep -aFq 'ginux: persistent storage initialized (generation 1, 131064 data sectors)' "$reset_output"
+grep -aFq 'linox: persistent storage initialized (generation 1, 131064 data sectors)' "$reset_output"
 if grep -aFq 'persisted       configured' "$reset_output"; then
     echo "Persistent storage reset retained a deleted domain configuration." >&2
     exit 1

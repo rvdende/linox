@@ -47,7 +47,7 @@ queue-device field at offset `0x30`.
 - Static inspection confirmed a `u64` read at `COMMON_QUEUE_DEVICE` (`0x30`).
 - `make check` -> passed, including formatting, warning-denying clippy,
   architecture checks, and all unit tests.
-- `make test` on QEMU 10.1.2/TCG -> `GINUX_KERNEL_OK`; `Boot test passed.`
+- `make test` on QEMU 10.1.2/TCG -> `LINOX_KERNEL_OK`; `Boot test passed.`
 - Delivery: [PR #36](https://github.com/gmkurtzer/ginux/pull/36).
 - Source response: [issue #30 comment](https://github.com/gmkurtzer/ginux/issues/30#issuecomment-6561947439).
 - Reciprocal response: [PR #36 comment](https://github.com/gmkurtzer/ginux/pull/36#issuecomment-6561947105).

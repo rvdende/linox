@@ -33,17 +33,17 @@ const PATH_BUF: usize = 256;
 fuzz_target!(|data: &[u8]| {
     // 1) tar/PAX rootfs (layer bytes: ustar headers, PAX extended headers,
     //    truncated/trailing garbage).
-    if let Some(rootfs) = ginux_oci::Rootfs::parse(data) {
+    if let Some(rootfs) = linox_oci::Rootfs::parse(data) {
         let _ = rootfs.entry_count();
 
         // Reopen path used by the kernel: metadata -> RootfsMetadata::new ->
         // from_metadata over the same immutable bytes.
         let metadata = rootfs.metadata();
-        let _ = ginux_oci::RootfsMetadata::new(
+        let _ = linox_oci::RootfsMetadata::new(
             metadata.entry_count(),
             metadata.content_length(),
         );
-        let _ = ginux_oci::Rootfs::from_metadata(data, metadata);
+        let _ = linox_oci::Rootfs::from_metadata(data, metadata);
         let _ = rootfs.content_length();
 
         // Linear indexing pass: offsets come from the archive itself, exactly
@@ -124,7 +124,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 2) registry manifest (manifest JSON with config + layers).
-    if let Some(manifest) = ginux_oci::parse_registry_manifest(data) {
+    if let Some(manifest) = linox_oci::parse_registry_manifest(data) {
         for layer in manifest.layers.iter() {
             let _ = (layer.media_type, layer.digest, layer.size);
         }
@@ -132,17 +132,17 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 3) manifest index selection against the native platform.
-    let _ = ginux_oci::select_manifest(data, ginux_oci::Platform::native_linux());
+    let _ = linox_oci::select_manifest(data, linox_oci::Platform::native_linux());
 
     // 4) image configuration bytes vs native platform.
-    let _ = ginux_oci::image_configuration_matches_platform(
+    let _ = linox_oci::image_configuration_matches_platform(
         data,
-        ginux_oci::Platform::native_linux(),
+        linox_oci::Platform::native_linux(),
     );
 
     // 5) image reference (registry/repository/tag-or-digest bytes).
-    if let Ok(reference) = ginux_oci::ImageReference::parse(data) {
-        let mut out = [0_u8; ginux_oci::REFERENCE_CAPACITY];
+    if let Ok(reference) = linox_oci::ImageReference::parse(data) {
+        let mut out = [0_u8; linox_oci::REFERENCE_CAPACITY];
         let _ = reference.write_canonical(&mut out);
         let _ = reference.write_manifest_path(&mut out);
         let _ = reference.manifest_digest_matches(data);
@@ -150,15 +150,15 @@ fuzz_target!(|data: &[u8]| {
 
     // 6)/7) UTF-8 string surfaces: digest validation and bearer challenge.
     if let Ok(text) = core::str::from_utf8(data) {
-        let _ = ginux_oci::valid_registry_digest(text);
-        let _ = ginux_oci::BearerChallenge::parse(text);
+        let _ = linox_oci::valid_registry_digest(text);
+        let _ = linox_oci::BearerChallenge::parse(text);
     }
 
     // 7) bearer token body.
-    let _ = ginux_oci::parse_bearer_token(data);
+    let _ = linox_oci::parse_bearer_token(data);
 
     // 8) sha256 verification (expected digest of all-zero bytes; the point is
     //    reaching the comparison logic with attacker-shaped input).
     let expected = [0_u8; 32];
-    let _ = ginux_oci::verify_sha256(data, &expected);
+    let _ = linox_oci::verify_sha256(data, &expected);
 });

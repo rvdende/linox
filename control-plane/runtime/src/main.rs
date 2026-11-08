@@ -2,14 +2,14 @@
 #![no_main]
 
 use core::arch::{asm, global_asm};
-use ginux_command::{
+use linox_command::{
     complete, parse, write_error, write_help, Arguments, Arity, Command, HelpWriter, ParseOutcome,
 };
-use ginux_native_abi::{
-    native_control_abi_is_compatible, GinuxControlIoctlV0, NativeControlDescriptorV4,
+use linox_native_abi::{
+    native_control_abi_is_compatible, LinoxControlIoctlV0, NativeControlDescriptorV4,
     NativeDomainExecArgumentV0, NativeDomainExecRequestV0, NativeDomainRequestV3,
     NativeHostInspectRecordV0, NativeHostInspectRequestV0, NativeNetworkInventoryRequestV0,
-    NativeRootDirectoryRequestV4, GINUX_CONTROL_IOCTL, NATIVE_CALL_FAILED,
+    NativeRootDirectoryRequestV4, LINOX_CONTROL_IOCTL, NATIVE_CALL_FAILED,
     NATIVE_CONSOLE_MAX_LINE_BYTES, NATIVE_CONSOLE_READ_BYTE_OPERATION,
     NATIVE_CONTROL_DESCRIPTOR_OPERATION, NATIVE_CONTROL_DESCRIPTOR_SIZE,
     NATIVE_CONTROL_DISCOVERY_OPERATION, NATIVE_CONTROL_MAX_BUFFERED_CONSOLE_BYTES,
@@ -52,9 +52,9 @@ use ginux_native_abi::{
 const MAX_LINE: usize = NATIVE_CONSOLE_MAX_LINE_BYTES as usize;
 const LINUX_STDIN: u64 = 0;
 const LINUX_STDOUT: u64 = 1;
-const GINUX_HOST_FD: u64 = 3;
-const GINUX_ROOT_FD: u64 = 4;
-const GINUX_NETWORK_FD: u64 = 5;
+const LINOX_HOST_FD: u64 = 3;
+const LINOX_ROOT_FD: u64 = 4;
+const LINOX_NETWORK_FD: u64 = 5;
 const LINUX_READ_SYSCALL: u64 = 0;
 const LINUX_WRITE_SYSCALL: u64 = 1;
 const LINUX_CLOSE_SYSCALL: u64 = 3;
@@ -107,7 +107,7 @@ const LINUX_EINVAL: u64 = u64::MAX - 21;
 const LINUX_ESRCH: u64 = u64::MAX - 2;
 const LINUX_CLOCK_REALTIME: u64 = 0;
 const LINUX_CLOCK_MONOTONIC: u64 = 1;
-static CONTROLLER_IDENTITY: &[u8] = b"GINUX_CONTROLLER_V0";
+static CONTROLLER_IDENTITY: &[u8] = b"LINOX_CONTROLLER_V0";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -464,16 +464,16 @@ const ROOT_COMMANDS: &[Command<'static>] = &[
     Command::leaf(
         b"shutdown",
         b"shutdown",
-        b"Shut down Ginux cleanly",
+        b"Shut down Linox cleanly",
         COMMAND_SHUTDOWN,
         Arity::exact(0),
     ),
 ];
 
 const ROOT_COMMAND: Command<'static> = Command::group(
-    b"ginux",
-    b"ginux COMMAND",
-    b"Ginux controller shell",
+    b"linox",
+    b"linox COMMAND",
+    b"Linox controller shell",
     ROOT_COMMANDS,
 );
 
@@ -482,7 +482,7 @@ global_asm!(
     .text
     .global _start
 _start:
-    call ginux_controller_main
+    call linox_controller_main
     ud2
 "#
 );
@@ -493,13 +493,13 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[no_mangle]
-extern "C" fn ginux_controller_main() -> ! {
+extern "C" fn linox_controller_main() -> ! {
     let console = LINUX_STDOUT;
-    let host = GINUX_HOST_FD;
-    let root = GINUX_ROOT_FD;
-    let network = GINUX_NETWORK_FD;
+    let host = LINOX_HOST_FD;
+    let root = LINOX_ROOT_FD;
+    let network = LINOX_NETWORK_FD;
     let identity = unsafe { core::ptr::read_volatile(&CONTROLLER_IDENTITY) };
-    if identity != b"GINUX_CONTROLLER_V0"
+    if identity != b"LINOX_CONTROLLER_V0"
         || !native_control_abi_is_compatible(call(NATIVE_CONTROL_DISCOVERY_OPERATION, 0, 0, 0))
     {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
@@ -517,40 +517,40 @@ extern "C" fn ginux_controller_main() -> ! {
     }
     let mut line = [0_u8; MAX_LINE];
 
-    write(console, b"\r\nGinux controller v0 (ring 3)\r\n");
+    write(console, b"\r\nLinox controller v0 (ring 3)\r\n");
     write(console, b"Type 'help' for commands.\r\n");
     if !linux_sysinfo_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
     write(
         console,
-        b"ginux: Linux live sysinfo accounting validated\r\n",
+        b"linox: Linux live sysinfo accounting validated\r\n",
     );
     if !linux_getrandom_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
-    write(console, b"ginux: Linux getrandom contract validated\r\n");
+    write(console, b"linox: Linux getrandom contract validated\r\n");
     if !linux_getrlimit_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
     write(
         console,
-        b"ginux: Linux resource-limit queries validated\r\n",
+        b"linox: Linux resource-limit queries validated\r\n",
     );
     if !linux_identity_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
-    write(console, b"ginux: Linux process identity validated\r\n");
+    write(console, b"linox: Linux process identity validated\r\n");
     if !linux_timekeeping_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
-    write(console, b"ginux: Linux timekeeping validated\r\n");
+    write(console, b"linox: Linux timekeeping validated\r\n");
     if !linux_pipe_fionread_contract(console) {
         exit(NATIVE_SERVICE_EXIT_REJECTED);
     }
     write(
         console,
-        b"ginux: Linux runtime pipe accounting validated\r\n",
+        b"linox: Linux runtime pipe accounting validated\r\n",
     );
     if network_snapshot(network).is_some_and(|snapshot| snapshot[3] == 0) {
         write(console, b"eth0: automatic DHCP configuration\r\n");
@@ -560,7 +560,7 @@ extern "C" fn ginux_controller_main() -> ! {
     loop {
         // Changes the last command made were reported by the command itself.
         states.refresh(host, None);
-        write(console, b"ginux> ");
+        write(console, b"linox> ");
         let length = read_line(console, host, &mut states, &mut line);
         let Some(command) = line.get(..length) else {
             exit(NATIVE_SERVICE_EXIT_REJECTED);
@@ -588,14 +588,14 @@ extern "C" fn ginux_controller_main() -> ! {
                 write(console, b"integrity: sealed\r\n");
             }
             COMMAND_COMPONENTS => {
-                write(console, b"GINUX.EFI component catalog v0:\r\n");
+                write(console, b"LINOX.EFI component catalog v0:\r\n");
                 write(console, b"- kernel: active, ring 0\r\n");
                 write(console, b"- controller: active, ring 3\r\n");
                 write(console, b"- boot modules: embedded, sealed\r\n");
             }
             COMMAND_PS => show_processes(console, host),
             COMMAND_SHUTDOWN => {
-                write(console, b"Shutting down Ginux.\r\n");
+                write(console, b"Shutting down Linox.\r\n");
                 if call(
                     NATIVE_DOMAIN_CONTROL_OPERATION,
                     host,
@@ -661,7 +661,7 @@ fn read_line(
         let mut background = NativeDomainRequestV3::zeroed();
         if domain_call(host, NATIVE_DOMAIN_POLL_BACKGROUND, &mut background) == 1 {
             if states.refresh(host, Some(console)) {
-                write(console, b"ginux> ");
+                write(console, b"linox> ");
                 if length != 0 {
                     write(console, &line[..length]);
                 }
@@ -2706,16 +2706,16 @@ fn call(number: u64, capability: u64, first: u64, second: u64) -> u64 {
             NATIVE_CALL_FAILED
         };
     }
-    let request = GinuxControlIoctlV0::new(number, first, second);
+    let request = LinoxControlIoctlV0::new(number, first, second);
     linux_syscall(
         LINUX_IOCTL_SYSCALL,
         if capability == 0 {
-            GINUX_HOST_FD
+            LINOX_HOST_FD
         } else {
             capability
         },
-        GINUX_CONTROL_IOCTL,
-        (&request as *const GinuxControlIoctlV0) as u64,
+        LINOX_CONTROL_IOCTL,
+        (&request as *const LinoxControlIoctlV0) as u64,
     )
 }
 
@@ -2775,7 +2775,7 @@ fn linux_sysinfo_contract(console: u64) -> bool {
     let mut information = [0_u8; 112];
     let result = linux_syscall(LINUX_SYSINFO_SYSCALL, information.as_mut_ptr() as u64, 0, 0);
     if result != 0 {
-        write(console, b"ginux: sysinfo conformance syscall result: ");
+        write(console, b"linox: sysinfo conformance syscall result: ");
         write_decimal(console, result);
         write(console, b"\r\n");
         return false;
@@ -2790,7 +2790,7 @@ fn linux_sysinfo_contract(console: u64) -> bool {
     if !valid {
         write(
             console,
-            b"ginux: sysinfo conformance values total/free/procs/unit/error: ",
+            b"linox: sysinfo conformance values total/free/procs/unit/error: ",
         );
         for value in [total, free, u64::from(processes), u64::from(unit), invalid] {
             write_decimal(console, value);
@@ -2824,7 +2824,7 @@ fn linux_getrandom_contract(console: u64) -> bool {
             ) == 1
         });
     if !valid {
-        write(console, b"ginux: getrandom conformance failed\r\n");
+        write(console, b"linox: getrandom conformance failed\r\n");
     }
     valid
 }
@@ -2840,11 +2840,11 @@ fn linux_getrlimit_contract(console: u64) -> bool {
         ) != 0
             || limit[0] > limit[1]
         {
-            write(console, b"ginux: resource-limit query failed\r\n");
+            write(console, b"linox: resource-limit query failed\r\n");
             return false;
         }
         if resource == 7 && limit[0] < 6 || matches!(resource, 13 | 14) && limit != [0, 0] {
-            write(console, b"ginux: resource-limit value rejected\r\n");
+            write(console, b"linox: resource-limit value rejected\r\n");
             return false;
         }
     }
@@ -2859,7 +2859,7 @@ fn linux_getrlimit_contract(console: u64) -> bool {
         ) == 0
         && limit[0] >= 6;
     if !valid {
-        write(console, b"ginux: resource-limit error semantics failed\r\n");
+        write(console, b"linox: resource-limit error semantics failed\r\n");
     }
     valid
 }
@@ -2880,7 +2880,7 @@ fn linux_pipe_fionread_contract(console: u64) -> bool {
         0,
     );
     if created != 0 {
-        write(console, b"ginux: runtime pipe creation failed: ");
+        write(console, b"linox: runtime pipe creation failed: ");
         write_decimal(console, created);
         write(console, b"\r\n");
         return false;
@@ -3185,7 +3185,7 @@ fn linux_pipe_fionread_contract(console: u64) -> bool {
         && duplicate_closed == 0
         && double_close == LINUX_EBADF;
     if !valid {
-        write(console, b"ginux: runtime pipe accounting failed:");
+        write(console, b"linox: runtime pipe accounting failed:");
         for value in [
             invalid_flags,
             rejected_descriptors[0] as u64,
@@ -3258,7 +3258,7 @@ fn linux_identity_contract(console: u64) -> bool {
     let mut name = [0_u8; 390];
     let uname = linux_syscall(LINUX_UNAME_SYSCALL, name.as_mut_ptr() as u64, 0, 0) == 0
         && &name[..6] == b"Linux\0"
-        && &name[65..71] == b"ginux\0"
+        && &name[65..71] == b"linox\0"
         && &name[260..267] == b"x86_64\0"
         && linux_syscall(LINUX_UNAME_SYSCALL, 1, 0, 0) == LINUX_EFAULT;
     let valid = identity
@@ -3267,7 +3267,7 @@ fn linux_identity_contract(console: u64) -> bool {
         && uname
         && linux_syscall(LINUX_SCHED_YIELD_SYSCALL, 0, 0, 0) == 0;
     if !valid {
-        write(console, b"ginux: Linux process identity failed\r\n");
+        write(console, b"linox: Linux process identity failed\r\n");
     }
     valid
 }
@@ -3331,7 +3331,7 @@ fn linux_timekeeping_contract(console: u64) -> bool {
         && accounting[0] != u64::MAX
         && accounting[1..] == [0, 0, 0];
     if !valid {
-        write(console, b"ginux: Linux timekeeping failed\r\n");
+        write(console, b"linox: Linux timekeeping failed\r\n");
     }
     valid
 }

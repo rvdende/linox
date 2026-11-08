@@ -20,7 +20,7 @@ discards writes that have not crossed a successful flush. Read, write, and
 flush failures are reported and a failed or ambiguous scan is never treated as
 an empty volume.
 
-The encoder and decoder live in the workspace's `ginux-volume-format` `no_std`
+The encoder and decoder live in the workspace's `linox-volume-format` `no_std`
 crate. The kernel backend and the future isolated storage service therefore
 consume one canonical implementation of the magic, version, field offsets,
 payload bounds, commit marker, zero-padding rules, and SHA-256 validation. The
@@ -28,7 +28,7 @@ crate rejects generation zero and oversized payloads before encoding, treats a
 prepared record as uncommitted, and contains no device or kernel authority.
 
 The prepare/flush/commit/flush state machine and two-slot recovery scan live in
-the separate `ginux-volume-service` `no_std` crate. It depends only on the
+the separate `linox-volume-service` `no_std` crate. It depends only on the
 format crate and a three-method whole-sector `BlockDevice` trait. The current
 kernel backend implements that trait, while the isolated virtio service can
 implement the same interface without importing kernel internals. Host unit
@@ -51,7 +51,7 @@ All integers are little-endian. Every byte not assigned below must be zero.
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 0 | 8 | ASCII magic `GINUXPV0` |
+| 0 | 8 | ASCII magic `LINOXPV0` |
 | 8 | 4 | format version `1` |
 | 12 | 2 | header size `72` |
 | 14 | 2 | payload length, at most 440 |

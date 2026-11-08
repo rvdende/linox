@@ -1513,7 +1513,7 @@ fn attach_linux_process_bank(pid: u32, owner: bool) -> Option<BankAttach> {
     linux_release_current_bank(cpu, instance, true);
     if let Some(bank) = linux_live_process_bank(pid, instance) {
         if owner && LINUX_BANK_OWNED[bank].swap(true, Ordering::AcqRel) {
-            serial_write("ginux: process owned by two CPUs pid/cpu: ");
+            serial_write("linox: process owned by two CPUs pid/cpu: ");
             serial_write_u64(u64::from(pid));
             serial_write(" ");
             serial_write_u64(cpu as u64);
@@ -1537,7 +1537,7 @@ fn attach_linux_process_bank(pid: u32, owner: bool) -> Option<BankAttach> {
         .chain(linux_spare_banks())
         .find(|bank| linux_bank_is_free(*bank))
     else {
-        serial_write("ginux: no free process bank pid/cpu: ");
+        serial_write("linox: no free process bank pid/cpu: ");
         serial_write_u64(u64::from(pid));
         serial_write(" ");
         serial_write_u64(cpu as u64);
@@ -1614,7 +1614,7 @@ fn linux_take_idle_bank(cpu: usize, instance: usize) {
             return;
         }
     }
-    serial_write("ginux: no free idle bank cpu: ");
+    serial_write("linox: no free idle bank cpu: ");
     serial_write_u64(cpu as u64);
     serial_write("\r\n");
     LINUX_CPU_BANK[cpu][instance].store(LINUX_BANK_NONE, Ordering::Release);
@@ -1656,14 +1656,14 @@ static LINUX_LIGHT_LAST_MIGRATION: [AtomicU32; CPU_ENTRY_STATE_LIMIT] =
 
 /// SysRq `u`: the process banks in use and each CPU's light-path counts.
 fn linux_report_process_banks() {
-    serial_write("ginux: sysrq: banks bank/pid/instance/users/owned/registry-thread/dying:\r\n");
+    serial_write("linox: sysrq: banks bank/pid/instance/users/owned/registry-thread/dying:\r\n");
     for bank in 0..LINUX_CPU_BANK_LIMIT {
         if LINUX_BANK_USERS[bank].load(Ordering::Acquire) == 0
             && LINUX_BANK_PID[bank].load(Ordering::Acquire) == 0
         {
             continue;
         }
-        serial_write("ginux: bank ");
+        serial_write("linox: bank ");
         for value in [
             bank as u64,
             u64::from(LINUX_BANK_PID[bank].load(Ordering::Acquire)),
@@ -1679,10 +1679,10 @@ fn linux_report_process_banks() {
         serial_write("\r\n");
     }
     serial_write(
-        "ginux: sysrq: light-path runs cpu/bank/slot/runs/migrations/last-migrated-call/syscalls:\r\n",
+        "linox: sysrq: light-path runs cpu/bank/slot/runs/migrations/last-migrated-call/syscalls:\r\n",
     );
     for cpu in 0..CPU_ENTRY_STATE_LIMIT {
-        serial_write("ginux: cpu ");
+        serial_write("linox: cpu ");
         for value in [
             cpu as u64,
             u64::from(LINUX_LIGHT_THREAD_BANK[cpu].load(Ordering::Acquire)),
@@ -1697,7 +1697,7 @@ fn linux_report_process_banks() {
         }
         serial_write("\r\n");
     }
-    serial_write("ginux: sysrq: foreign saves ");
+    serial_write("linox: sysrq: foreign saves ");
     serial_write_u64(u64::from(LINUX_BANK_FOREIGN_SAVES.load(Ordering::Relaxed)));
     serial_write("\r\n");
 }
@@ -1707,13 +1707,13 @@ fn linux_report_process_banks() {
 /// whose threads run on other CPUs is stale), with the process's activation
 /// state, and whether each CPU's light thread yielded.
 fn linux_report_live_bank_threads() {
-    serial_write("ginux: sysrq: live banks bank/pid/parked/running-activation:\r\n");
+    serial_write("linox: sysrq: live banks bank/pid/parked/running-activation:\r\n");
     for bank in 0..LINUX_CPU_BANK_LIMIT {
         let pid = LINUX_BANK_PID[bank].load(Ordering::Acquire);
         if LINUX_BANK_USERS[bank].load(Ordering::Acquire) == 0 || pid == 0 {
             continue;
         }
-        serial_write("ginux: bank ");
+        serial_write("linox: bank ");
         let owner = linux_activation_owner(pid);
         for value in [
             bank as u64,
@@ -1732,7 +1732,7 @@ fn linux_report_live_bank_threads() {
             if state == LINUX_THREAD_FREE {
                 continue;
             }
-            serial_write("ginux:   thread slot/tid/state/wait/key/deadline/owner-only: ");
+            serial_write("linox:   thread slot/tid/state/wait/key/deadline/owner-only: ");
             for value in [
                 slot as u64,
                 u64::from(
@@ -1762,9 +1762,9 @@ fn linux_report_live_bank_threads() {
             serial_write("\r\n");
         }
     }
-    serial_write("ginux: sysrq: light cpus cpu/yielded/slice-ticks:\r\n");
+    serial_write("linox: sysrq: light cpus cpu/yielded/slice-ticks:\r\n");
     for cpu in 0..CPU_ENTRY_STATE_LIMIT {
-        serial_write("ginux: cpu ");
+        serial_write("linox: cpu ");
         for value in [
             cpu as u64,
             u64::from(LINUX_LIGHT_THREAD_YIELDED[cpu].load(Ordering::Acquire)),
@@ -1794,7 +1794,7 @@ fn evict_linux_light_threads() {
         core::hint::spin_loop();
         crate::sync::kernel_entry_return_from_user();
         if timer::timestamp_counter().wrapping_sub(started) > 20_000_000_000 {
-            serial_write("ginux: threads of an exec'ing process did not leave pid/users: ");
+            serial_write("linox: threads of an exec'ing process did not leave pid/users: ");
             serial_write_u64(u64::from(current_linux_process_pid()));
             serial_write(" ");
             serial_write_u64(u64::from(LINUX_BANK_USERS[bank].load(Ordering::Acquire)));
@@ -1837,7 +1837,7 @@ fn wait_for_linux_process_threads_to_leave(pid: u32) {
         core::hint::spin_loop();
         crate::sync::kernel_entry_return_from_user();
         if timer::timestamp_counter().wrapping_sub(started) > 20_000_000_000 {
-            serial_write("ginux: threads of exiting process did not leave pid/users: ");
+            serial_write("linox: threads of exiting process did not leave pid/users: ");
             serial_write_u64(u64::from(pid));
             serial_write(" ");
             serial_write_u64(u64::from(LINUX_BANK_USERS[bank].load(Ordering::Acquire)));
@@ -2389,7 +2389,7 @@ fn run_linux_light_thread_here(cpu: usize, bank: usize, pid: u32, slot: usize) -
             X86_RUNTIME
                 .LINUX_CURRENT_THREAD_SLOT
                 .store(LINUX_THREAD_SLOT_NONE, Ordering::SeqCst);
-            serial_write("ginux: light thread entry failed pid/slot/cpu: ");
+            serial_write("linox: light thread entry failed pid/slot/cpu: ");
             serial_write_u64(u64::from(pid));
             serial_write(" ");
             serial_write_u64(slot as u64);
@@ -2413,7 +2413,7 @@ fn run_linux_light_thread_here(cpu: usize, bank: usize, pid: u32, slot: usize) -
             {
                 return true;
             }
-            serial_write("ginux: light thread dropped pid/slot/cpu: ");
+            serial_write("linox: light thread dropped pid/slot/cpu: ");
             serial_write_u64(u64::from(pid));
             serial_write(" ");
             serial_write_u64(slot as u64);
@@ -2443,7 +2443,7 @@ fn park_linux_light_thread(
     };
     let slot = usize::from(handle.slot);
     if !save_linux_thread_return_context(handle, context) {
-        serial_write("ginux: light thread context rejected pid/slot/rip/rsp: ");
+        serial_write("linox: light thread context rejected pid/slot/rip/rsp: ");
         for value in [
             u64::from(current_linux_process_pid()),
             slot as u64,
@@ -2915,7 +2915,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
             idle_ticks = LINUX_SMP_IDLE_SPIN_TICKS;
             crate::cpu_time::add_run();
             if !run_linux_process_on_this_cpu(pid) {
-                serial_write("ginux: application processor run failed cpu/pid: ");
+                serial_write("linox: application processor run failed cpu/pid: ");
                 serial_write_u64(cpu as u64);
                 serial_write(" ");
                 serial_write_u64(u64::from(pid));
@@ -2994,7 +2994,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
 fn run_linux_light_thread_reporting(cpu: usize, bank: usize, slot: usize) {
     crate::cpu_time::add_run();
     if !run_linux_light_thread(cpu, bank, slot) {
-        serial_write("ginux: application processor thread run failed cpu/bank/slot: ");
+        serial_write("linox: application processor thread run failed cpu/bank/slot: ");
         serial_write_u64(cpu as u64);
         serial_write(" ");
         serial_write_u64(bank as u64);
@@ -4121,16 +4121,16 @@ static PRIVILEGE_ENTRY_NMI_PROBE_HITS: AtomicU8 = AtomicU8::new(0);
 global_asm!(
     r#"
     .text
-    .global ginux_raw_copy_from_user
-    .global ginux_copy_from_user_fault_begin
-    .global ginux_copy_from_user_fault_end
-    .global ginux_copy_from_user_fixup
-ginux_raw_copy_from_user:
+    .global linox_raw_copy_from_user
+    .global linox_copy_from_user_fault_begin
+    .global linox_copy_from_user_fault_end
+    .global linox_copy_from_user_fixup
+linox_raw_copy_from_user:
     mov rax, rdx
     test rax, rax
     jz 2f
     stac
-ginux_copy_from_user_fault_begin:
+linox_copy_from_user_fault_begin:
 1:
     mov cl, byte ptr [rsi]
     mov byte ptr [rdi], cl
@@ -4138,24 +4138,24 @@ ginux_copy_from_user_fault_begin:
     inc rdi
     dec rax
     jnz 1b
-ginux_copy_from_user_fault_end:
+linox_copy_from_user_fault_end:
     clac
 2:
     ret
-ginux_copy_from_user_fixup:
+linox_copy_from_user_fixup:
     clac
     ret
 
-    .global ginux_raw_copy_to_user
-    .global ginux_copy_to_user_fault_begin
-    .global ginux_copy_to_user_fault_end
-    .global ginux_copy_to_user_fixup
-ginux_raw_copy_to_user:
+    .global linox_raw_copy_to_user
+    .global linox_copy_to_user_fault_begin
+    .global linox_copy_to_user_fault_end
+    .global linox_copy_to_user_fixup
+linox_raw_copy_to_user:
     mov rax, rdx
     test rax, rax
     jz 4f
     stac
-ginux_copy_to_user_fault_begin:
+linox_copy_to_user_fault_begin:
 3:
     mov cl, byte ptr [rsi]
     mov byte ptr [rdi], cl
@@ -4163,16 +4163,16 @@ ginux_copy_to_user_fault_begin:
     inc rdi
     dec rax
     jnz 3b
-ginux_copy_to_user_fault_end:
+linox_copy_to_user_fault_end:
     clac
 4:
     ret
-ginux_copy_to_user_fixup:
+linox_copy_to_user_fixup:
     clac
     ret
 
-    .global ginux_breakpoint_entry
-ginux_breakpoint_entry:
+    .global linox_breakpoint_entry
+linox_breakpoint_entry:
     test qword ptr [rsp + 8], 3
     jz 1f
     swapgs
@@ -4219,25 +4219,25 @@ ginux_breakpoint_entry:
 2:
     iretq
 
-    .macro GINUX_EXCEPTION_NO_ERROR vector
-    .global ginux_exception_\vector
-ginux_exception_\vector:
+    .macro LINOX_EXCEPTION_NO_ERROR vector
+    .global linox_exception_\vector
+linox_exception_\vector:
     push 0
     push \vector
-    jmp ginux_fatal_exception_common
+    jmp linox_fatal_exception_common
     .endm
 
-    .macro GINUX_EXCEPTION_ERROR vector
-    .global ginux_exception_\vector
-ginux_exception_\vector:
+    .macro LINOX_EXCEPTION_ERROR vector
+    .global linox_exception_\vector
+linox_exception_\vector:
     push \vector
-    jmp ginux_fatal_exception_common
+    jmp linox_fatal_exception_common
     .endm
 
-    GINUX_EXCEPTION_NO_ERROR 0
-    GINUX_EXCEPTION_NO_ERROR 1
-    .global ginux_nmi_entry
-ginux_nmi_entry:
+    LINOX_EXCEPTION_NO_ERROR 0
+    LINOX_EXCEPTION_NO_ERROR 1
+    .global linox_nmi_entry
+linox_nmi_entry:
     clac
     cld
     lock inc byte ptr [rip + {entry_nmi_probe_hits}]
@@ -4250,39 +4250,39 @@ ginux_nmi_entry:
 1:
     pop rax
     iretq
-    GINUX_EXCEPTION_NO_ERROR 4
-    GINUX_EXCEPTION_NO_ERROR 5
-    GINUX_EXCEPTION_NO_ERROR 6
-    GINUX_EXCEPTION_NO_ERROR 7
-    .global ginux_double_fault_entry
-ginux_double_fault_entry:
+    LINOX_EXCEPTION_NO_ERROR 4
+    LINOX_EXCEPTION_NO_ERROR 5
+    LINOX_EXCEPTION_NO_ERROR 6
+    LINOX_EXCEPTION_NO_ERROR 7
+    .global linox_double_fault_entry
+linox_double_fault_entry:
     push 8
-    jmp ginux_fatal_exception_common
-    GINUX_EXCEPTION_NO_ERROR 9
-    GINUX_EXCEPTION_ERROR 10
-    GINUX_EXCEPTION_ERROR 11
-    GINUX_EXCEPTION_ERROR 12
-    GINUX_EXCEPTION_ERROR 13
-    GINUX_EXCEPTION_ERROR 14
-    GINUX_EXCEPTION_NO_ERROR 15
-    GINUX_EXCEPTION_NO_ERROR 16
-    GINUX_EXCEPTION_ERROR 17
-    GINUX_EXCEPTION_NO_ERROR 18
-    GINUX_EXCEPTION_NO_ERROR 19
-    GINUX_EXCEPTION_NO_ERROR 20
-    GINUX_EXCEPTION_ERROR 21
-    GINUX_EXCEPTION_NO_ERROR 22
-    GINUX_EXCEPTION_NO_ERROR 23
-    GINUX_EXCEPTION_NO_ERROR 24
-    GINUX_EXCEPTION_NO_ERROR 25
-    GINUX_EXCEPTION_NO_ERROR 26
-    GINUX_EXCEPTION_NO_ERROR 27
-    GINUX_EXCEPTION_NO_ERROR 28
-    GINUX_EXCEPTION_ERROR 29
-    GINUX_EXCEPTION_ERROR 30
-    GINUX_EXCEPTION_NO_ERROR 31
+    jmp linox_fatal_exception_common
+    LINOX_EXCEPTION_NO_ERROR 9
+    LINOX_EXCEPTION_ERROR 10
+    LINOX_EXCEPTION_ERROR 11
+    LINOX_EXCEPTION_ERROR 12
+    LINOX_EXCEPTION_ERROR 13
+    LINOX_EXCEPTION_ERROR 14
+    LINOX_EXCEPTION_NO_ERROR 15
+    LINOX_EXCEPTION_NO_ERROR 16
+    LINOX_EXCEPTION_ERROR 17
+    LINOX_EXCEPTION_NO_ERROR 18
+    LINOX_EXCEPTION_NO_ERROR 19
+    LINOX_EXCEPTION_NO_ERROR 20
+    LINOX_EXCEPTION_ERROR 21
+    LINOX_EXCEPTION_NO_ERROR 22
+    LINOX_EXCEPTION_NO_ERROR 23
+    LINOX_EXCEPTION_NO_ERROR 24
+    LINOX_EXCEPTION_NO_ERROR 25
+    LINOX_EXCEPTION_NO_ERROR 26
+    LINOX_EXCEPTION_NO_ERROR 27
+    LINOX_EXCEPTION_NO_ERROR 28
+    LINOX_EXCEPTION_ERROR 29
+    LINOX_EXCEPTION_ERROR 30
+    LINOX_EXCEPTION_NO_ERROR 31
 
-ginux_fatal_exception_common:
+linox_fatal_exception_common:
     cli
     clac
     cld
@@ -4303,29 +4303,29 @@ ginux_fatal_exception_common:
     push r15
     mov r12, rsp
     test qword ptr [rsp + 144], 3
-    jnz ginux_user_fault_common
+    jnz linox_user_fault_common
     cmp qword ptr [rsp + 120], 14
-    jne ginux_fatal_exception_call
+    jne linox_fatal_exception_call
     mov rax, [rsp + 136]
-    lea rbx, [rip + ginux_copy_from_user_fault_begin]
+    lea rbx, [rip + linox_copy_from_user_fault_begin]
     cmp rax, rbx
     jb 1f
-    lea rbx, [rip + ginux_copy_from_user_fault_end]
+    lea rbx, [rip + linox_copy_from_user_fault_end]
     cmp rax, rbx
     jae 1f
-    lea rax, [rip + ginux_copy_from_user_fixup]
+    lea rax, [rip + linox_copy_from_user_fixup]
     mov [rsp + 136], rax
-    jmp ginux_fault_return
+    jmp linox_fault_return
 1:
-    lea rbx, [rip + ginux_copy_to_user_fault_begin]
+    lea rbx, [rip + linox_copy_to_user_fault_begin]
     cmp rax, rbx
     jb 2f
-    lea rbx, [rip + ginux_copy_to_user_fault_end]
+    lea rbx, [rip + linox_copy_to_user_fault_end]
     cmp rax, rbx
     jae 2f
-    lea rax, [rip + ginux_copy_to_user_fixup]
+    lea rax, [rip + linox_copy_to_user_fixup]
     mov [rsp + 136], rax
-    jmp ginux_fault_return
+    jmp linox_fault_return
 2:
     mov r12, rsp
     mov rdi, [rsp + 128]
@@ -4333,9 +4333,9 @@ ginux_fatal_exception_common:
     and rsp, -16
     call {kernel_linux_cow_fault_handler}
     test rax, rax
-    jnz ginux_fault_return
+    jnz linox_fault_return
     mov rsp, r12
-ginux_fatal_exception_call:
+linox_fatal_exception_call:
     mov rdi, [rsp + 120]
     mov rsi, [rsp + 128]
     mov rdx, cr2
@@ -4345,14 +4345,14 @@ ginux_fatal_exception_call:
     call {fatal_exception_handler}
     ud2
 
-ginux_user_fault_common:
+linox_user_fault_common:
     swapgs
     mov r12, rsp
     mov rdi, rsp
     and rsp, -16
     call {user_fault_handler}
     cmp rax, -1
-    je ginux_user_return_kernel
+    je linox_user_return_kernel
     mov rsp, r12
     pop r15
     pop r14
@@ -4372,7 +4372,7 @@ ginux_user_fault_common:
     add rsp, 16
     swapgs
     iretq
-ginux_fault_return:
+linox_fault_return:
     mov rsp, r12
     pop r15
     pop r14
@@ -4394,44 +4394,44 @@ ginux_fault_return:
 
     .section .rodata
     .align 8
-    .global ginux_exception_entries
-ginux_exception_entries:
-    .quad ginux_exception_0
-    .quad ginux_exception_1
-    .quad ginux_nmi_entry
-    .quad ginux_breakpoint_entry
-    .quad ginux_exception_4
-    .quad ginux_exception_5
-    .quad ginux_exception_6
-    .quad ginux_exception_7
-    .quad ginux_double_fault_entry
-    .quad ginux_exception_9
-    .quad ginux_exception_10
-    .quad ginux_exception_11
-    .quad ginux_exception_12
-    .quad ginux_exception_13
-    .quad ginux_exception_14
-    .quad ginux_exception_15
-    .quad ginux_exception_16
-    .quad ginux_exception_17
-    .quad ginux_exception_18
-    .quad ginux_exception_19
-    .quad ginux_exception_20
-    .quad ginux_exception_21
-    .quad ginux_exception_22
-    .quad ginux_exception_23
-    .quad ginux_exception_24
-    .quad ginux_exception_25
-    .quad ginux_exception_26
-    .quad ginux_exception_27
-    .quad ginux_exception_28
-    .quad ginux_exception_29
-    .quad ginux_exception_30
-    .quad ginux_exception_31
+    .global linox_exception_entries
+linox_exception_entries:
+    .quad linox_exception_0
+    .quad linox_exception_1
+    .quad linox_nmi_entry
+    .quad linox_breakpoint_entry
+    .quad linox_exception_4
+    .quad linox_exception_5
+    .quad linox_exception_6
+    .quad linox_exception_7
+    .quad linox_double_fault_entry
+    .quad linox_exception_9
+    .quad linox_exception_10
+    .quad linox_exception_11
+    .quad linox_exception_12
+    .quad linox_exception_13
+    .quad linox_exception_14
+    .quad linox_exception_15
+    .quad linox_exception_16
+    .quad linox_exception_17
+    .quad linox_exception_18
+    .quad linox_exception_19
+    .quad linox_exception_20
+    .quad linox_exception_21
+    .quad linox_exception_22
+    .quad linox_exception_23
+    .quad linox_exception_24
+    .quad linox_exception_25
+    .quad linox_exception_26
+    .quad linox_exception_27
+    .quad linox_exception_28
+    .quad linox_exception_29
+    .quad linox_exception_30
+    .quad linox_exception_31
 
     .text
-    .global ginux_user_enter
-ginux_user_enter:
+    .global linox_user_enter
+linox_user_enter:
     mov r10, [rsp + 8]
     mov r11, [rsp + 16]
     push rbx
@@ -4451,8 +4451,8 @@ ginux_user_enter:
     swapgs
     iretq
 
-    .global ginux_process_user_enter
-ginux_process_user_enter:
+    .global linox_process_user_enter
+linox_process_user_enter:
     push rbx
     push rbp
     push r12
@@ -4484,8 +4484,8 @@ ginux_process_user_enter:
     swapgs
     iretq
 
-    .global ginux_syscall_entry
-ginux_syscall_entry:
+    .global linox_syscall_entry
+linox_syscall_entry:
     cli
     swapgs
     clac
@@ -4511,7 +4511,7 @@ ginux_syscall_entry:
     and rsp, -16
     call {syscall_handler}
     cmp rax, -1
-    je ginux_user_return_kernel
+    je linox_user_return_kernel
     mov rsp, r12
     pop r15
     pop r14
@@ -4530,8 +4530,8 @@ ginux_syscall_entry:
     swapgs
     iretq
 
-    .global ginux_linux_syscall_entry
-ginux_linux_syscall_entry:
+    .global linox_linux_syscall_entry
+linox_linux_syscall_entry:
     cli
     swapgs
     clac
@@ -4581,9 +4581,9 @@ ginux_linux_syscall_entry:
     int 2
 5:
     cmp rax, {linux_return_to_kernel}
-    je ginux_user_return_kernel
+    je linox_user_return_kernel
     cmp rax, {linux_return_from_iret}
-    je ginux_linux_iret_return
+    je linox_linux_iret_return
     mov gs:[{entry_syscall_result}], rax
     mov rsp, gs:[{entry_kernel_frame}]
     pop r15
@@ -4601,10 +4601,10 @@ ginux_linux_syscall_entry:
     mov rax, gs:[{entry_syscall_result}]
     mov rcx, gs:[{entry_user_rip}]
     shr rcx, 47
-    jne ginux_invalid_user_return
+    jne linox_invalid_user_return
     mov rcx, gs:[{entry_user_rsp}]
     shr rcx, 47
-    jne ginux_invalid_user_return
+    jne linox_invalid_user_return
     mov rcx, gs:[{entry_user_rip}]
     mov r11, gs:[{entry_user_rflags}]
     lock btr qword ptr [rip + {entry_nmi_probe_mask}], 5
@@ -4614,7 +4614,7 @@ ginux_linux_syscall_entry:
     mov rsp, gs:[{entry_user_rsp}]
     swapgs
     sysretq
-ginux_invalid_user_return:
+linox_invalid_user_return:
     mov rsp, gs:[{entry_return_stack}]
     pop r15
     pop r14
@@ -4623,7 +4623,7 @@ ginux_invalid_user_return:
     pop rbp
     pop rbx
     ret
-ginux_linux_iret_return:
+linox_linux_iret_return:
     mov rsp, gs:[{entry_kernel_frame}]
     pop r15
     pop r14
@@ -4647,7 +4647,7 @@ ginux_linux_iret_return:
     mov r11, gs:[{entry_signal_r11}]
     swapgs
     iretq
-ginux_user_return_kernel:
+linox_user_return_kernel:
     mov rsp, gs:[{entry_return_stack}]
     pop r15
     pop r14
@@ -4683,9 +4683,9 @@ ginux_user_return_kernel:
 );
 
 extern "C" {
-    static ginux_exception_entries: [usize; 32];
-    fn ginux_syscall_entry();
-    fn ginux_linux_syscall_entry();
+    static linox_exception_entries: [usize; 32];
+    fn linox_syscall_entry();
+    fn linox_linux_syscall_entry();
 }
 
 unsafe fn enter_linux_process(entry: usize, stack: usize, general: *const u64, rflags: u64) {
@@ -4701,7 +4701,7 @@ unsafe fn enter_linux_process(entry: usize, stack: usize, general: *const u64, r
 ///
 /// # Safety
 ///
-/// As for `ginux_process_user_enter`.
+/// As for `linox_process_user_enter`.
 pub(super) unsafe fn process_user_enter(
     entry: usize,
     stack: usize,
@@ -4711,7 +4711,7 @@ pub(super) unsafe fn process_user_enter(
     crate::sync::kernel_entry_leave_to_user();
     crate::cpu_time::leave_for_user();
     set_user_time_stamp_access(linux_user_time_stamp_allowed());
-    ginux_process_user_enter(entry, stack, general, rflags);
+    linox_process_user_enter(entry, stack, general, rflags);
     // A return the entry stub refused (a non-canonical user address) comes
     // back here without passing the system call's lock re-entry.
     set_user_time_stamp_access(true);
@@ -4747,7 +4747,7 @@ unsafe fn enter_linux_runtime_process(
             && current_linux_runtime_cpu_index() == 0
             && LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8
         {
-            serial_write("ginux: process entered without an activation pid/cpu: ");
+            serial_write("linox: process entered without an activation pid/cpu: ");
             serial_write_u64(u64::from(current_linux_process_pid()));
             serial_write(" ");
             serial_write_u64(current_cpu_index_checked().unwrap_or(99) as u64);
@@ -4773,7 +4773,7 @@ unsafe fn enter_user(
     if !address_space::current_user_entry_context_is_valid(entry as u64, stack as u64) {
         return false;
     }
-    ginux_user_enter(
+    linox_user_enter(
         entry,
         stack,
         host_handle,
@@ -4788,9 +4788,9 @@ unsafe fn enter_user(
 }
 
 extern "sysv64" {
-    fn ginux_raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize;
-    fn ginux_raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize;
-    fn ginux_user_enter(
+    fn linox_raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize;
+    fn linox_raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize;
+    fn linox_user_enter(
         entry: usize,
         stack: usize,
         host_handle: u64,
@@ -4801,15 +4801,15 @@ extern "sysv64" {
         service_identity: u64,
         root_handle: u64,
     );
-    fn ginux_process_user_enter(entry: usize, stack: usize, general: *const u64, rflags: u64);
+    fn linox_process_user_enter(entry: usize, stack: usize, general: *const u64, rflags: u64);
 }
 
 pub(crate) unsafe fn raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize {
-    ginux_raw_copy_from_user(output, input, length)
+    linox_raw_copy_from_user(output, input, length)
 }
 
 pub(crate) unsafe fn raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize {
-    ginux_raw_copy_to_user(output, input, length)
+    linox_raw_copy_to_user(output, input, length)
 }
 
 pub(crate) fn verify_user_copy_fault_fixups(mapped_end: u64, unmapped: u64) -> bool {
@@ -4956,7 +4956,7 @@ pub(crate) fn user_mode_instruction_prevention_enabled() -> bool {
 }
 
 pub(crate) fn initialize_user_call_gate() -> bool {
-    install_user_interrupt_gate(SYSCALL_VECTOR, ginux_syscall_entry as *const () as usize)
+    install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize)
         && user_interrupt_surface_is_minimal()
 }
 
@@ -4982,7 +4982,7 @@ pub(crate) fn execute_linux_process_child(
     // The gate is installed before APs enter userspace. Avoid rewriting every
     // CPU's IDT while another CPU may already be executing the same path.
     let gate_installed = user_interrupt_surface_is_minimal()
-        || install_user_interrupt_gate(SYSCALL_VECTOR, ginux_syscall_entry as *const () as usize);
+        || install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize);
     let interrupt_surface_valid = user_interrupt_surface_is_minimal();
     let preconditions = u8::from(entry_valid)
         | (u8::from(stack_valid) << 1)
@@ -5248,7 +5248,7 @@ pub(crate) fn resume_live_linux_process(
         return false;
     }
     if general[0] == LINUX_RETURN_TO_KERNEL {
-        serial_write("ginux: resuming pid ");
+        serial_write("linox: resuming pid ");
         serial_write_u64(u64::from(current_linux_process_pid()));
         serial_write(" at rip ");
         serial_write_u64(entry as u64);
@@ -5294,7 +5294,7 @@ pub(crate) fn resume_live_linux_process(
         && (X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
             || cfg!(feature = "verification-boot"))
     {
-        serial_write("ginux: Linux resume FS mismatch expected/returned/saved/restored: ");
+        serial_write("linox: Linux resume FS mismatch expected/returned/saved/restored: ");
         for value in [fs_base, returned_fs, saved_fs, u64::from(restored)] {
             serial_write_u64(value);
             serial_write(" ");
@@ -5323,7 +5323,7 @@ pub(crate) fn verify_user_syscall(
     root_handle: u64,
     service_domain: u64,
 ) -> bool {
-    if !install_user_interrupt_gate(SYSCALL_VECTOR, ginux_syscall_entry as *const () as usize)
+    if !install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize)
         || !user_interrupt_surface_is_minimal()
     {
         return false;
@@ -5936,7 +5936,7 @@ fn take_runtime_linux_process_address_space_snapshot(
     let mut grow = (false, false);
     loop {
         if !snapshot.reset(grow) {
-            serial_write("ginux: runtime snapshot out of memory hierarchy/mappings: ");
+            serial_write("linox: runtime snapshot out of memory hierarchy/mappings: ");
             serial_write_u64(snapshot.hierarchy.len() as u64);
             serial_write(" ");
             serial_write_u64(snapshot.mappings.len() as u64);
@@ -5959,7 +5959,7 @@ fn take_runtime_linux_process_address_space_snapshot(
                 );
             }
             address_space::SnapshotWalk::Invalid => {
-                serial_write("ginux: runtime snapshot walk rejected hierarchy/mappings: ");
+                serial_write("linox: runtime snapshot walk rejected hierarchy/mappings: ");
                 serial_write_u64(snapshot.hierarchy_count as u64);
                 serial_write(" ");
                 serial_write_u64(snapshot.mapping_count as u64);
@@ -5975,7 +5975,7 @@ fn take_runtime_linux_process_address_space_snapshot(
     // snapshots and validate the trusted walk in one linear pass.
     let valid = snapshot.is_valid_runtime_walk();
     if !valid {
-        serial_write("ginux: runtime snapshot invalid hierarchy/mappings: ");
+        serial_write("linox: runtime snapshot invalid hierarchy/mappings: ");
         serial_write_u64(snapshot.hierarchy_count as u64);
         serial_write(" ");
         serial_write_u64(snapshot.mapping_count as u64);
@@ -6044,7 +6044,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
         || hierarchy[0].address() != address_space::current_root_address()
     {
         if cfg!(feature = "verification-boot") {
-            serial_write("ginux: snapshot hierarchy count/root/current ");
+            serial_write("linox: snapshot hierarchy count/root/current ");
             serial_write_u64(hierarchy_count as u64);
             serial_write(" ");
             serial_write_u64(hierarchy[0].address());
@@ -6066,7 +6066,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
             .store(30 + index as u8, Ordering::SeqCst);
         if !append_linux_process_snapshot_mapping(mappings, &mut mapping_count, mapping) {
             if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-                serial_write("ginux: snapshot rejected active mapping ");
+                serial_write("linox: snapshot rejected active mapping ");
                 serial_write_u64(index as u64);
                 serial_write(" address/frame/flags ");
                 serial_write_u64(mapping.address as u64);
@@ -6113,7 +6113,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
         },
     ) {
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            serial_write("ginux: snapshot rejected stack address/frame/current/count ");
+            serial_write("linox: snapshot rejected stack address/frame/current/count ");
             serial_write_u64(stack_address as u64);
             serial_write(" ");
             serial_write_u64(stack_frame.address());
@@ -6252,7 +6252,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
             return None;
         }
         let Some(frame) = memory::FrameLease::from_parts(frame_address, generation) else {
-            serial_write("ginux: snapshot missing TLS lease address/frame/generation/index ");
+            serial_write("linox: snapshot missing TLS lease address/frame/generation/index ");
             serial_write_u64(address);
             serial_write(" ");
             serial_write_u64(frame_address);
@@ -6275,7 +6275,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
                 dontfork: false,
             },
         ) {
-            serial_write("ginux: snapshot rejected TLS address/frame/current/index ");
+            serial_write("linox: snapshot rejected TLS address/frame/current/index ");
             serial_write_u64(address);
             serial_write(" ");
             serial_write_u64(frame.address());
@@ -6377,7 +6377,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
     ) != address_space::SnapshotWalk::Complete
     {
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            serial_write("ginux: runtime snapshot hierarchy/mappings before rejection: ");
+            serial_write("linox: runtime snapshot hierarchy/mappings before rejection: ");
             serial_write_u64(hierarchy_count as u64);
             serial_write(" ");
             serial_write_u64(mapping_count as u64);
@@ -6390,7 +6390,7 @@ pub(crate) fn live_linux_process_address_space_snapshot(
     snapshot.mapping_count = mapping_count;
     let valid = snapshot.is_valid();
     if !valid {
-        serial_write("ginux: Linux process snapshot expected/observed hierarchy/leaves ");
+        serial_write("linox: Linux process snapshot expected/observed hierarchy/leaves ");
         serial_write_u64(snapshot.hierarchy_count as u64);
         serial_write(" ");
         serial_write_u64(snapshot.mapping_count as u64);
@@ -6460,7 +6460,7 @@ fn record_live_linux_process_snapshot() -> bool {
         record_nonruntime_linux_process_snapshot()
     };
     if !valid {
-        serial_write("ginux: Linux process snapshot failed at stage ");
+        serial_write("linox: Linux process snapshot failed at stage ");
         serial_write_u64(u64::from(
             X86_RUNTIME
                 .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -6481,11 +6481,11 @@ fn refresh_nonruntime_linux_process_registry(context: LinuxUserContext) -> bool 
     // authoritative for those COW replacements; refresh the legacy execution
     // cache before using it to construct the verification snapshot.
     if !sync_live_linux_process_address_space(current_linux_process_pid()) {
-        serial_write("ginux: live registry refresh address-space sync failed\r\n");
+        serial_write("linox: live registry refresh address-space sync failed\r\n");
         return false;
     }
     let Some(snapshot) = live_linux_process_address_space_snapshot() else {
-        serial_write("ginux: live registry refresh snapshot failed at stage ");
+        serial_write("linox: live registry refresh snapshot failed at stage ");
         serial_write_u64(u64::from(
             X86_RUNTIME
                 .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -6539,7 +6539,7 @@ fn refresh_linux_process_registry_for_wait(context: LinuxUserContext) -> bool {
 fn refresh_live_linux_process_registry(context: LinuxUserContext) -> bool {
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         let Some(snapshot) = live_runtime_linux_process_address_space_snapshot() else {
-            serial_write("ginux: live registry refresh snapshot failed at stage ");
+            serial_write("linox: live registry refresh snapshot failed at stage ");
             serial_write_u64(u64::from(
                 X86_RUNTIME
                     .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -6567,7 +6567,7 @@ fn refresh_live_linux_process_registry(context: LinuxUserContext) -> bool {
 #[inline(never)]
 fn install_nonruntime_linux_process_registry(entry: usize, stack: usize, fs_base: u64) -> bool {
     let Some(snapshot) = live_linux_process_address_space_snapshot() else {
-        serial_write("ginux: live process registry install snapshot failed at stage ");
+        serial_write("linox: live process registry install snapshot failed at stage ");
         serial_write_u64(u64::from(
             X86_RUNTIME
                 .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -6585,7 +6585,7 @@ fn install_nonruntime_linux_process_registry(entry: usize, stack: usize, fs_base
         fs_base,
     );
     if !installed {
-        serial_write("ginux: live process registry install rejected snapshot\r\n");
+        serial_write("linox: live process registry install rejected snapshot\r\n");
     }
     installed
 }
@@ -6593,7 +6593,7 @@ fn install_nonruntime_linux_process_registry(entry: usize, stack: usize, fs_base
 fn install_live_linux_process_registry(entry: usize, stack: usize, fs_base: u64) -> bool {
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         let Some(snapshot) = live_runtime_linux_process_address_space_snapshot() else {
-            serial_write("ginux: live process registry install snapshot failed at stage ");
+            serial_write("linox: live process registry install snapshot failed at stage ");
             serial_write_u64(u64::from(
                 X86_RUNTIME
                     .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -6629,7 +6629,7 @@ fn sync_live_linux_process_address_space(pid: u32) -> bool {
     for index in 0..X86_RUNTIME.ELF_PROBE_PAGE_TABLE_FRAMES.len() {
         let Some(frame) = linux_process::live_process_hierarchy_frame(pid, index) else {
             if index < 5 {
-                serial_write("ginux: process address-space sync missing hierarchy frame\r\n");
+                serial_write("linox: process address-space sync missing hierarchy frame\r\n");
                 return false;
             }
             X86_RUNTIME.ELF_PROBE_PAGE_TABLE_FRAMES[index].store(0, Ordering::SeqCst);
@@ -6649,7 +6649,7 @@ fn sync_live_linux_process_address_space(pid: u32) -> bool {
         let address =
             X86_RUNTIME.ELF_PROBE_ACTIVE_IMAGE_ADDRESSES[index].load(Ordering::SeqCst) as usize;
         let Some(mapping) = lookup(address) else {
-            serial_write("ginux: process address-space sync missing image mapping ");
+            serial_write("linox: process address-space sync missing image mapping ");
             serial_write_u64(index as u64);
             serial_write("\r\n");
             return false;
@@ -6673,7 +6673,7 @@ fn sync_live_linux_process_address_space(pid: u32) -> bool {
             continue;
         }
         let Some(mapping) = lookup(address) else {
-            serial_write("ginux: process address-space sync missing exec mapping ");
+            serial_write("linox: process address-space sync missing exec mapping ");
             serial_write_u64(index as u64);
             serial_write("\r\n");
             return false;
@@ -6692,7 +6692,7 @@ fn sync_live_linux_process_address_space(pid: u32) -> bool {
             PAGE_SIZE
         };
     let (Some(stack), Some(heap)) = (lookup(stack_address), lookup(heap_address)) else {
-        serial_write("ginux: process address-space sync missing stack or heap mapping\r\n");
+        serial_write("linox: process address-space sync missing stack or heap mapping\r\n");
         return false;
     };
     X86_RUNTIME
@@ -6871,7 +6871,7 @@ fn execute_deferred_live_fork() -> bool {
             .store(false, Ordering::SeqCst);
         let _ = linux_process::set_live_process_child_namespaces(parent_pid, None);
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            serial_write("ginux: runtime fork preparation failed at stage ");
+            serial_write("linox: runtime fork preparation failed at stage ");
             serial_write_u64(u64::from(linux_process::live_fork_execution_stage()));
             serial_write("\r\n");
             // Linux fails fork with EAGAIN when it runs out of processes or
@@ -6968,7 +6968,7 @@ fn execute_deferred_live_fork() -> bool {
     }
     if child.pid == 1 || child.general[0] != 0 {
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            serial_write("ginux: runtime fork produced invalid child pid/rax ");
+            serial_write("linox: runtime fork produced invalid child pid/rax ");
             serial_write_u64(u64::from(child.pid));
             serial_write(" ");
             serial_write_u64(child.general[0]);
@@ -7114,7 +7114,7 @@ fn execute_deferred_live_fork() -> bool {
                 linux_rootfs_execve_domain(&path[..argument_size], slot)
             }) == Some(0);
         if !loaded {
-            serial_write("ginux: domain exec load failed\r\n");
+            serial_write("linox: domain exec load failed\r\n");
             return false;
         }
         save_current_linux_process_runtime_state(child.pid);
@@ -7249,7 +7249,7 @@ fn execute_deferred_live_fork() -> bool {
         return parent_resumed;
     }
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) && !(child_resumed && child_exited) {
-        serial_write("ginux: runtime child return resumed/exited/status ");
+        serial_write("linox: runtime child return resumed/exited/status ");
         serial_write_u64(u64::from(child_resumed));
         serial_write(" ");
         serial_write_u64(u64::from(child_exited));
@@ -7279,7 +7279,7 @@ fn execute_deferred_live_fork() -> bool {
         .flatten();
     let Some(parent) = parent else {
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            serial_write("ginux: runtime child completion failed at stage ");
+            serial_write("linox: runtime child completion failed at stage ");
             serial_write_u64(u64::from(linux_process::live_fork_execution_stage()));
             serial_write("\r\n");
         }
@@ -7364,8 +7364,8 @@ fn execute_deferred_live_fork() -> bool {
         Ordering::SeqCst,
     );
     if valid {
-        serial_write("ginux: Linux PID 1 fork and wait4 lifecycle completed\r\n");
-        serial_write("ginux: Linux fork inherited user namespace\r\n");
+        serial_write("linox: Linux PID 1 fork and wait4 lifecycle completed\r\n");
+        serial_write("linox: Linux fork inherited user namespace\r\n");
     }
     valid
 }
@@ -7414,7 +7414,7 @@ fn resume_linux_system_supervisor() -> bool {
     {
         if cfg!(feature = "verification-boot") {
             serial_write(
-                "ginux: Linux supervisor resume preconditions wait/shutdown/thread/status: ",
+                "linox: Linux supervisor resume preconditions wait/shutdown/thread/status: ",
             );
             serial_write_u64(u64::from(
                 X86_RUNTIME
@@ -7452,7 +7452,7 @@ fn resume_linux_system_supervisor() -> bool {
         .store(slot as u8, Ordering::SeqCst);
     X86_RUNTIME.CONTAINER_CONTROL_STATES[slot]
         .store(control_abi::DOMAIN_STATE_RUNNING as u8, Ordering::SeqCst);
-    crate::serial_write("ginux: configured runtime domain reached ready state\r\n");
+    crate::serial_write("linox: configured runtime domain reached ready state\r\n");
     let controller_completed = address_space::run_installed_interactive_controller();
     let shutdown_requested = X86_RUNTIME
         .CONTAINER_HOST_SHUTDOWN_REQUESTED
@@ -7462,7 +7462,7 @@ fn resume_linux_system_supervisor() -> bool {
     }
     if !controller_completed {
         crate::serial_write(
-            "ginux: authorized shutdown retained after controller teardown failure\r\n",
+            "linox: authorized shutdown retained after controller teardown failure\r\n",
         );
     }
     if X86_RUNTIME
@@ -7723,7 +7723,7 @@ pub(crate) fn export_persistent_domain_configuration(
         return false;
     }
     output.fill(0);
-    output[..8].copy_from_slice(b"GINUXDC1");
+    output[..8].copy_from_slice(b"LINOXDC1");
     output[8..12].copy_from_slice(&1_u32.to_le_bytes());
     output[12..14].copy_from_slice(&(control_abi::DOMAIN_LIMIT as u16).to_le_bytes());
     for slot in 0..control_abi::DOMAIN_LIMIT {
@@ -7744,7 +7744,7 @@ pub(crate) fn import_persistent_domain_configuration(
     if !X86_RUNTIME
         .CONTAINER_MANAGEMENT_ENABLED
         .load(Ordering::Acquire)
-        || &input[..8] != b"GINUXDC1"
+        || &input[..8] != b"LINOXDC1"
         || u32::from_le_bytes(input[8..12].try_into().unwrap_or([0; 4])) != 1
         || usize::from(u16::from_le_bytes(
             input[12..14].try_into().unwrap_or([0; 2]),
@@ -9153,14 +9153,14 @@ fn linux_trace_futex(event: u8, address: u64, detail: u64) {
 }
 
 fn linux_report_futex_trace() {
-    serial_write("ginux: futex trace cpu/event/pid/tid/address/detail/us (oldest first):\r\n");
+    serial_write("linox: futex trace cpu/event/pid/tid/address/detail/us (oldest first):\r\n");
     let next = LINUX_FUTEX_TRACE_NEXT.load(Ordering::Relaxed) as usize;
     let count = next.min(LINUX_FUTEX_TRACE_LIMIT).min(48);
     for step in 0..count {
         let index = (next + LINUX_FUTEX_TRACE_LIMIT - count + step) % LINUX_FUTEX_TRACE_LIMIT;
         let entry = &LINUX_FUTEX_TRACE[index];
         let head = entry[0].load(Ordering::Relaxed);
-        serial_write("ginux: futex ");
+        serial_write("linox: futex ");
         for value in [
             head >> 56,
             head >> 48 & 0xff,
@@ -9192,7 +9192,7 @@ fn linux_stall_diagnostic_from_loop() {
     {
         return;
     }
-    serial_write("ginux: Linux runtime loop sixty-second diagnostic\r\n");
+    serial_write("linox: Linux runtime loop sixty-second diagnostic\r\n");
     linux_write_stall_diagnostic();
 }
 
@@ -9775,11 +9775,11 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
     // kernel-entry lock; the processes it enters release it in user mode.
     let _kernel_entry = crate::sync::kernel_entry_lock();
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-        serial_write("ginux: Linux ELF verifier rejected active runtime mode\r\n");
+        serial_write("linox: Linux ELF verifier rejected active runtime mode\r\n");
         return LinuxElfResult::FAILED;
     }
     let Some(heap_limit) = execution.heap.checked_add(execution.heap_size) else {
-        serial_write("ginux: Linux ELF verifier heap overflow\r\n");
+        serial_write("linox: Linux ELF verifier heap overflow\r\n");
         return LinuxElfResult::FAILED;
     };
     let stack_page = execution.stack & !(PAGE_SIZE - 1);
@@ -9789,7 +9789,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         PAGE_SIZE
     };
     let Some(stack_base) = stack_page.checked_sub(stack_size - PAGE_SIZE) else {
-        serial_write("ginux: Linux ELF verifier stack underflow\r\n");
+        serial_write("linox: Linux ELF verifier stack underflow\r\n");
         return LinuxElfResult::FAILED;
     };
     let page_table_contract_valid = (5..=execution.page_table_frames.len())
@@ -9940,7 +9940,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         || !mmap_contract_valid
         || execution.exec_expected && execution.initial_image_mappings.is_empty()
     {
-        serial_write("ginux: Linux ELF initial contract rejection:");
+        serial_write("linox: Linux ELF initial contract rejection:");
         for valid in [
             page_table_contract_valid,
             stale_page_table_lease_rejected,
@@ -10035,7 +10035,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         || !tls_reclaim_state_clean
         || !sibling_stack_reclaim_state_clean
     {
-        serial_write("ginux: Linux ELF TLS contract rejection:");
+        serial_write("linox: Linux ELF TLS contract rejection:");
         for valid in [
             tls_contract_valid,
             tls_frame_contract_valid,
@@ -10049,18 +10049,18 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         return LinuxElfResult::FAILED;
     }
     if X86_RUNTIME.ELF_PROBE_ACTIVE.swap(true, Ordering::SeqCst) {
-        serial_write("ginux: Linux ELF verifier rejected stale active probe\r\n");
+        serial_write("linox: Linux ELF verifier rejected stale active probe\r\n");
         return LinuxElfResult::FAILED;
     }
     let Some(clock_frequency) = timer::monotonic_frequency()
         .filter(|frequency| *frequency <= u64::MAX / NANOSECONDS_PER_SECOND)
     else {
-        serial_write("ginux: Linux clock setup failed\r\n");
+        serial_write("linox: Linux clock setup failed\r\n");
         X86_RUNTIME.ELF_PROBE_ACTIVE.store(false, Ordering::SeqCst);
         return LinuxElfResult::FAILED;
     };
     let Some(saved_msrs) = configure_linux_syscall() else {
-        serial_write("ginux: Linux syscall setup failed\r\n");
+        serial_write("linox: Linux syscall setup failed\r\n");
         X86_RUNTIME.ELF_PROBE_ACTIVE.store(false, Ordering::SeqCst);
         return LinuxElfResult::FAILED;
     };
@@ -10091,7 +10091,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
             let initial_robust_list_valid = current_linux_robust_list() == Some(0x1120);
             let sibling_robust_list_valid = linux_thread_robust_list(2) == Ok(0x2220);
             if !execution.runtime {
-                serial_write("ginux: sibling robust-list metadata read\r\n");
+                serial_write("linox: sibling robust-list metadata read\r\n");
             }
             let initial_clear_child_tid_cleared = set_current_linux_clear_child_tid(0);
             let initial_robust_list_cleared = set_current_linux_robust_list(0);
@@ -10125,7 +10125,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
                 || !initial_robust_list_cleared
             {
                 if !execution.runtime {
-                    serial_write("ginux: Linux TLS lifecycle pre-clone validation failed\r\n");
+                    serial_write("linox: Linux TLS lifecycle pre-clone validation failed\r\n");
                     for valid in [
                         sibling_thread.tid == 2,
                         X86_RUNTIME.LINUX_THREAD_STACK_BASES[usize::from(sibling_thread.slot)]
@@ -10274,7 +10274,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
                 || !retire_linux_thread(sibling_thread)
             {
                 if !execution.runtime {
-                    serial_write("ginux: Linux clone lifecycle validation failed\r\n");
+                    serial_write("linox: Linux clone lifecycle validation failed\r\n");
                     for valid in [
                         invalid_flags_rejected,
                         invalid_stack_rejected,
@@ -10368,7 +10368,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         })()
         .unwrap_or(false);
     if !linux_thread_lifecycle_valid {
-        serial_write("ginux: Linux initial thread rejection\r\n");
+        serial_write("linox: Linux initial thread rejection\r\n");
         let _ = restore_linux_syscall(saved_msrs);
         let _ = finish_linux_thread_table();
         X86_RUNTIME.ELF_PROBE_ACTIVE.store(false, Ordering::SeqCst);
@@ -10839,7 +10839,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         .store(false, Ordering::SeqCst);
     for resource in 0..LINUX_RLIMIT_NLIMITS {
         let Some(limit) = linux_default_resource_limit(resource, execution.runtime) else {
-            serial_write("ginux: Linux resource-limit initialization failed\r\n");
+            serial_write("linox: Linux resource-limit initialization failed\r\n");
             return LinuxElfResult::FAILED;
         };
         let index = resource as usize * 2;
@@ -11004,7 +11004,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         || !crate::linux_overlay::teardown()
         || execution.runtime && !prepare_configured_linux_system_domain()
     {
-        serial_write("ginux: Linux runtime filesystem preparation failed\r\n");
+        serial_write("linox: Linux runtime filesystem preparation failed\r\n");
         return LinuxElfResult::FAILED;
     }
     for cursor in &X86_RUNTIME.ELF_PROBE_DESCRIPTOR_OFFSETS {
@@ -11264,14 +11264,14 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
     };
     let linux_wait_timer_armed = timer::arm_linux_wait_timer();
     if !linux_wait_timer_armed {
-        serial_write("ginux: Linux wait timer setup failed\r\n");
+        serial_write("linox: Linux wait timer setup failed\r\n");
         let _ = restore_linux_syscall(saved_msrs);
         let _ = finish_linux_thread_table();
         X86_RUNTIME.ELF_PROBE_ACTIVE.store(false, Ordering::SeqCst);
         return LinuxElfResult::FAILED;
     }
     if !linux_mount::activate_initial() {
-        serial_write("ginux: Linux mount setup failed\r\n");
+        serial_write("linox: Linux mount setup failed\r\n");
         let _ = timer::finish_linux_wait_timer();
         let _ = restore_linux_syscall(saved_msrs);
         let _ = finish_linux_thread_table();
@@ -11290,7 +11290,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
             .store(false, Ordering::Release);
     }
     if !install_live_linux_process_registry(execution.entry, execution.stack, active_fs_base()) {
-        serial_write("ginux: Linux process registry setup failed\r\n");
+        serial_write("linox: Linux process registry setup failed\r\n");
         X86_RUNTIME
             .LINUX_RUNTIME_MODE
             .store(false, Ordering::SeqCst);
@@ -11305,7 +11305,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         && !execution.runtime
         && !verify_linux_sysv_shared_memory_syscalls()
     {
-        serial_write("ginux: Linux SysV verification failed\r\n");
+        serial_write("linox: Linux SysV verification failed\r\n");
         let _ = linux_process::finish_live_process_registry(0);
         let _ = linux_mount::deactivate_initial();
         let _ = timer::finish_linux_wait_timer();
@@ -11396,7 +11396,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
     let live_process_registry_finished = live_fork_executed
         && linux_process::finish_live_process_registry(if live_fork_requested { 2 } else { 0 });
     if !live_process_registry_finished {
-        serial_write("ginux: live Linux fork stages: ");
+        serial_write("linox: live Linux fork stages: ");
         serial_write_u64(u64::from(live_fork_executed));
         serial_write(" ");
         serial_write_u64(u64::from(linux_process::live_fork_execution_stage()));
@@ -11730,7 +11730,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
             && signal_wait_timeout_count == 1
             && signal_wait_interrupt_count == 1)
     {
-        serial_write("ginux: Linux thread transition state:");
+        serial_write("linox: Linux thread transition state:");
         for state in [
             child_exit_count == 2,
             parent_resumed,
@@ -11790,7 +11790,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
             serial_write_u64(u64::from(state));
         }
         serial_write("\r\n");
-        serial_write("ginux: Linux thread transition counts:");
+        serial_write("linox: Linux thread transition counts:");
         for count in [
             child_exit_count,
             clone_dispatch_count,
@@ -12006,7 +12006,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         && X86_RUNTIME.ELF_PROBE_PIPE_LENGTH.swap(0, Ordering::SeqCst) == 0
         && offsets_reset;
     if !descriptor_state_valid {
-        serial_write("ginux: Linux descriptor state leak:");
+        serial_write("linox: Linux descriptor state leak:");
         for value in descriptor_snapshot {
             serial_write(" ");
             serial_write_u64(value);
@@ -12161,7 +12161,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
                 };
         }
         if observed_mappings != expected_mappings {
-            serial_write("ginux: Linux dependency mapping contract mismatch: ");
+            serial_write("linox: Linux dependency mapping contract mismatch: ");
             serial_write_u64(dependency as u64);
             serial_write(" ");
             serial_write_u64(u64::from(observed_mappings));
@@ -12738,7 +12738,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         && live_process_registry_finished
         && msrs_restored;
     if !valid {
-        serial_write("ginux: Linux final state:");
+        serial_write("linox: Linux final state:");
         for state in [
             inactive,
             completed,
@@ -12793,7 +12793,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
             serial_write_u64(u64::from(state));
         }
         serial_write("\r\n");
-        serial_write("ginux: Linux exit/deliveries/returns/termination: ");
+        serial_write("linox: Linux exit/deliveries/returns/termination: ");
         serial_write_u64(exit_status);
         serial_write(" ");
         serial_write_u64(signal_delivery_count);
@@ -12803,7 +12803,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         serial_write_u64(u64::from(termination_signal));
         serial_write("\r\n");
         if system_init {
-            serial_write("ginux: Linux supervisor wait/shutdown: ");
+            serial_write("linox: Linux supervisor wait/shutdown: ");
             serial_write_u64(u64::from(system_supervisor_wait_count));
             serial_write(" ");
             serial_write_u64(u64::from(system_supervisor_shutdown_count));
@@ -12913,7 +12913,7 @@ fn configure_linux_syscall() -> Option<[u64; 5]> {
     // the base must already carry RPL 3 or the next IRET to user mode faults.
     let sysret_base = u64::from(USER_DATA_SELECTOR) - 8;
     let star = (sysret_base << 48) | (u64::from(KERNEL_CODE_SELECTOR) << 32);
-    let lstar = ginux_linux_syscall_entry as *const () as u64;
+    let lstar = linox_linux_syscall_entry as *const () as u64;
     let fmask = (1_u64 << 9) | (1_u64 << 10) | (1_u64 << 18);
     unsafe {
         let saved = [
@@ -12965,7 +12965,7 @@ pub(crate) fn verify_breakpoint() -> bool {
 
 extern "sysv64" fn breakpoint_handler() {
     BREAKPOINT_HANDLED.store(true, Ordering::SeqCst);
-    serial_write("ginux: breakpoint exception handled\r\n");
+    serial_write("linox: breakpoint exception handled\r\n");
 }
 
 extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
@@ -13157,7 +13157,7 @@ fn linux_controller_syscall(
             Some(third)
         }
         LINUX_WRITE_SYSCALL => Some(LINUX_EBADF),
-        LINUX_IOCTL_SYSCALL if second == ginux_native_abi::GINUX_CONTROL_IOCTL => {
+        LINUX_IOCTL_SYSCALL if second == linox_native_abi::LINOX_CONTROL_IOCTL => {
             let capability = match first {
                 1 | 2 => X86_RUNTIME.LINUX_CONTROLLER_CONSOLE.load(Ordering::Acquire),
                 3 => X86_RUNTIME.LINUX_CONTROLLER_HOST.load(Ordering::Acquire),
@@ -13165,12 +13165,12 @@ fn linux_controller_syscall(
                 5 => X86_RUNTIME.LINUX_CONTROLLER_NETWORK.load(Ordering::Acquire),
                 _ => return Some(LINUX_EBADF),
             };
-            let mut request = [0_u8; ginux_native_abi::GINUX_CONTROL_IOCTL_SIZE as usize];
+            let mut request = [0_u8; linox_native_abi::LINOX_CONTROL_IOCTL_SIZE as usize];
             if !address_space::copy_from_current_user(third, &mut request)
                 || u32::from_ne_bytes(request[0..4].try_into().unwrap())
-                    != ginux_native_abi::GINUX_CONTROL_IOCTL_SIZE
+                    != linox_native_abi::LINOX_CONTROL_IOCTL_SIZE
                 || u16::from_ne_bytes(request[4..6].try_into().unwrap())
-                    != ginux_native_abi::GINUX_CONTROL_IOCTL_VERSION
+                    != linox_native_abi::LINOX_CONTROL_IOCTL_VERSION
                 || request[6..8] != [0, 0]
             {
                 return Some(LINUX_EFAULT);
@@ -13733,7 +13733,7 @@ fn linux_socket_ioctl(descriptor: u64, request: u64, argument: u64) -> Option<u6
         // namespace's loopback, go up and down and take another MTU.
         SIOCSIFFLAGS | SIOCSIFMTU => {
             if !current_linux_credentials().is_some_and(|credentials| {
-                credentials.has(ginux_credentials::capability::NET_ADMIN)
+                credentials.has(linox_credentials::capability::NET_ADMIN)
             }) {
                 return Some(LINUX_EPERM);
             }
@@ -13846,7 +13846,7 @@ fn linux_network_interfaces() -> Vec<crate::linux_socket::InterfaceInfo> {
     }
     let loopback = linux_namespace::loopback(linux_execution_instance(), network).map(|loopback| {
         crate::linux_socket::InterfaceInfo {
-            name: ginux_tun::Name::new(b"lo").unwrap_or_else(|| unreachable!("a valid name")),
+            name: linox_tun::Name::new(b"lo").unwrap_or_else(|| unreachable!("a valid name")),
             index: 1,
             ipv4: if loopback.up { 0x7f00_0001 } else { 0 },
             prefix: if loopback.up { 8 } else { 0 },
@@ -14073,7 +14073,7 @@ fn prepare_linux_system_domain(init: &[u8]) -> bool {
     // Domain attachment grants access to the console, not an authenticated
     // root session. Use the distribution's login stack so the console has the
     // same authentication boundary as a physical Linux console.
-    let contents = b"[Unit]\nDescription=Ginux Domain Console Login\nAfter=systemd-user-sessions.service\n\n[Service]\nExecStart=-/sbin/agetty --noclear --keep-baud 115200,57600,38400,9600 - linux\nType=idle\nRestart=always\nStandardInput=tty-force\nStandardOutput=tty\nStandardError=tty\nTTYPath=/dev/console\nTTYReset=yes\nTTYVHangup=yes\nEnvironment=TERM=linux\n\n[Install]\nWantedBy=getty.target\n";
+    let contents = b"[Unit]\nDescription=Linox Domain Console Login\nAfter=systemd-user-sessions.service\n\n[Service]\nExecStart=-/sbin/agetty --noclear --keep-baud 115200,57600,38400,9600 - linux\nType=idle\nRestart=always\nStandardInput=tty-force\nStandardOutput=tty\nStandardError=tty\nTTYPath=/dev/console\nTTYReset=yes\nTTYVHangup=yes\nEnvironment=TERM=linux\n\n[Install]\nWantedBy=getty.target\n";
     let vendor_console = &b"usr/lib/systemd/system/console-getty.service"[..];
     if crate::linux_overlay::lookup(vendor_console).is_none()
         && crate::linux_overlay::create_file(vendor_console, 0o644, contents).is_none()
@@ -14102,15 +14102,15 @@ fn prepare_linux_system_domain(init: &[u8]) -> bool {
     }
     // The OCI root is ephemeral today, so journald must remain volatile; a
     // persistent flush has no valid destination. configfs is implemented by
-    // the Ginux kernel directly and does not require a domain-side module.
+    // the Linox kernel directly and does not require a domain-side module.
     for (unit, description) in [
         (
             &b"usr/lib/systemd/system/systemd-journal-flush.service"[..],
-            &b"Ginux Volatile Journal"[..],
+            &b"Linox Volatile Journal"[..],
         ),
         (
             &b"usr/lib/systemd/system/modprobe@.service"[..],
-            &b"Ginux Built-in Kernel Facility"[..],
+            &b"Linox Built-in Kernel Facility"[..],
         ),
     ] {
         let mut replacement = [0_u8; 192];
@@ -14135,7 +14135,7 @@ pub(crate) fn write_linux_runtime_syscall_trace() {
         .load(Ordering::SeqCst) as usize;
     let retained = count.min(LINUX_RUNTIME_SYSCALL_TRACE_LIMIT);
     let start = count.saturating_sub(retained);
-    crate::serial_write_bytes(b"ginux: Linux init recent syscall/result pairs:");
+    crate::serial_write_bytes(b"linox: Linux init recent syscall/result pairs:");
     for offset in 0..retained {
         let index = (start + offset) % LINUX_RUNTIME_SYSCALL_TRACE_LIMIT;
         crate::serial_write_bytes(b" ");
@@ -14243,12 +14243,12 @@ fn write_linux_boot_profile() {
             X86_RUNTIME.LINUX_BOOT_PROFILE_SYSCALL_TICKS[number].load(Ordering::Relaxed),
         );
     }
-    serial_write("ginux: profile syscalls calls/total-us: ");
+    serial_write("linox: profile syscalls calls/total-us: ");
     serial_write_u64(total_count);
     serial_write("/");
     serial_write_u64(to_microseconds(total_ticks));
     serial_write("\r\n");
-    serial_write("ginux: profile syscall name/id calls total-us avg-us\r\n");
+    serial_write("linox: profile syscall name/id calls total-us avg-us\r\n");
     let mut emitted = [0_u64; LINUX_BOOT_PROFILE_SYSCALL_LIMIT / 64];
     for _ in 0..24 {
         let mut selected = None;
@@ -14270,7 +14270,7 @@ fn write_linux_boot_profile() {
         emitted[number / 64] |= 1_u64 << (number % 64);
         let count = X86_RUNTIME.LINUX_BOOT_PROFILE_SYSCALL_COUNTS[number].load(Ordering::Relaxed);
         let microseconds = to_microseconds(selected_ticks);
-        serial_write("ginux: profile syscall ");
+        serial_write("linox: profile syscall ");
         serial_write(linux_profile_syscall_name(number as u64));
         serial_write("/");
         serial_write_u64(number as u64);
@@ -14303,7 +14303,7 @@ fn write_linux_boot_profile() {
         ),
     ] {
         let microseconds = to_microseconds(ticks);
-        serial_write("ginux: profile ");
+        serial_write("linox: profile ");
         serial_write(name);
         serial_write(" calls/total-us/avg-us: ");
         serial_write_u64(count);
@@ -14337,7 +14337,7 @@ fn write_linux_boot_profile() {
         let microseconds = to_microseconds(
             X86_RUNTIME.LINUX_BOOT_PROFILE_LIFECYCLE_TICKS[index].load(Ordering::Relaxed),
         );
-        serial_write("ginux: profile ");
+        serial_write("linox: profile ");
         serial_write(name);
         serial_write(" calls/total-us/avg-us: ");
         serial_write_u64(count);
@@ -14569,7 +14569,7 @@ fn linux_namespace_capable(owner: Option<linux_user::UserNamespaceHandle>) -> bo
     let Some(caller) = current_linux_user_namespace() else {
         return false;
     };
-    linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+    linux_has_capability(linox_credentials::capability::SYS_ADMIN)
         && match owner {
             Some(owner) => linux_user::may_signal(caller, owner),
             None => linux_user::parent(caller).is_none(),
@@ -15026,7 +15026,7 @@ fn linux_unshare(flags: u64) -> u64 {
     let new_namespaces = flags & (UNIMPLEMENTED | LINUX_CLONE_NEW_KEPT | LINUX_CLONE_NEWNS);
     if new_namespaces != 0
         && flags & LINUX_CLONE_NEWUSER == 0
-        && !credentials.has(ginux_credentials::capability::SYS_ADMIN)
+        && !credentials.has(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -15175,7 +15175,7 @@ fn linux_reboot(magic: u64, magic2: u64, command: u64, argument: u64) -> u64 {
     const POWER_OFF: u32 = 0x4321_fedc;
     const RESTART2: u32 = 0xa1b2_c3d4;
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageKernel)
-        || !linux_has_capability(ginux_credentials::capability::SYS_BOOT)
+        || !linux_has_capability(linox_credentials::capability::SYS_BOOT)
     {
         return LINUX_EPERM;
     }
@@ -15201,7 +15201,7 @@ fn linux_reboot(magic: u64, magic2: u64, command: u64, argument: u64) -> u64 {
                     crate::machine_control::RESET_SHUTDOWN
                 },
             );
-            crate::serial_write("ginux: privileged domain requested machine reset\r\n");
+            crate::serial_write("linox: privileged domain requested machine reset\r\n");
             X86_RUNTIME
                 .CONTAINER_HOST_SHUTDOWN_REQUESTED
                 .store(true, Ordering::SeqCst);
@@ -15236,7 +15236,7 @@ fn linux_acct(path_address: u64) -> u64 {
     const O_WRONLY: u64 = 1;
     const O_APPEND: u64 = 0o2000;
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ProcessAccounting)
-        || !linux_has_capability(ginux_credentials::capability::SYS_PACCT)
+        || !linux_has_capability(linox_credentials::capability::SYS_PACCT)
     {
         return LINUX_EPERM;
     }
@@ -15360,7 +15360,7 @@ fn linux_iopl(level: u64) -> u64 {
 /// up in a domain, so it only checks authority.
 fn linux_vhangup() -> u64 {
     if linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageTerminal)
-        && linux_has_capability(ginux_credentials::capability::SYS_TTY_CONFIG)
+        && linux_has_capability(linox_credentials::capability::SYS_TTY_CONFIG)
     {
         0
     } else {
@@ -15368,10 +15368,10 @@ fn linux_vhangup() -> u64 {
     }
 }
 
-/// delete_module(2): Ginux loads no kernel modules, so none is found.
+/// delete_module(2): Linox loads no kernel modules, so none is found.
 fn linux_delete_module(name: u64) -> u64 {
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageKernel)
-        || !linux_has_capability(ginux_credentials::capability::SYS_MODULE)
+        || !linux_has_capability(linox_credentials::capability::SYS_MODULE)
     {
         return LINUX_EPERM;
     }
@@ -15391,8 +15391,8 @@ fn linux_syslog(action: u64, buffer: u64, length: u64) -> u64 {
     // the rest needs CAP_SYSLOG (or CAP_SYS_ADMIN).
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ObserveKernelLog)
         || !matches!(action, 3 | 10)
-            && !linux_has_capability(ginux_credentials::capability::SYSLOG)
-            && !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+            && !linux_has_capability(linox_credentials::capability::SYSLOG)
+            && !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -15443,7 +15443,7 @@ fn linux_deny_privileged_operation(number: u64) -> u64 {
     }
     // Allowed here but not implemented yet: a caller without the Linux
     // capability the operation needs is refused as Linux would refuse it.
-    use ginux_credentials::capability;
+    use linox_credentials::capability;
     use linux_user::PrivilegedOperation;
     let needed = match operation {
         PrivilegedOperation::ChangeRoot => capability::SYS_CHROOT,
@@ -15599,7 +15599,7 @@ fn linux_request_process_fork_now(
                 .store(false, Ordering::SeqCst);
         }
         if runtime_mode {
-            serial_write("ginux: fork rejected leader/refreshed/nproc/requested/share-vm: ");
+            serial_write("linox: fork rejected leader/refreshed/nproc/requested/share-vm: ");
             for value in [leader, refreshed, nproc_reached, requested, share_vm] {
                 serial_write_u64(u64::from(value));
                 serial_write(" ");
@@ -15908,7 +15908,7 @@ fn linux_clone3(
         return LINUX_EINVAL;
     }
     let privileged = current_linux_credentials()
-        .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_ADMIN));
+        .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_ADMIN));
     // set_tid and the namespaces other than the user one need CAP_SYS_ADMIN
     // (or CAP_CHECKPOINT_RESTORE); root gets the ones this kernel has.
     if (set_tid_size != 0 || flags & NAMESPACE_FLAGS & !LINUX_CLONE_NEWUSER != 0) && !privileged {
@@ -15979,7 +15979,7 @@ fn linux_clone3(
     };
     let result = linux_clone_thread_request(request, parent_registers, user_rip, user_rflags);
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) && result >= u64::MAX - 4095 {
-        serial_write("ginux: Linux clone3 flags/stack/size/parent-tid/child-tid/tls/result: ");
+        serial_write("linox: Linux clone3 flags/stack/size/parent-tid/child-tid/tls/result: ");
         for value in [flags, stack, stack_size, parent_tid, child_tid, tls, result] {
             serial_write_u64(value);
             serial_write(" ");
@@ -16343,7 +16343,7 @@ fn linux_exit_child_to_parent(output: *mut LinuxSyscallFrame, caller: LinuxUserC
     let robust_list = current_linux_robust_list().unwrap_or(0);
     let tid = current_linux_tid().unwrap_or(0);
     if cfg!(feature = "linux-boot-profile") {
-        serial_write("ginux: profile child-exit pid/tid: ");
+        serial_write("linox: profile child-exit pid/tid: ");
         serial_write_u64(u64::from(current_linux_process_pid()));
         serial_write("/");
         serial_write_u64(u64::from(tid));
@@ -16561,7 +16561,7 @@ pub(super) fn linux_wait_for_interrupt() {
     // sleeper may be one only another CPU may run (pinned there), which
     // can take it only with the lock: returning with the lock held, the
     // boot CPU looked and returned again for good, and the sleeper never
-    // ran (`ginux-threadtest pin`'s 1 ms sleeps marked to their end).
+    // ran (`linox-threadtest pin`'s 1 ms sleeps marked to their end).
     let mut sleeper_due = false;
     if let Some((deadline, now)) = linux_elapsed_nanoseconds()
         .filter(|_| current_cpu_index_checked() == Some(0))
@@ -16639,7 +16639,7 @@ pub(crate) fn linux_new_file_identity(path: &[u8], directory: bool, mode: u32) -
     (owner, parent.group, mode)
 }
 
-/// The set*id system calls, under the rules in `ginux-credentials`; what
+/// The set*id system calls, under the rules in `linox-credentials`; what
 /// the process may switch to comes from `linux_user::identity_authority`.
 fn linux_set_current_identity(number: u64, first: u64, second: u64, third: u64) -> u64 {
     let pid = current_linux_process_pid();
@@ -16688,8 +16688,8 @@ fn linux_set_current_identity(number: u64, first: u64, second: u64, third: u64) 
     match result {
         Ok(()) if linux_process::set_live_process_credentials(pid, credentials) => 0,
         Ok(()) => LINUX_ESRCH,
-        Err(ginux_credentials::Error::Permission) => LINUX_EPERM,
-        Err(ginux_credentials::Error::Invalid) => LINUX_EINVAL,
+        Err(linox_credentials::Error::Permission) => LINUX_EPERM,
+        Err(linox_credentials::Error::Invalid) => LINUX_EINVAL,
     }
 }
 
@@ -16707,7 +16707,7 @@ fn linux_set_current_groups(size: u64, address: u64) -> u64 {
         return LINUX_EPERM;
     }
     let count = match usize::try_from(size as i32) {
-        Ok(count) if count <= ginux_credentials::GROUPS_LIMIT => count,
+        Ok(count) if count <= linox_credentials::GROUPS_LIMIT => count,
         _ => return LINUX_EINVAL,
     };
     let mut groups = Vec::new();
@@ -16721,11 +16721,11 @@ fn linux_set_current_groups(size: u64, address: u64) -> u64 {
         }
         groups.push(u32::from_ne_bytes(group));
     }
-    match ginux_credentials::set_groups(&mut groups, authority) {
+    match linox_credentials::set_groups(&mut groups, authority) {
         Ok(()) if linux_process::set_live_process_groups(pid, groups) => 0,
         Ok(()) => LINUX_ESRCH,
-        Err(ginux_credentials::Error::Permission) => LINUX_EPERM,
-        Err(ginux_credentials::Error::Invalid) => LINUX_EINVAL,
+        Err(linox_credentials::Error::Permission) => LINUX_EPERM,
+        Err(linox_credentials::Error::Invalid) => LINUX_EINVAL,
     }
 }
 
@@ -17297,7 +17297,7 @@ fn run_other_linux_processes_deferring(
         linux_process::set_live_process_waiting(pid, true);
         if !park_linux_process(pid) {
             if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
-                serial_write("ginux: process cannot park pid/cpu/call/activation: ");
+                serial_write("linox: process cannot park pid/cpu/call/activation: ");
                 for value in [
                     u64::from(pid),
                     current_cpu_index_checked().unwrap_or(99) as u64,
@@ -17704,10 +17704,10 @@ fn write_linux_live_return(output: *mut LinuxSyscallFrame, context: LinuxUserCon
     }
 }
 
-/// The Ginux-internal system call the vDSO's preemption entry makes; above
+/// The Linox-internal system call the vDSO's preemption entry makes; above
 /// every Linux system call number.
 const LINUX_PREEMPT_SYSCALL: u64 = 0x4750;
-/// The Ginux-internal system call a vfork parent is resumed into while its
+/// The Linox-internal system call a vfork parent is resumed into while its
 /// child runs, in place of its vfork's return: it waits there for the
 /// child to execute or exit, then returns the child's pid as the vfork.
 const LINUX_VFORK_WAIT_SYSCALL: u64 = 0x4751;
@@ -18356,7 +18356,7 @@ fn run_dispatched_linux_process(process: &linux_process::LiveProcessDispatch) ->
         let resumed = resume_parked_linux_process(process.pid);
         let restored = address_space::restore_root_after_resume(previous_root);
         if !(resumed && restored) {
-            serial_write("ginux: parked process resume failed pid/cpu/resumed/restored: ");
+            serial_write("linox: parked process resume failed pid/cpu/resumed/restored: ");
             for value in [
                 u64::from(process.pid),
                 current_cpu_index_checked().unwrap_or(99) as u64,
@@ -18371,7 +18371,7 @@ fn run_dispatched_linux_process(process: &linux_process::LiveProcessDispatch) ->
         return restored && resumed;
     }
     if activation::is_running(linux_activation_owner(process.pid)) {
-        serial_write("ginux: entering a process whose activation runs pid/cpu: ");
+        serial_write("linox: entering a process whose activation runs pid/cpu: ");
         serial_write_u64(u64::from(process.pid));
         serial_write(" ");
         serial_write_u64(current_cpu_index_checked().unwrap_or(99) as u64);
@@ -18386,7 +18386,7 @@ fn run_dispatched_linux_process(process: &linux_process::LiveProcessDispatch) ->
         process.rflags,
     );
     if !entered {
-        serial_write("ginux: process entry failed pid/cpu/root/rip/rsp/current-root: ");
+        serial_write("linox: process entry failed pid/cpu/root/rip/rsp/current-root: ");
         for value in [
             u64::from(process.pid),
             current_cpu_index_checked().unwrap_or(99) as u64,
@@ -18549,22 +18549,22 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         return LinuxElfResult::FAILED;
     }
     if !linux_mount::activate_initial() {
-        serial_write("ginux: suspended Linux resume could not activate mounts\r\n");
+        serial_write("linox: suspended Linux resume could not activate mounts\r\n");
         return LinuxElfResult::FAILED;
     }
     if !linux_process::resume_runtime_process_registry() {
-        serial_write("ginux: suspended Linux resume could not restore process registry\r\n");
+        serial_write("linox: suspended Linux resume could not restore process registry\r\n");
         let _ = linux_mount::deactivate_initial();
         return LinuxElfResult::FAILED;
     }
     let Some(saved_msrs) = configure_linux_syscall() else {
-        serial_write("ginux: suspended Linux resume could not configure syscall state\r\n");
+        serial_write("linox: suspended Linux resume could not configure syscall state\r\n");
         let _ = linux_process::suspend_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         return LinuxElfResult::FAILED;
     };
     if !restore_container_extended_state() {
-        serial_write("ginux: suspended Linux resume could not restore extended state\r\n");
+        serial_write("linox: suspended Linux resume could not restore extended state\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = restore_linux_syscall(saved_msrs);
@@ -18613,14 +18613,14 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         .LINUX_RUNTIME_SUSPEND_PID
         .load(Ordering::Acquire);
     let Some(process) = linux_process::dispatch_live_process(suspended_pid) else {
-        serial_write("ginux: suspended Linux resume process is unavailable\r\n");
+        serial_write("linox: suspended Linux resume process is unavailable\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = restore_linux_syscall(saved_msrs);
         return LinuxElfResult::FAILED;
     };
     if !sync_live_linux_process_address_space(process.pid) {
-        serial_write("ginux: suspended Linux resume address space is unavailable\r\n");
+        serial_write("linox: suspended Linux resume address space is unavailable\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = restore_linux_syscall(saved_msrs);
@@ -18633,7 +18633,7 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         && (!restore_saved_linux_process_runtime_state(process.pid)
             || !restore_linux_process_extended_state(process.pid))
     {
-        serial_write("ginux: suspended Linux resume process state is unavailable\r\n");
+        serial_write("linox: suspended Linux resume process state is unavailable\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = restore_linux_syscall(saved_msrs);
@@ -18642,8 +18642,8 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
     if !background && !domain_exec {
         let byte = crate::serial_read_byte_blocking();
         if !address_space::copy_to_linux_process(process.pid, process.root, address, &[byte]) {
-            serial_write("ginux: suspended Linux resume could not deliver console input\r\n");
-            serial_write("ginux: console input pid/root/address/count: ");
+            serial_write("linox: suspended Linux resume could not deliver console input\r\n");
+            serial_write("linox: console input pid/root/address/count: ");
             for value in [
                 u64::from(process.pid),
                 process.root.address(),
@@ -18680,7 +18680,7 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         X86_RUNTIME.CONTAINER_CONSOLE_ATTACHED[slot].store(true, Ordering::Release);
     }
     if !timer::arm_linux_wait_timer() {
-        serial_write("ginux: suspended Linux resume could not arm timer\r\n");
+        serial_write("linox: suspended Linux resume could not arm timer\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = restore_linux_syscall(saved_msrs);
@@ -18704,7 +18704,7 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         )
     };
     if !resumed {
-        serial_write("ginux: suspended Linux process resume rejected pid/root/rip: ");
+        serial_write("linox: suspended Linux process resume rejected pid/root/rip: ");
         serial_write_u64(u64::from(current_linux_process_pid()));
         serial_write(" ");
         serial_write_u64(process.root.address());
@@ -18857,7 +18857,7 @@ fn finish_linux_runtime(mmap: u64, saved_msrs: [u64; 5]) -> LinuxElfResult {
         && threads_released
         && inactive;
     if !valid {
-        serial_write("ginux: Linux runtime cleanup failed\r\n");
+        serial_write("linox: Linux runtime cleanup failed\r\n");
         write_linux_runtime_syscall_trace();
     }
     LinuxElfResult {
@@ -22669,7 +22669,7 @@ fn linux_mq_open(name_address: u64, flags: u64, mode: u64, attributes: u64) -> u
     const HARD_MESSAGES: i64 = 65_536;
     const HARD_MESSAGE_SIZE: i64 = 16 * 1024 * 1024;
     let resource_privileged = current_linux_credentials()
-        .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_RESOURCE));
+        .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_RESOURCE));
     let (max_messages, max_message_size) = if flags & LINUX_O_CREAT != 0 && attributes != 0 {
         let mut attr = [0_u8; 64];
         if !copy_from_linux_user(attributes, &mut attr) {
@@ -23483,7 +23483,7 @@ fn linux_domain_mount_by_unique_id(unique: u64) -> Option<u32> {
 /// The superblock magic statfs and statmount report for `filesystem`.
 fn linux_filesystem_magic(filesystem: &[u8]) -> u64 {
     match filesystem {
-        b"ext2" | b"ext3" | b"ext4" => u64::from(ginux_ext2::MAGIC),
+        b"ext2" | b"ext3" | b"ext4" => u64::from(linox_ext2::MAGIC),
         b"tmpfs" | b"devtmpfs" => 0x0102_1994,
         b"ramfs" => 0x8584_58f6,
         b"proc" => 0x9fa0,
@@ -23652,7 +23652,7 @@ fn linux_statmount(request_address: u64, output_address: u64, capacity: u64, fla
                 b"ro,nosuid,nodev"
             },
         )
-        || requested & FS_TYPE != 0 && !append(36, if proc_mount { b"proc" } else { b"ginux-root" })
+        || requested & FS_TYPE != 0 && !append(36, if proc_mount { b"proc" } else { b"linox-root" })
         || requested & MNT_ROOT != 0 && !append(104, b"/")
         || requested & MNT_POINT != 0 && !append(108, if proc_mount { b"/proc" } else { b"/" })
     {
@@ -24079,7 +24079,7 @@ fn verify_linux_sysv_shared_memory_syscalls() -> bool {
     .enumerate()
     {
         if !valid {
-            serial_write("ginux: SysV suite failure index ");
+            serial_write("linox: SysV suite failure index ");
             serial_write_u64(index as u64);
             serial_write("\r\n");
         }
@@ -24511,7 +24511,7 @@ fn verify_linux_personality_syscall() -> bool {
     let mut name = [0_u8; LINUX_UTSNAME_SIZE];
     let uname26 = set
         && copy_from_linux_user(mapping, &mut name)
-        && name[130..].starts_with(b"2.6.52.0-ginux.0.1\0")
+        && name[130..].starts_with(b"2.6.52.0-linox.0.1\0")
         && linux_personality(1) == u64::from(LINUX_PERSONALITY_UNAME26)
         && linux_personality(u64::from(LINUX_PERSONALITY_QUERY)) == 1;
     X86_RUNTIME
@@ -24797,7 +24797,7 @@ fn verify_linux_filesystem_statistics() -> bool {
     }
     let paths = copy_to_linux_user(mapping, b"/\0")
         && copy_to_linux_user(mapping + 16, b"/proc/cpuinfo\0")
-        && copy_to_linux_user(mapping + 40, b"/ginux-statfs-absent\0");
+        && copy_to_linux_user(mapping + 40, b"/linox-statfs-absent\0");
     let mut stat = [0_u8; 120];
     let root = paths
         && linux_statfs(mapping, mapping + 128) == 0
@@ -24892,7 +24892,7 @@ fn verify_linux_filesystem_statistics() -> bool {
     let valid = anonymous && closed_event && closed_proc && closed_root && unmapped;
     if !valid {
         serial_write(
-            "ginux: statfs verifier paths/root/proc/legacy/descriptors/anonymous/cleanup ",
+            "linox: statfs verifier paths/root/proc/legacy/descriptors/anonymous/cleanup ",
         );
         for value in [
             paths,
@@ -25103,12 +25103,12 @@ fn verify_linux_readahead_syscall() -> bool {
     {
         return false;
     }
-    let Some(node) = crate::linux_overlay::create_file(b"ginux-readahead", 0o600, b"resident")
+    let Some(node) = crate::linux_overlay::create_file(b"linox-readahead", 0o600, b"resident")
     else {
         let _ = linux_runtime_munmap(mapping, PAGE_SIZE as u64);
         return false;
     };
-    let prepared = copy_to_linux_user(mapping, b"/ginux-readahead\0");
+    let prepared = copy_to_linux_user(mapping, b"/linox-readahead\0");
     let input = if prepared {
         linux_openat(u64::from(LINUX_AT_FDCWD), mapping, 0, 0)
     } else {
@@ -25255,7 +25255,7 @@ fn verify_linux_address_space_limit() -> bool {
     let unmapped = linux_runtime_munmap(mapping, PAGE_SIZE as u64) == 0;
     let valid = limited && rejected && replaced && restored && unmapped;
     if valid {
-        serial_write("ginux: Linux address-space resource limit enforced\r\n");
+        serial_write("linox: Linux address-space resource limit enforced\r\n");
     }
     valid
 }
@@ -25274,11 +25274,11 @@ fn verify_linux_fadvise64_syscall() -> bool {
     {
         return false;
     }
-    let Some(node) = crate::linux_overlay::create_file(b"ginux-fadvise", 0o600, b"resident") else {
+    let Some(node) = crate::linux_overlay::create_file(b"linox-fadvise", 0o600, b"resident") else {
         let _ = linux_runtime_munmap(mapping, PAGE_SIZE as u64);
         return false;
     };
-    let descriptor = if copy_to_linux_user(mapping, b"/ginux-fadvise\0") {
+    let descriptor = if copy_to_linux_user(mapping, b"/linox-fadvise\0") {
         linux_openat(u64::from(LINUX_AT_FDCWD), mapping, 0, 0)
     } else {
         LINUX_EFAULT
@@ -25525,7 +25525,7 @@ fn linux_io_uring_key(descriptor: u64) -> Option<(usize, u64)> {
 fn linux_io_uring_allowed() -> bool {
     match linux_proc_sysctl_value(b"sys/kernel/io_uring_disabled").unwrap_or(0) {
         0 => true,
-        1 => linux_has_capability(ginux_credentials::capability::SYS_ADMIN),
+        1 => linux_has_capability(linox_credentials::capability::SYS_ADMIN),
         _ => false,
     }
 }
@@ -26179,11 +26179,11 @@ fn verify_linux_fanotify_syscalls() -> bool {
     {
         return false;
     }
-    let Some(node) = crate::linux_overlay::create_file(b"ginux-fanotify", 0o600, &[]) else {
+    let Some(node) = crate::linux_overlay::create_file(b"linox-fanotify", 0o600, &[]) else {
         let _ = linux_runtime_munmap(mapping, PAGE_SIZE as u64);
         return false;
     };
-    let prepared = copy_to_linux_user(mapping, b"/ginux-fanotify\0")
+    let prepared = copy_to_linux_user(mapping, b"/linox-fanotify\0")
         && copy_to_linux_user(mapping + 64, b"fan");
     let source = if prepared {
         linux_openat(u64::from(LINUX_AT_FDCWD), mapping, 2, 0)
@@ -26209,7 +26209,7 @@ fn verify_linux_fanotify_syscalls() -> bool {
     // The write system call's hook reports the modification.
     let wrote = |source| {
         linux_descriptor_write(source, mapping + 64, 3) == 3 && {
-            linux_fanotify_event(b"ginux-fanotify", crate::linux_fanotify::FAN_MODIFY);
+            linux_fanotify_event(b"linox-fanotify", crate::linux_fanotify::FAN_MODIFY);
             true
         }
     };
@@ -26255,7 +26255,7 @@ fn verify_linux_keyring_syscalls() -> bool {
         return false;
     }
     let prepared = copy_to_linux_user(mapping, b"user\0")
-        && copy_to_linux_user(mapping + 64, b"ginux-key\0")
+        && copy_to_linux_user(mapping + 64, b"linox-key\0")
         && copy_to_linux_user(mapping + 128, b"first")
         && copy_to_linux_user(mapping + 192, b"updated");
     let serial = if prepared {
@@ -26279,7 +26279,7 @@ fn verify_linux_keyring_syscalls() -> bool {
     let described = updated && linux_keyctl(6, serial, mapping + 320, 64, 0) == 28 && {
         let mut description = [0_u8; 28];
         copy_from_linux_user(mapping + 320, &mut description)
-            && description == *b"user;0;0;3f010000;ginux-key\0"
+            && description == *b"user;0;0;3f010000;linox-key\0"
     };
     let revoked = described
         && linux_keyctl(3, serial, 0, 0, 0) == 0
@@ -26289,7 +26289,7 @@ fn verify_linux_keyring_syscalls() -> bool {
             mapping,
             mapping + 64,
             mapping + 128,
-            ginux_keyrings::PAYLOAD_LIMIT as u64 + 1,
+            linox_keyrings::PAYLOAD_LIMIT as u64 + 1,
             (-2_i64) as u64,
         ) == LINUX_EINVAL
         && linux_request_key(mapping, mapping + 64, 0, 0) == LINUX_EKEYREVOKED;
@@ -26439,21 +26439,21 @@ fn linux_seccomp_filter_syscall(
     return_registers: (u64, u64),
 ) -> Option<u64> {
     let user_rip = return_registers.0;
-    let data = ginux_seccomp::Data {
+    let data = linox_seccomp::Data {
         number: number as u32 as i32,
-        arch: ginux_seccomp::AUDIT_ARCH_X86_64,
+        arch: linox_seccomp::AUDIT_ARCH_X86_64,
         instruction_pointer: user_rip,
         arguments,
     };
     let value = linux_process::live_process_seccomp_return(current_linux_process_pid(), &data)?;
-    match ginux_seccomp::Verdict::from_return(value) {
-        ginux_seccomp::Verdict::Allow | ginux_seccomp::Verdict::Log => None,
-        ginux_seccomp::Verdict::Errno(errno) => Some(u64::from(errno).wrapping_neg()),
-        ginux_seccomp::Verdict::NoHandler => Some(LINUX_ENOSYS),
-        ginux_seccomp::Verdict::KillThread | ginux_seccomp::Verdict::KillProcess => {
+    match linox_seccomp::Verdict::from_return(value) {
+        linox_seccomp::Verdict::Allow | linox_seccomp::Verdict::Log => None,
+        linox_seccomp::Verdict::Errno(errno) => Some(u64::from(errno).wrapping_neg()),
+        linox_seccomp::Verdict::NoHandler => Some(LINUX_ENOSYS),
+        linox_seccomp::Verdict::KillThread | linox_seccomp::Verdict::KillProcess => {
             Some(linux_terminate_by_default_signal(LINUX_SIGSYS))
         }
-        ginux_seccomp::Verdict::Trap(_) => {
+        linox_seccomp::Verdict::Trap(_) => {
             const SYS_SECCOMP: i32 = 1;
             let index = LINUX_SIGSYS as usize - 1;
             let handler = X86_RUNTIME.ELF_PROBE_SIGNAL_HANDLERS[index].load(Ordering::SeqCst);
@@ -26468,7 +26468,7 @@ fn linux_seccomp_filter_syscall(
             // system call's number and architecture: where a queued
             // signal's information keeps the sender's pid and uid, then
             // its value (si_errno is left 0).
-            let value = (number & 0xffff_ffff) | u64::from(ginux_seccomp::AUDIT_ARCH_X86_64) << 32;
+            let value = (number & 0xffff_ffff) | u64::from(linox_seccomp::AUDIT_ARCH_X86_64) << 32;
             Some(linux_kill_current(
                 (LINUX_SIGSYS, SYS_SECCOMP, Some(value)),
                 Some((user_rip as u32, (user_rip >> 32) as u32)),
@@ -26525,7 +26525,7 @@ fn linux_seccomp(operation: u64, flags: u64, arguments: u64) -> u64 {
             }
             if !X86_RUNTIME.ELF_PROBE_NO_NEW_PRIVS.load(Ordering::SeqCst)
                 && !current_linux_credentials().is_some_and(|credentials| {
-                    credentials.has(ginux_credentials::capability::SYS_ADMIN)
+                    credentials.has(linox_credentials::capability::SYS_ADMIN)
                 })
             {
                 return LINUX_EACCES;
@@ -26552,9 +26552,9 @@ fn linux_seccomp(operation: u64, flags: u64, arguments: u64) -> u64 {
                 if !copy_from_linux_user(address, &mut bytes) {
                     return LINUX_EFAULT;
                 }
-                instructions.push(ginux_seccomp::Instruction::from_bytes(bytes));
+                instructions.push(linox_seccomp::Instruction::from_bytes(bytes));
             }
-            let Ok(program) = ginux_seccomp::Program::new(instructions) else {
+            let Ok(program) = linox_seccomp::Program::new(instructions) else {
                 return LINUX_EINVAL;
             };
             match linux_process::install_live_process_seccomp_filter(
@@ -26579,7 +26579,7 @@ fn linux_seccomp(operation: u64, flags: u64, arguments: u64) -> u64 {
             if !copy_from_linux_user(arguments, &mut action) {
                 return LINUX_EFAULT;
             }
-            if ginux_seccomp::action_available(u32::from_ne_bytes(action)) {
+            if linox_seccomp::action_available(u32::from_ne_bytes(action)) {
                 0
             } else {
                 LINUX_EOPNOTSUPP
@@ -26615,7 +26615,7 @@ fn verify_linux_seccomp_syscall() -> bool {
         && copy_to_linux_user(mapping, &0_u32.to_ne_bytes())
         && linux_seccomp(GET_ACTION_AVAIL, 0, mapping) == 0;
     let unknown_action_rejected = kill_available
-        && copy_to_linux_user(mapping, &ginux_seccomp::action::ALLOW.to_ne_bytes())
+        && copy_to_linux_user(mapping, &linox_seccomp::action::ALLOW.to_ne_bytes())
         && linux_seccomp(GET_ACTION_AVAIL, 0, mapping) == 0
         && copy_to_linux_user(mapping, &UNKNOWN_ACTION.to_ne_bytes())
         && linux_seccomp(GET_ACTION_AVAIL, 0, mapping) == LINUX_EOPNOTSUPP
@@ -26627,7 +26627,7 @@ fn verify_linux_seccomp_syscall() -> bool {
 
 fn linux_map_shadow_stack(_address: u64, _length: u64, _flags: u64) -> u64 {
     // Linux x86 checks whether userspace CET shadow stacks are enabled before
-    // interpreting mapping arguments. Ginux does not enable that CPU/process
+    // interpreting mapping arguments. Linox does not enable that CPU/process
     // facility yet, so the Linux-visible result is EOPNOTSUPP.
     LINUX_EOPNOTSUPP
 }
@@ -26646,11 +26646,11 @@ fn verify_linux_file_handle_syscalls() -> bool {
     {
         return false;
     }
-    let Some(node) = crate::linux_overlay::create_file(b"ginux-handle", 0o600, b"handle") else {
+    let Some(node) = crate::linux_overlay::create_file(b"linox-handle", 0o600, b"handle") else {
         let _ = linux_runtime_munmap(mapping, PAGE_SIZE as u64);
         return false;
     };
-    let path = b"/ginux-handle\0";
+    let path = b"/linox-handle\0";
     let prepared =
         copy_to_linux_user(mapping, path) && copy_to_linux_user(mapping + 64, &0_u32.to_ne_bytes());
     let sized = prepared
@@ -26677,7 +26677,7 @@ fn verify_linux_file_handle_syscalls() -> bool {
             mapping + 128,
             0,
         ) == 0;
-    let renamed = named && crate::linux_overlay::rename(node, b"ginux-handle-renamed");
+    let renamed = named && crate::linux_overlay::rename(node, b"linox-handle-renamed");
     let descriptor = if renamed {
         linux_open_by_handle_at(u64::from(LINUX_AT_FDCWD), mapping + 64, 0)
     } else {
@@ -26799,7 +26799,7 @@ fn verify_linux_memfd_seals() -> bool {
     );
     if !(LINUX_RUNTIME_DYNAMIC_MMAP_BASE..LINUX_RUNTIME_DYNAMIC_MMAP_BASE + (1 << 39))
         .contains(&mapping)
-        || !copy_to_linux_user(mapping, b"ginux-seals\0")
+        || !copy_to_linux_user(mapping, b"linox-seals\0")
         || !copy_to_linux_user(mapping + 64, b"data")
     {
         return false;
@@ -26856,7 +26856,7 @@ fn verify_linux_memfd_seals() -> bool {
     let valid =
         initial && shared && immutable && closed && default_seal && sealed_closed && unmapped;
     if valid {
-        serial_write("ginux: Linux memfd sealing enforced across descriptors\r\n");
+        serial_write("linox: Linux memfd sealing enforced across descriptors\r\n");
     }
     valid
 }
@@ -27046,7 +27046,7 @@ fn verify_linux_posix_message_queue_syscalls() -> bool {
     {
         return false;
     }
-    let name = b"ginux-abi\0";
+    let name = b"linox-abi\0";
     let mut attr = [0_u8; 64];
     attr[8..16].copy_from_slice(&4_u64.to_ne_bytes());
     attr[16..24].copy_from_slice(&32_u64.to_ne_bytes());
@@ -27157,7 +27157,7 @@ fn verify_linux_posix_message_queue_syscalls() -> bool {
     let unmapped = linux_runtime_munmap(mapping, PAGE_SIZE as u64) == 0;
     let valid = received && queried && lifecycle && linked_unlinked && restored && unmapped;
     if valid {
-        serial_write("ginux: Linux POSIX message queue resource limit enforced\r\n");
+        serial_write("linox: Linux POSIX message queue resource limit enforced\r\n");
     }
     valid
 }
@@ -27231,7 +27231,7 @@ fn verify_linux_unix_inflight_rights() -> bool {
         && sender_closed
         && crate::linux_socket::unix_inflight_rights() == 0;
     if valid {
-        serial_write("ginux: Linux UNIX in-flight descriptor limit enforced\r\n");
+        serial_write("linox: Linux UNIX in-flight descriptor limit enforced\r\n");
     }
     valid
 }
@@ -27504,10 +27504,10 @@ fn verify_linux_process_madvise_syscall() -> bool {
         && linux_munmap(sealed_mapping, PAGE_SIZE as u64) == LINUX_EPERM
         && linux_mseal(sealed_mapping, PAGE_SIZE as u64, 1) == LINUX_EINVAL;
     if !discarded_locked {
-        serial_write("ginux: Linux DONTNEED_LOCKED verification failed\r\n");
+        serial_write("linox: Linux DONTNEED_LOCKED verification failed\r\n");
     }
     if !errors || !closed || !unmapped || !population_unmapped || !sealing {
-        serial_write("ginux: Linux process advice cleanup verification failed\r\n");
+        serial_write("linox: Linux process advice cleanup verification failed\r\n");
     }
     discarded_locked && errors && closed && unmapped && population_unmapped && sealing
 }
@@ -28106,10 +28106,10 @@ fn verify_linux_filesystem_argument_widths() -> bool {
         ) == 0;
     let closed =
         descriptor < LINUX_DESCRIPTOR_TABLE_LIMIT && linux_descriptor_close(descriptor) == 0;
-    let xattr_node = crate::linux_overlay::create_file(b"ginux-xattr-width", 0o600, &[]);
+    let xattr_node = crate::linux_overlay::create_file(b"linox-xattr-width", 0o600, &[]);
     let xattr_prepared = xattr_node.is_some()
-        && copy_to_linux_user(mapping + 768, b"/ginux-xattr-width\0")
-        && copy_to_linux_user(mapping + 832, b"user.ginux\0")
+        && copy_to_linux_user(mapping + 768, b"/linox-xattr-width\0")
+        && copy_to_linux_user(mapping + 832, b"user.linox\0")
         && copy_to_linux_user(mapping + 896, b"ok")
         && copy_to_linux_user(mapping + 960, b"/\0");
     let xattr_descriptor = if xattr_prepared {
@@ -28592,7 +28592,7 @@ fn linux_runtime_mmap(
             };
             if start >= file.len() {
                 if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-                    serial_write("ginux: file mmap rejected offset/file-length: ");
+                    serial_write("linox: file mmap rejected offset/file-length: ");
                     serial_write_u64(start as u64);
                     serial_write(" ");
                     serial_write_u64(file.len() as u64);
@@ -30402,7 +30402,7 @@ fn linux_cachestat(descriptor: u64, range_address: u64, output_address: u64, fla
 }
 
 /// x86 pages that can be written or executed can be read: Linux accepts
-/// PROT_WRITE or PROT_EXEC alone and maps them readable too. Ginux keeps no
+/// PROT_WRITE or PROT_EXEC alone and maps them readable too. Linox keeps no
 /// page both writable and executable.
 fn linux_implied_protection(protection: u64) -> u64 {
     if protection & (LINUX_PROT_WRITE | LINUX_PROT_EXEC) != 0 {
@@ -30819,7 +30819,7 @@ fn linux_madvise_hwpoison(address: u64, length: u64) -> u64 {
         return LINUX_EINVAL;
     };
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageKernel)
-        || !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        || !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -30858,7 +30858,7 @@ fn linux_madvise_soft_offline(address: u64, length: u64) -> u64 {
         return 0;
     }
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageKernel)
-        || !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        || !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -31884,7 +31884,7 @@ fn linux_munmap(address: u64, length: u64) -> u64 {
 fn linux_madvise(address: u64, length: u64, advice: u64) -> u64 {
     let advice = u64::from(advice as u32);
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-        // Ginux has no same-page merging: Linux built without CONFIG_KSM
+        // Linox has no same-page merging: Linux built without CONFIG_KSM
         // refuses the advice (madvise02).
         if matches!(advice, LINUX_MADV_MERGEABLE | LINUX_MADV_UNMERGEABLE) {
             return LINUX_EINVAL;
@@ -32091,7 +32091,7 @@ fn linux_remote_process_madvise(process: u32, vectors: u64, vector_count: u64, a
         return LINUX_EINVAL;
     }
     if !linux_ptrace_access_permitted(process)
-        || !linux_has_capability(ginux_credentials::capability::SYS_NICE)
+        || !linux_has_capability(linox_credentials::capability::SYS_NICE)
     {
         return LINUX_EPERM;
     }
@@ -32236,7 +32236,7 @@ fn linux_thread_robust_list(tid: u64) -> Result<u64, u64> {
         let pid = u32::try_from(tid).map_err(|_| LINUX_ESRCH)?;
         linux_process::live_process_status(pid).ok_or(LINUX_ESRCH)?;
         let permitted = current_linux_credentials().is_some_and(|credentials| {
-            credentials.has(ginux_credentials::capability::SYS_PTRACE)
+            credentials.has(linox_credentials::capability::SYS_PTRACE)
                 || linux_process::live_process_credentials(pid)
                     .is_some_and(|target| target.user.real == credentials.user.effective)
         });
@@ -32582,16 +32582,16 @@ fn linux_runtime_file_kind(path: &[u8]) -> Option<u16> {
     if path == b"/proc/1/setgroups" {
         return Some(LINUX_FILE_PROC_SETGROUPS);
     }
-    if path == b"/tmp/ginux-ready" && linux_tmpfs::open(b"ginux-ready").is_some() {
+    if path == b"/tmp/linox-ready" && linux_tmpfs::open(b"linox-ready").is_some() {
         return Some(LINUX_FILE_TMP_SCRATCH);
     }
     let (kind, root_name) = match path {
         b"/init" => (LINUX_FILE_INIT, b"linux/init" as &[u8]),
-        b"/lib64/ld-ginux.so" => (LINUX_FILE_INTERPRETER, b"linux/ld-ginux.so" as &[u8]),
-        b"/lib64/libginux.so" => (LINUX_FILE_DEPENDENCY, b"linux/libginux.so" as &[u8]),
-        b"/lib64/libginux-aux.so" => (
+        b"/lib64/ld-linox.so" => (LINUX_FILE_INTERPRETER, b"linux/ld-linox.so" as &[u8]),
+        b"/lib64/liblinox.so" => (LINUX_FILE_DEPENDENCY, b"linux/liblinox.so" as &[u8]),
+        b"/lib64/liblinox-aux.so" => (
             LINUX_FILE_AUXILIARY_DEPENDENCY,
-            b"linux/libginux-aux.so" as &[u8],
+            b"linux/liblinox-aux.so" as &[u8],
         ),
         _ => {
             let root_name = path.strip_prefix(b"/")?;
@@ -32762,7 +32762,7 @@ fn linux_uts_name(kind: usize, output: &mut [u8; LINUX_UTS_NAME_CAPACITY]) -> us
     });
     set.unwrap_or_else(|| {
         let default: &[u8] = if kind == LINUX_UTS_HOST {
-            b"ginux"
+            b"linox"
         } else {
             b"localdomain"
         };
@@ -33938,7 +33938,7 @@ fn linux_measured_path_kind(path: &[u8]) -> Option<u16> {
     if path == b"proc/1/setgroups" {
         return Some(LINUX_FILE_PROC_SETGROUPS);
     }
-    if path == b"tmp/ginux-ready" && linux_tmpfs::open(b"ginux-ready").is_some() {
+    if path == b"tmp/linox-ready" && linux_tmpfs::open(b"linox-ready").is_some() {
         return Some(LINUX_FILE_TMP_SCRATCH);
     }
     if let Some(node) = initramfs::published_directory_node(path) {
@@ -34130,7 +34130,7 @@ fn linux_chroot(path_address: u64) -> u64 {
                 return linux_finish_chroot(root);
             };
             if let Err(error) =
-                linux_check_access(Some(access), ginux_credentials::access::EXECUTE, false)
+                linux_check_access(Some(access), linox_credentials::access::EXECUTE, false)
             {
                 return error;
             }
@@ -34190,7 +34190,7 @@ fn linux_lookup_directory(address: u64) -> Result<Vec<u8>, u64> {
 /// redirected between mounts here.
 fn linux_pivot_root(new_root_address: u64, put_old_address: u64) -> u64 {
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ChangeRoot)
-        || !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        || !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -34281,7 +34281,7 @@ fn linux_pivot_root(new_root_address: u64, put_old_address: u64) -> u64 {
 }
 
 fn linux_finish_chroot(root: Vec<u8>) -> u64 {
-    if !linux_has_capability(ginux_credentials::capability::SYS_CHROOT) {
+    if !linux_has_capability(linox_credentials::capability::SYS_CHROOT) {
         return LINUX_EPERM;
     }
     if linux_process::set_live_process_root(current_linux_process_pid(), root) {
@@ -34327,7 +34327,7 @@ fn linux_chdir(path_address: u64) -> u64 {
                 // Changing into a directory needs search permission on it.
                 if let Err(error) = linux_check_access(
                     Some(linux_overlay_file_access(metadata)),
-                    ginux_credentials::access::EXECUTE,
+                    linox_credentials::access::EXECUTE,
                     false,
                 ) {
                     return error;
@@ -34413,7 +34413,7 @@ fn linux_fchdir(descriptor: u64) -> u64 {
             // Changing into a directory needs search permission on it.
             if let Err(error) = linux_check_access(
                 Some(linux_overlay_file_access(metadata)),
-                ginux_credentials::access::EXECUTE,
+                linox_credentials::access::EXECUTE,
                 false,
             ) {
                 return error;
@@ -34587,8 +34587,8 @@ fn linux_measured_interpreted_exec_plan(
     };
     crate::linux_elf::measured_interpreted_exec_plan(
         file(b"linux/init")?,
-        file(b"linux/ld-ginux.so")?,
-        [file(b"linux/libginux.so")?, file(b"linux/libginux-aux.so")?],
+        file(b"linux/ld-linox.so")?,
+        [file(b"linux/liblinox.so")?, file(b"linux/liblinox-aux.so")?],
     )
 }
 
@@ -34760,7 +34760,7 @@ fn linux_rootfs_execve_source(
     if cfg!(feature = "linux-boot-profile")
         && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Relaxed)
     {
-        serial_write("ginux: profile exec elapsed-ms/path: ");
+        serial_write("linox: profile exec elapsed-ms/path: ");
         serial_write_u64(linux_elapsed_nanoseconds().unwrap_or(0) / 1_000_000);
         serial_write(" ");
         crate::serial_write_bytes(path);
@@ -34775,7 +34775,7 @@ fn linux_rootfs_execve_source(
             .LINUX_RUNTIME_CONSOLE_TIMING_WRITTEN
             .swap(true, Ordering::SeqCst)
     {
-        serial_write("ginux: timing Linux-init-to-console: ");
+        serial_write("linox: timing Linux-init-to-console: ");
         serial_write_u64(linux_elapsed_nanoseconds().unwrap_or(0) / 1_000_000);
         serial_write(" ms\r\n");
         write_linux_boot_profile();
@@ -34820,7 +34820,7 @@ fn linux_rootfs_execve_source(
             Some(metadata) => Some(linux_overlay_file_access(metadata)),
             None => linux_exec_file_access(path),
         };
-        if let Err(error) = linux_check_access(exec_file, ginux_credentials::access::EXECUTE, false)
+        if let Err(error) = linux_check_access(exec_file, linox_credentials::access::EXECUTE, false)
             .and_then(|()| linux_landlock_check_execute(path.strip_prefix(b"/").unwrap_or(path)))
         {
             return error;
@@ -34896,7 +34896,7 @@ fn linux_rootfs_execve_source(
     };
     let Some(plan) = plan else {
         if overlay_bytes.is_some() {
-            serial_write("ginux: Linux exec of runtime file rejected: ");
+            serial_write("linox: Linux exec of runtime file rejected: ");
             crate::serial_write_bytes(path);
             serial_write("\r\n");
             return LINUX_ENOEXEC;
@@ -34914,7 +34914,7 @@ fn linux_rootfs_execve_source(
             ProcessPlanFailure::DynamicLoaderNotExecutable(_) => 9,
             ProcessPlanFailure::UnsupportedLoadLayout => 10,
         };
-        serial_write("ginux: Linux exec plan rejection code: ");
+        serial_write("linox: Linux exec plan rejection code: ");
         serial_write_u64(failure);
         if let Some((length, head, kind, headers)) =
             crate::published_rootfs::executable_diagnostic(image_path)
@@ -34929,7 +34929,7 @@ fn linux_rootfs_execve_source(
         if let Some((headers, count)) =
             crate::published_rootfs::executable_program_headers(image_path)
         {
-            serial_write("ginux: Linux exec program type/flags: ");
+            serial_write("linox: Linux exec program type/flags: ");
             for header in &headers[..count] {
                 serial_write_u64(*header);
                 serial_write(" ");
@@ -34966,7 +34966,7 @@ fn linux_rootfs_execve_source(
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && (current_linux_process_pid() == 1 || path.ends_with(b"/systemd"))
     {
-        serial_write("ginux: PID1 ELF segment ranges:");
+        serial_write("linox: PID1 ELF segment ranges:");
         for index in 0..plan.segment_count() {
             if let Some(segment) = plan.segment(index) {
                 serial_write(" [");
@@ -34995,7 +34995,7 @@ fn linux_rootfs_execve_source(
         Err(error) => return error,
     };
     if !linux_relocate_primary_stack(current_linux_process_pid()) {
-        serial_write("ginux: Linux exec stack relocation failed\r\n");
+        serial_write("linox: Linux exec stack relocation failed\r\n");
         return LINUX_ENOMEM;
     }
 
@@ -35005,7 +35005,7 @@ fn linux_rootfs_execve_source(
     let Some(replacement_count) =
         replacement_count.filter(|count| (1..=LINUX_EXEC_IMAGE_PAGE_LIMIT).contains(count))
     else {
-        serial_write("ginux: Linux exec replacement page count invalid: ");
+        serial_write("linox: Linux exec replacement page count invalid: ");
         serial_write_u64(replacement_count.unwrap_or(0) as u64);
         serial_write("\r\n");
         return LINUX_ENOEXEC;
@@ -35024,7 +35024,7 @@ fn linux_rootfs_execve_source(
             .then_some(replacements)
         })
     else {
-        serial_write("ginux: Linux exec frame allocation failed count: ");
+        serial_write("linox: Linux exec frame allocation failed count: ");
         serial_write_u64(replacement_count as u64);
         serial_write("\r\n");
         return LINUX_ENOMEM;
@@ -35066,7 +35066,7 @@ fn linux_rootfs_execve_source(
                     mapping.executable,
                 )
             }) {
-                serial_write("ginux: Linux exec current/registry mapping mismatch address/frame: ");
+                serial_write("linox: Linux exec current/registry mapping mismatch address/frame: ");
                 serial_write_u64(address as u64);
                 serial_write("/");
                 serial_write_u64(mapping.map_or(0, |mapping| mapping.frame.address()));
@@ -35105,7 +35105,7 @@ fn linux_rootfs_execve_source(
                     )
             };
             if !registry_updated {
-                serial_write("ginux: Linux exec mapping update failed address/prior/install: ");
+                serial_write("linox: Linux exec mapping update failed address/prior/install: ");
                 serial_write_u64(address as u64);
                 serial_write(" ");
                 serial_write_u64(u64::from(mapping.is_some()));
@@ -35195,7 +35195,7 @@ fn linux_rootfs_execve_source(
     for page in 0..LINUX_RUNTIME_HEAP_PAGES {
         let address = heap_base + page * PAGE_SIZE;
         if !reset_exec_page(address) {
-            serial_write("ginux: Linux exec heap write preparation failed\r\n");
+            serial_write("linox: Linux exec heap write preparation failed\r\n");
             return LINUX_ENOMEM;
         }
     }
@@ -35211,7 +35211,7 @@ fn linux_rootfs_execve_source(
             continue;
         }
         if !reset_exec_page(address) {
-            serial_write("ginux: Linux exec stack write preparation failed\r\n");
+            serial_write("linox: Linux exec stack write preparation failed\r\n");
             return LINUX_ENOMEM;
         }
         if address == stack_page as usize {
@@ -35234,7 +35234,7 @@ fn linux_rootfs_execve_source(
         top,
     ) || !lower.is_empty() && !copy_to_linux_user(new_stack, lower)
     {
-        serial_write("ginux: Linux exec stack image failed\r\n");
+        serial_write("linox: Linux exec stack image failed\r\n");
         return LINUX_ENOMEM;
     }
     // The new image runs on the primary stack, whatever thread or vfork
@@ -35318,7 +35318,7 @@ fn linux_rootfs_execve_source(
         |frame| !address_space::linux_private_page_counted(frame),
         |frame| replacements[..replacement_count].contains(&frame),
     ) {
-        serial_write("ginux: Linux exec mmap release failed\r\n");
+        serial_write("linox: Linux exec mmap release failed\r\n");
         return LINUX_ENOMEM;
     }
     release_linux_process_shared_mappings(current_linux_process_pid());
@@ -35346,7 +35346,7 @@ fn linux_rootfs_execve_source(
         .ELF_PROBE_MMAP_NEXT
         .store(LINUX_RUNTIME_DYNAMIC_MMAP_BASE, Ordering::SeqCst);
     if !update_current_linux_tls(0) {
-        serial_write("ginux: Linux exec TLS reset failed\r\n");
+        serial_write("linox: Linux exec TLS reset failed\r\n");
         return LINUX_ENOMEM;
     }
     let Some(thread) = current_linux_thread_handle() else {
@@ -35375,7 +35375,7 @@ fn linux_rootfs_execve_source(
             fs_base: 0,
         },
     ) {
-        serial_write("ginux: Linux exec thread context reset failed\r\n");
+        serial_write("linox: Linux exec thread context reset failed\r\n");
         return LINUX_ENOEXEC;
     }
     if !reset_extended_user_state() {
@@ -35387,7 +35387,7 @@ fn linux_rootfs_execve_source(
         entry_state.user_rsp = new_stack;
     }
     if !linux_process::set_live_process_exec_context(pid, startup.initial_entry, new_stack) {
-        serial_write("ginux: Linux exec process context rejected entry/stack: ");
+        serial_write("linox: Linux exec process context rejected entry/stack: ");
         serial_write_u64(startup.initial_entry);
         serial_write("/");
         serial_write_u64(new_stack);
@@ -35419,7 +35419,7 @@ fn linux_rootfs_execve_source(
             != registered_entry.map(|mapping| mapping.frame)
         || entry_mapping.is_some_and(|mapping| !mapping.executable)
     {
-        serial_write("ginux: Linux exec entry mapping mismatch pid/page/hardware/registry: ");
+        serial_write("linox: Linux exec entry mapping mismatch pid/page/hardware/registry: ");
         serial_write_u64(u64::from(pid));
         serial_write("/");
         serial_write_u64(entry_page);
@@ -35488,7 +35488,7 @@ fn linux_exec_follow_overlay_links(
 /// file in the overlay.
 /// The file execve runs at absolute `path`: the overlay's, or the image's
 /// after following its symlinks.
-fn linux_exec_file_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> {
+fn linux_exec_file_access(path: &[u8]) -> Option<linox_credentials::FileAccess> {
     if let Some(metadata) = path
         .strip_prefix(b"/")
         .and_then(crate::linux_overlay::lookup)
@@ -35497,7 +35497,7 @@ fn linux_exec_file_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> 
         return Some(linux_overlay_file_access(metadata));
     }
     let (_, entry) = linux_rootfs_path_at(u64::from(LINUX_AT_FDCWD), path)?;
-    entry.map(|entry| ginux_credentials::FileAccess {
+    entry.map(|entry| linox_credentials::FileAccess {
         owner: entry.owner,
         group: entry.group,
         mode: entry.mode & 0o7777,
@@ -35509,7 +35509,7 @@ fn linux_exec_file_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> 
 /// effective user id, a set-group-ID (and group-executable) one its group
 /// the effective group id, when the domain maps that id; the saved and
 /// filesystem ids then follow the effective ones.
-fn linux_apply_exec_credentials(file: Option<ginux_credentials::FileAccess>) {
+fn linux_apply_exec_credentials(file: Option<linox_credentials::FileAccess>) {
     let pid = current_linux_process_pid();
     let (Some(namespace), Some(mut credentials)) = (
         current_linux_user_namespace(),
@@ -35521,7 +35521,7 @@ fn linux_apply_exec_credentials(file: Option<ginux_credentials::FileAccess>) {
     // With no_new_privs an exec grants nothing: the set-ID bits do not
     // count (PR_SET_NO_NEW_PRIVS).
     let file = file.filter(|_| !X86_RUNTIME.ELF_PROBE_NO_NEW_PRIVS.load(Ordering::SeqCst));
-    let set_id = |bits: u32, id: fn(&ginux_credentials::FileAccess) -> u32| {
+    let set_id = |bits: u32, id: fn(&linox_credentials::FileAccess) -> u32| {
         file.filter(|file| file.mode & bits == bits)
             .map(|file| id(&file))
             .filter(|id| *id < id_count)
@@ -35844,7 +35844,7 @@ fn linux_execve_at(
     {
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) && current_linux_process_pid() != 1
         {
-            serial_write("ginux: Linux child exec precondition rejected\r\n");
+            serial_write("linox: Linux child exec precondition rejected\r\n");
         }
         return LINUX_EAGAIN;
     }
@@ -35888,7 +35888,7 @@ fn linux_execve_at(
             return LINUX_RETURN_TO_KERNEL;
         }
         if result != 0 {
-            serial_write("ginux: Linux child exec rejected path/error ");
+            serial_write("linox: Linux child exec rejected path/error ");
             crate::serial_write_bytes(exec_path);
             serial_write(" ");
             serial_write_u64(result);
@@ -35930,7 +35930,7 @@ fn linux_execve_at(
         return LINUX_ENOEXEC;
     };
     if interpreted_exec_plan.is_some() {
-        serial_write("ginux: measured-root interpreted Linux exec admitted\r\n");
+        serial_write("linox: measured-root interpreted Linux exec admitted\r\n");
     }
     let (argument_pointers, argument_count) = match linux_exec_vector(arguments_address, true) {
         Ok(vector) => vector,
@@ -36000,7 +36000,7 @@ fn linux_execve_at(
             .and_then(linux_thread_context)
             .is_none()
         {
-            serial_write("ginux: exec current TLS context unavailable\r\n");
+            serial_write("linox: exec current TLS context unavailable\r\n");
             return LINUX_ESRCH;
         }
         let sibling = X86_RUNTIME.ELF_PROBE_SIBLING_FS_BASE.load(Ordering::SeqCst);
@@ -36008,7 +36008,7 @@ fn linux_execve_at(
         let Some((initial_thread_pointer, initial_extent, initial_extent_size)) =
             initial_page.and_then(|page| address_space::linux_exec_tls_context(plan, page))
         else {
-            serial_write("ginux: exec measured TLS layout unavailable\r\n");
+            serial_write("linox: exec measured TLS layout unavailable\r\n");
             return LINUX_ENOEXEC;
         };
         let initial = LinuxTlsContext {
@@ -36018,11 +36018,11 @@ fn linux_execve_at(
         };
         let thread_pointers = [initial.thread_pointer as u64, sibling];
         if sibling == 0 {
-            serial_write("ginux: exec sibling TLS context unavailable\r\n");
+            serial_write("linox: exec sibling TLS context unavailable\r\n");
             return LINUX_ENOEXEC;
         }
         if !address_space::current_linux_tls_rematerializable(plan, thread_pointers) {
-            serial_write("ginux: exec TLS rematerialization contract rejected\r\n");
+            serial_write("linox: exec TLS rematerialization contract rejected\r\n");
             serial_write_u64(thread_pointers[0]);
             serial_write(" ");
             serial_write_u64(thread_pointers[1]);
@@ -36290,7 +36290,7 @@ fn linux_execve_at(
             let mapping_matches =
                 address_space::current_linux_mapping_matches(address, frame, true, false);
             if duplicate || !mapping_matches {
-                serial_write("ginux: exec old TLS frame rejection: ");
+                serial_write("linox: exec old TLS frame rejection: ");
                 serial_write_u64(index as u64);
                 serial_write(" ");
                 serial_write_u64(address);
@@ -36371,7 +36371,7 @@ fn linux_execve_at(
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
             && current_linux_process_pid() >= 19
         {
-            serial_write("ginux: exec retained mappings pid/old/shared/stack/heap: ");
+            serial_write("linox: exec retained mappings pid/old/shared/stack/heap: ");
             serial_write_u64(u64::from(current_linux_process_pid()));
             serial_write("/");
             serial_write_u64(old_mapping_count as u64);
@@ -36462,7 +36462,7 @@ fn linux_execve_at(
             .store(next_tls.extent_size as u64, Ordering::SeqCst);
     }
     if interpreted {
-        serial_write("ginux: interpreted Linux exec image committed\r\n");
+        serial_write("linox: interpreted Linux exec image committed\r\n");
     }
     for (index, mapping) in active_image_mappings[..active_image_count]
         .iter()
@@ -36631,7 +36631,7 @@ fn linux_execve_at(
         .ELF_PROBE_EXEC_REPLACED
         .store(true, Ordering::SeqCst);
     let _ = linux_process::mark_live_process_executed(current_linux_process_pid());
-    serial_write("ginux: measured Linux exec image replaced atomically\r\n");
+    serial_write("linox: measured Linux exec image replaced atomically\r\n");
     0
 }
 
@@ -37543,7 +37543,7 @@ fn linux_check_hardlink_source(source: crate::linux_overlay::Metadata) -> Result
     let readable_writable = safe
         && linux_check_access(
             Some(linux_overlay_file_access(source)),
-            ginux_credentials::access::READ | ginux_credentials::access::WRITE,
+            linox_credentials::access::READ | linox_credentials::access::WRITE,
             false,
         )
         .is_ok();
@@ -37578,7 +37578,7 @@ fn linux_resolve_link_target(
 
 /// What the path walk finds at a directory prefix of a canonical path.
 enum LinuxWalkStep {
-    Directory(ginux_credentials::FileAccess),
+    Directory(linox_credentials::FileAccess),
     NotDirectory,
     /// A symlink, a kernel directory (/proc, /dev) or nothing: the walk
     /// cannot judge it, and the lookup that follows reports what it finds.
@@ -37601,7 +37601,7 @@ fn linux_walk_step(prefix: &[u8]) -> LinuxWalkStep {
     match crate::published_rootfs::lookup_at(crate::published_rootfs::ROOT_HANDLE, &image) {
         Some((_, Some(entry))) => match entry.kind {
             crate::published_rootfs::EntryKind::Directory => {
-                LinuxWalkStep::Directory(ginux_credentials::FileAccess {
+                LinuxWalkStep::Directory(linox_credentials::FileAccess {
                     owner: entry.owner,
                     group: entry.group,
                     mode: entry.mode & 0o7777,
@@ -37631,7 +37631,7 @@ fn linux_check_path_walk(path: &[u8]) -> Result<(), u64> {
     for prefix in linux_walk_prefixes(path) {
         match linux_walk_step(prefix) {
             LinuxWalkStep::Directory(directory) => {
-                linux_check_access(Some(directory), ginux_credentials::access::EXECUTE, false)?
+                linux_check_access(Some(directory), linox_credentials::access::EXECUTE, false)?
             }
             LinuxWalkStep::NotDirectory => return Err(LINUX_ENOTDIR),
             LinuxWalkStep::Unknown => return Ok(()),
@@ -37658,9 +37658,9 @@ fn linux_missing_path_error(path: &[u8]) -> u64 {
 /// overlay's copy if there is one, else the image's. The kernel's own files
 /// (devices, /proc) and the root directory have none, and permission checks
 /// leave them alone.
-fn linux_path_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> {
+fn linux_path_access(path: &[u8]) -> Option<linox_credentials::FileAccess> {
     if let Some(metadata) = crate::linux_overlay::lookup(path) {
-        return Some(ginux_credentials::FileAccess {
+        return Some(linox_credentials::FileAccess {
             owner: metadata.owner,
             group: metadata.group,
             mode: metadata.mode & 0o7777,
@@ -37671,7 +37671,7 @@ fn linux_path_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> {
     let (_, entry) =
         crate::published_rootfs::lookup_at(crate::published_rootfs::ROOT_HANDLE, &image)?;
     let entry = entry?;
-    Some(ginux_credentials::FileAccess {
+    Some(linox_credentials::FileAccess {
         owner: entry.owner,
         group: entry.group,
         mode: entry.mode & 0o7777,
@@ -37680,10 +37680,10 @@ fn linux_path_access(path: &[u8]) -> Option<ginux_credentials::FileAccess> {
 }
 
 /// Checks that the current process may have `wanted` (bits of
-/// `ginux_credentials::access`) on `file`, judged by its filesystem ids, or
+/// `linox_credentials::access`) on `file`, judged by its filesystem ids, or
 /// by its real ids for access(2): EACCES if not.
 fn linux_check_access(
-    file: Option<ginux_credentials::FileAccess>,
+    file: Option<linox_credentials::FileAccess>,
     wanted: u32,
     real_ids: bool,
 ) -> Result<(), u64> {
@@ -37694,7 +37694,7 @@ fn linux_check_access(
         credentials.user.filesystem = credentials.user.real;
         credentials.group.filesystem = credentials.group.real;
     }
-    if credentials.filesystem_privileged() && wanted & ginux_credentials::access::EXECUTE == 0 {
+    if credentials.filesystem_privileged() && wanted & linox_credentials::access::EXECUTE == 0 {
         return Ok(());
     }
     let allowed = linux_process::with_live_process_groups(current_linux_process_pid(), |groups| {
@@ -37734,7 +37734,7 @@ fn linux_check_entry_change(path: &[u8], removal: bool) -> Result<(), u64> {
     let parent = linux_path_access(linux_parent_path(path)).filter(|parent| parent.directory);
     linux_check_access(
         parent,
-        ginux_credentials::access::WRITE | ginux_credentials::access::EXECUTE,
+        linox_credentials::access::WRITE | linox_credentials::access::EXECUTE,
         false,
     )?;
     let (Some(parent), Some(credentials)) = (parent, current_linux_credentials()) else {
@@ -38154,7 +38154,7 @@ fn linux_open_file_at(
             Err(error) => error,
         };
     }
-    let tmp_path = path == b"/tmp/ginux-ready";
+    let tmp_path = path == b"/tmp/linox-ready";
     let proc_fdinfo_target = linux_proc_fdinfo_target(path);
     let proc_dynamic_pid = linux_proc_process_file(path)
         .filter(|(_, name)| {
@@ -38342,7 +38342,7 @@ fn linux_open_file_at(
     if let Some(length) = canonical_length.filter(|_| flags & LINUX_O_PATH == 0) {
         let path = &canonical[..length];
         let check = if overlay_metadata.is_some() || rootfs_at_path.is_some() {
-            use ginux_credentials::access::{READ, WRITE};
+            use linox_credentials::access::{READ, WRITE};
             let wanted = match access {
                 0 => READ,
                 1 => WRITE,
@@ -38553,7 +38553,7 @@ fn linux_open_file_at(
     } else if path == b"/etc/resolv.conf" {
         LINUX_FILE_RESOLV_CONF
     } else if tmp_path {
-        let existing = linux_tmpfs::open(b"ginux-ready");
+        let existing = linux_tmpfs::open(b"linox-ready");
         if existing.is_some()
             && flags & (LINUX_O_CREAT | LINUX_O_EXCL) == (LINUX_O_CREAT | LINUX_O_EXCL)
         {
@@ -38561,7 +38561,7 @@ fn linux_open_file_at(
         }
         tmp_handle = existing.or_else(|| {
             let created = (flags & LINUX_O_CREAT != 0)
-                .then(|| linux_tmpfs::create(b"ginux-ready"))
+                .then(|| linux_tmpfs::create(b"linox-ready"))
                 .flatten();
             tmp_created = created.is_some();
             created
@@ -38645,7 +38645,7 @@ fn linux_open_file_at(
         .or_else(|| linux_free_overflow_descriptor(LINUX_DESCRIPTOR_TABLE_LIMIT))
     else {
         if tmp_created {
-            let _ = tmp_handle.is_some_and(|handle| linux_tmpfs::unlink(b"ginux-ready", handle));
+            let _ = tmp_handle.is_some_and(|handle| linux_tmpfs::unlink(b"linox-ready", handle));
         }
         return LINUX_EMFILE;
     };
@@ -39028,7 +39028,7 @@ fn linux_memfd_create(name_address: u64, flags: u64) -> u64 {
         Ok(descriptor) => descriptor,
         Err(error) => return error,
     };
-    let Some(handle) = crate::linux_overlay::create_file(b"tmp/.ginux-memfd", 0o777, &[]) else {
+    let Some(handle) = crate::linux_overlay::create_file(b"tmp/.linox-memfd", 0o777, &[]) else {
         return LINUX_ENOSPC;
     };
     if !crate::linux_overlay::configure_memfd(handle, flags & MFD_ALLOW_SEALING != 0)
@@ -39088,7 +39088,7 @@ fn linux_open_temporary(directory: u64, path: &[u8], flags: u64, mode: u64) -> u
     }
     if let Err(error) = linux_check_access(
         Some(access),
-        ginux_credentials::access::WRITE | ginux_credentials::access::EXECUTE,
+        linox_credentials::access::WRITE | linox_credentials::access::EXECUTE,
         false,
     ) {
         return error;
@@ -39128,7 +39128,7 @@ fn linux_memfd_secret(flags: u64) -> u64 {
         Ok(descriptor) => descriptor,
         Err(error) => return error,
     };
-    let Some(handle) = crate::linux_overlay::create_file(b"tmp/.ginux-secret", 0o600, &[]) else {
+    let Some(handle) = crate::linux_overlay::create_file(b"tmp/.linox-secret", 0o600, &[]) else {
         return LINUX_ENOSPC;
     };
     if !crate::linux_overlay::unlink(handle) || !crate::linux_overlay::mark_pseudo(handle) {
@@ -39304,7 +39304,7 @@ fn linux_open_by_handle_at(mount_descriptor: u64, handle_address: u64, flags: u6
     }
     // Decoding a handle needs CAP_DAC_READ_SEARCH, checked before the
     // handle is read, as Linux does (open_by_handle_at02).
-    if !linux_has_capability(ginux_credentials::capability::DAC_READ_SEARCH) {
+    if !linux_has_capability(linox_credentials::capability::DAC_READ_SEARCH) {
         return LINUX_EPERM;
     }
     // The handles name files of the root's filesystems: a descriptor on
@@ -40172,11 +40172,11 @@ fn linux_unlinkat(directory: u64, path_address: u64, flags: u64) -> u64 {
             _ => {}
         }
     }
-    if directory as u32 == LINUX_AT_FDCWD && path == b"/tmp/ginux-ready" {
+    if directory as u32 == LINUX_AT_FDCWD && path == b"/tmp/linox-ready" {
         if flags != 0 {
             return LINUX_ENOTDIR;
         }
-        let Some(handle) = linux_tmpfs::open(b"ginux-ready") else {
+        let Some(handle) = linux_tmpfs::open(b"linox-ready") else {
             return LINUX_ENOENT;
         };
         let generation = linux_tmpfs::generation(handle);
@@ -40187,7 +40187,7 @@ fn linux_unlinkat(directory: u64, path_address: u64, flags: u64) -> u64 {
         }) {
             return LINUX_EBUSY;
         }
-        return if linux_tmpfs::unlink(b"ginux-ready", handle) {
+        return if linux_tmpfs::unlink(b"linox-ready", handle) {
             0
         } else {
             LINUX_ENOENT
@@ -40408,7 +40408,7 @@ fn linux_fallocate(descriptor: u64, mode: u64, offset: u64, length: u64) -> u64 
             _ => return LINUX_EOPNOTSUPP,
         };
         // Block maps (ext2's, and ext4 files without extents) hold no
-        // unwritten blocks: ginux_ext2 answers EOPNOTSUPP for them.
+        // unwritten blocks: linox_ext2 answers EOPNOTSUPP for them.
         return match crate::linux_blockfs::fallocate(handle, allocation, offset, length) {
             Some(Ok(())) => 0,
             Some(Err(error)) => error.wrapping_neg(),
@@ -40474,8 +40474,8 @@ fn linux_fchmod(descriptor: u64, mode: u64) -> u64 {
 
 fn linux_overlay_file_access(
     metadata: crate::linux_overlay::Metadata,
-) -> ginux_credentials::FileAccess {
-    ginux_credentials::FileAccess {
+) -> linox_credentials::FileAccess {
+    linox_credentials::FileAccess {
         owner: metadata.owner,
         group: metadata.group,
         mode: metadata.mode & 0o7777,
@@ -40538,7 +40538,7 @@ fn linux_overlay_chown(handle: crate::linux_overlay::Handle, owner: u32, group: 
         return LINUX_ESRCH;
     };
     let id_count = linux_user::identity_authority(namespace, &credentials).id_count;
-    let unchanged = ginux_credentials::UNCHANGED;
+    let unchanged = linox_credentials::UNCHANGED;
     if [owner, group]
         .into_iter()
         .any(|id| id != unchanged && id >= id_count)
@@ -40788,7 +40788,7 @@ fn linux_file_attributes_ioctl(descriptor: u64, request: u64, argument: u64) -> 
     }
     if (metadata.attributes ^ attributes) & (LINUX_FS_IMMUTABLE_FL | LINUX_FS_APPEND_FL) != 0
         && !credentials.is_some_and(|credentials| {
-            credentials.has(ginux_credentials::capability::LINUX_IMMUTABLE)
+            credentials.has(linox_credentials::capability::LINUX_IMMUTABLE)
         })
     {
         return Some(LINUX_EPERM);
@@ -41383,7 +41383,7 @@ fn linux_check_set_times(
     if !only_now {
         return Err(LINUX_EPERM);
     }
-    linux_check_access(Some(file), ginux_credentials::access::WRITE, false)
+    linux_check_access(Some(file), linox_credentials::access::WRITE, false)
 }
 
 fn linux_utime(path_address: u64, times_address: u64) -> u64 {
@@ -41582,9 +41582,9 @@ fn linux_renameat(
     // A volume renames in one step, replacing the target as it goes.
     if crate::linux_blockfs::owns(source.handle) {
         let mode = match flags {
-            RENAME_EXCHANGE => ginux_ext2::RenameMode::Exchange,
-            RENAME_NOREPLACE => ginux_ext2::RenameMode::NoReplace,
-            _ => ginux_ext2::RenameMode::Replace,
+            RENAME_EXCHANGE => linox_ext2::RenameMode::Exchange,
+            RENAME_NOREPLACE => linox_ext2::RenameMode::NoReplace,
+            _ => linox_ext2::RenameMode::Replace,
         };
         let result = crate::linux_blockfs::rename_with(
             &crate::linux_mount_paths::storage(old),
@@ -41650,7 +41650,7 @@ fn linux_rename_exchange(old: &[u8], new: &[u8]) -> u64 {
             return error;
         }
     }
-    const SUFFIX: &[u8] = b".ginux-exchange";
+    const SUFFIX: &[u8] = b".linox-exchange";
     let mut temporary = [0_u8; crate::linux_overlay::PATH_CAPACITY];
     let Some(end) = old
         .len()
@@ -41749,13 +41749,13 @@ fn linux_faccessat(directory: u64, path_address: u64, mode: u64, flags: u64) -> 
     if let Some((_, entry)) = linux_rootfs_path_at(directory, path) {
         // The image's root directory has no entry: r-x for everyone.
         let file = entry.map_or(
-            ginux_credentials::FileAccess {
+            linox_credentials::FileAccess {
                 owner: 0,
                 group: 0,
                 mode: 0o755,
                 directory: true,
             },
-            |entry| ginux_credentials::FileAccess {
+            |entry| linox_credentials::FileAccess {
                 owner: entry.owner,
                 group: entry.group,
                 mode: entry.mode & 0o7777,
@@ -42279,7 +42279,7 @@ fn linux_statx_domain_mount(directory: u64, path_address: u64, flags: u64) -> Op
 /// from a chroot below them neither is reachable, and seeing them then
 /// needs CAP_SYS_ADMIN, as Linux's listmount and statmount require.
 fn linux_mounts_visible() -> bool {
-    !linux_chrooted() || linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+    !linux_chrooted() || linux_has_capability(linox_credentials::capability::SYS_ADMIN)
 }
 
 fn linux_statx_set_mount(stat: &mut [u8; 256], filesystem: LinuxFilesystemKind) {
@@ -42494,7 +42494,7 @@ fn linux_socket_create(family: u64, socket_type: u64, protocol: u64) -> u64 {
     // A raw socket needs CAP_NET_RAW, checked once the protocol is known,
     // as Linux's inet_create and inet6_create do; a ping socket a group in
     // ping_group_range (EACCES).
-    if base == SOCK_RAW && !linux_has_capability(ginux_credentials::capability::NET_RAW) {
+    if base == SOCK_RAW && !linux_has_capability(linox_credentials::capability::NET_RAW) {
         return LINUX_EPERM;
     }
     if base == SOCK_DGRAM && kind == crate::linux_socket::Kind::Icmp && !linux_ping_allowed() {
@@ -42518,7 +42518,7 @@ fn linux_socket_create(family: u64, socket_type: u64, protocol: u64) -> u64 {
         Err(error) => {
             let result = linux_socket_error(error);
             if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-                serial_write("ginux: Linux IPv4 socket creation failed: ");
+                serial_write("linox: Linux IPv4 socket creation failed: ");
                 serial_write_u64(result);
                 serial_write(" socket/device/pipe/event/timer/stderr ");
                 serial_write_u64(linux_socket_slot(descriptor).map_or(u64::MAX, u64::from));
@@ -42564,7 +42564,7 @@ fn linux_packet_socket_create(socket_type: u64, protocol: u64) -> u64 {
     if !matches!(base, SOCK_DGRAM | SOCK_RAW) {
         return LINUX_ESOCKTNOSUPPORT;
     }
-    if !linux_has_capability(ginux_credentials::capability::NET_RAW) {
+    if !linux_has_capability(linox_credentials::capability::NET_RAW) {
         return LINUX_EPERM;
     }
     let Some(descriptor) = linux_free_descriptor(LINUX_AUX_DESCRIPTOR_FIRST) else {
@@ -42932,7 +42932,7 @@ fn linux_socket_bind(descriptor: u64, address: u64, length: u64) -> u64 {
     }
     // Ports below 1024 need CAP_NET_BIND_SERVICE.
     if (1..1024).contains(&port)
-        && !linux_has_capability(ginux_credentials::capability::NET_BIND_SERVICE)
+        && !linux_has_capability(linox_credentials::capability::NET_BIND_SERVICE)
     {
         return LINUX_EACCES;
     }
@@ -43099,7 +43099,7 @@ fn linux_socket_connect(descriptor: u64, address: u64, length: u64) -> u64 {
             {
                 if let Err(error) = linux_check_access(
                     Some(linux_overlay_file_access(metadata)),
-                    ginux_credentials::access::WRITE,
+                    linox_credentials::access::WRITE,
                     false,
                 ) {
                     return error;
@@ -43337,7 +43337,7 @@ fn linux_socket_recvfrom(
     // A TLS record that is not application data needs recvmsg's control
     // buffer: here it is EIO.
     linux_tls_receive_control(slot, 0);
-    // Ginux keeps no socket error queues, so reading one finds it empty.
+    // Linox keeps no socket error queues, so reading one finds it empty.
     if flags & LINUX_MSG_ERRQUEUE != 0 {
         return LINUX_EAGAIN;
     }
@@ -43630,7 +43630,7 @@ fn linux_socket_sendmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
                 let Some(credentials) = current_linux_credentials() else {
                     return LINUX_ESRCH;
                 };
-                let held = |ids: ginux_credentials::Ids, id: u32| {
+                let held = |ids: linox_credentials::Ids, id: u32| {
                     credentials.privileged() || [ids.real, ids.effective, ids.saved].contains(&id)
                 };
                 if pid < 0
@@ -43852,7 +43852,7 @@ fn linux_socket_recvmsg(
     if iov_count > LINUX_IOV_LIMIT {
         return LINUX_EMSGSIZE;
     }
-    // Ginux keeps no socket error queues, so reading one finds it empty.
+    // Linox keeps no socket error queues, so reading one finds it empty.
     if flags & LINUX_MSG_ERRQUEUE != 0 {
         return LINUX_EAGAIN;
     }
@@ -44848,7 +44848,7 @@ fn linux_socket_setsockopt(
     if level == LINUX_SOL_ICMPV6 && crate::linux_socket::is_ipv6(slot) {
         return linux_icmpv6_setsockopt(slot, option, value, length);
     }
-    if level == ginux_ktls::SOL_TLS {
+    if level == linox_ktls::SOL_TLS {
         return linux_tls_setsockopt(slot, option, value, length);
     }
     if let Some(coverage) = linux_udplite_coverage_option(level, option) {
@@ -45249,7 +45249,7 @@ fn linux_socket_getsockopt(
     if level == LINUX_SOL_ICMPV6 && crate::linux_socket::is_ipv6(slot) {
         return linux_icmpv6_getsockopt(slot, option, value, length);
     }
-    if level == ginux_ktls::SOL_TLS {
+    if level == linox_ktls::SOL_TLS {
         return linux_tls_getsockopt(slot, option, value, length);
     }
     if (level, option) == (6, LINUX_TCP_ULP)
@@ -46305,7 +46305,7 @@ fn linux_generated_chunk(
 fn linux_cpuinfo_record(cpu: usize, count: usize, output: &mut [u8]) -> Option<usize> {
     let mut used = 0;
     let prefix = b"processor\t: ";
-    let middle = b"\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 158\nmodel name\t: Ginux virtual x86-64 CPU\nstepping\t: 10\ncpu MHz\t\t: 1000.000\ncache size\t: 16384 KB\nphysical id\t: 0\nsiblings\t: ";
+    let middle = b"\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 158\nmodel name\t: Linox virtual x86-64 CPU\nstepping\t: 10\ncpu MHz\t\t: 1000.000\ncache size\t: 16384 KB\nphysical id\t: 0\nsiblings\t: ";
     if !append_linux_bytes(output, &mut used, prefix)
         || !append_linux_decimal(output, &mut used, cpu as u64)
         || !append_linux_bytes(output, &mut used, middle)
@@ -49171,7 +49171,7 @@ impl crate::linux_loop::Caller for LinuxLoopCaller {
 
     fn administrator(&self) -> bool {
         current_linux_credentials()
-            .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_ADMIN))
+            .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_ADMIN))
     }
 }
 
@@ -49315,10 +49315,10 @@ fn linux_open_object(class: u8, id: u64, flags: u64) -> u64 {
     }
 }
 
-/// The calling process's memory for `ginux_drm`.
+/// The calling process's memory for `linox_drm`.
 struct LinuxUserMemory;
 
-impl ginux_drm::UserMemory for LinuxUserMemory {
+impl linox_drm::UserMemory for LinuxUserMemory {
     fn read(&self, address: u64, output: &mut [u8]) -> bool {
         copy_from_linux_user(address, output)
     }
@@ -49328,7 +49328,7 @@ impl ginux_drm::UserMemory for LinuxUserMemory {
     }
 }
 
-fn linux_drm_errno(error: ginux_drm::Errno) -> u64 {
+fn linux_drm_errno(error: linox_drm::Errno) -> u64 {
     (-i64::from(error.number())) as u64
 }
 
@@ -49390,7 +49390,7 @@ fn linux_drm_ioctl(file: u64, command: u32, address: u64) -> u64 {
 }
 
 fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
-    let (request, user_size) = match ginux_drm::Request::decode(command) {
+    let (request, user_size) = match linox_drm::Request::decode(command) {
         Ok(decoded) => decoded,
         Err(error) => return linux_drm_errno(error),
     };
@@ -49401,8 +49401,8 @@ fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
         return LINUX_EFAULT;
     }
     // An execbuffer waits for its input fence first.
-    if request == ginux_drm::Request::Execbuffer {
-        if let Some(fence) = ginux_drm::execbuffer_in_fence(&argument[..size]) {
+    if request == linox_drm::Request::Execbuffer {
+        if let Some(fence) = linox_drm::execbuffer_in_fence(&argument[..size]) {
             let Some((crate::linux_drm::CLASS_FENCE, fence)) =
                 linux_object_descriptor(u64::from(fence as u32))
             else {
@@ -49430,8 +49430,8 @@ fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
         Some(Ok(outcome)) => outcome,
     };
     match outcome {
-        ginux_drm::Outcome::Done => {}
-        ginux_drm::Outcome::FenceDescriptor { fence, offset } => {
+        linox_drm::Outcome::Done => {}
+        linox_drm::Outcome::FenceDescriptor { fence, offset } => {
             let descriptor =
                 crate::linux_profile::span(crate::linux_profile::Span::DrmFenceDescriptor, || {
                     linux_open_object(crate::linux_drm::CLASS_FENCE, fence, LINUX_O_CLOEXEC)
@@ -49441,7 +49441,7 @@ fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
             }
             argument[offset..offset + 4].copy_from_slice(&(descriptor as u32).to_le_bytes());
         }
-        ginux_drm::Outcome::Export {
+        linox_drm::Outcome::Export {
             resource,
             size: length,
             flags,
@@ -49454,7 +49454,7 @@ fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
             }) else {
                 return LINUX_ENOMEM;
             };
-            ginux_drm::Gpu::retain(&mut gpu, resource);
+            linox_drm::Gpu::retain(&mut gpu, resource);
             let descriptor = linux_open_object(
                 crate::linux_drm::CLASS_DMABUF,
                 id,
@@ -49465,7 +49465,7 @@ fn linux_drm_ioctl_inner(file: u64, command: u32, address: u64) -> u64 {
             }
             argument[offset..offset + 4].copy_from_slice(&(descriptor as u32).to_le_bytes());
         }
-        ginux_drm::Outcome::Import { descriptor } => {
+        linox_drm::Outcome::Import { descriptor } => {
             let Some((crate::linux_drm::CLASS_DMABUF, id)) =
                 linux_object_descriptor(u64::from(descriptor as u32))
             else {
@@ -49556,9 +49556,9 @@ fn linux_object_mmap(
             physical + (page * PAGE_SIZE) as u64,
             protection & LINUX_PROT_WRITE != 0,
             match cache {
-                ginux_drm::Cache::Cached => address_space::DeviceCaching::WriteBack,
-                ginux_drm::Cache::WriteCombined => address_space::DeviceCaching::WriteCombining,
-                ginux_drm::Cache::Uncached => address_space::DeviceCaching::Uncached,
+                linox_drm::Cache::Cached => address_space::DeviceCaching::WriteBack,
+                linox_drm::Cache::WriteCombined => address_space::DeviceCaching::WriteCombining,
+                linox_drm::Cache::Uncached => address_space::DeviceCaching::Uncached,
             },
         );
         if !installed {
@@ -51307,7 +51307,7 @@ fn run_scheduled_linux_process(parent_pid: u32, target_pid: Option<u32>) -> bool
             .then(|| linux_process::switch_live_process(selected.pid, parent_pid))
             .flatten();
         if parent.is_none_or(|dispatch| dispatch.pid != parent_pid) {
-            serial_write("ginux: scheduled process return failed child/parent/resumed/dispatch: ");
+            serial_write("linox: scheduled process return failed child/parent/resumed/dispatch: ");
             serial_write_u64(u64::from(selected.pid));
             serial_write(" ");
             serial_write_u64(u64::from(parent_pid));
@@ -53518,7 +53518,7 @@ fn linux_bounded_console_write(address: u64, count: u64) -> u64 {
 /// on Linux. `t` (show task states) lists every task of the domain in the
 /// kernel log, `l` profiles the runtime CPU (`crate::linux_profile`) and `u`
 /// reports each CPU's user, kernel, idle and lock-wait time (`cpu_time`);
-/// keys Ginux has no handler for are accepted and ignored.
+/// keys Linox has no handler for are accepted and ignored.
 fn linux_sysrq_trigger_write(address: u64, count: u64) -> u64 {
     if count == 0 {
         return 0;
@@ -53546,13 +53546,13 @@ fn linux_sysrq_trigger_write(address: u64, count: u64) -> u64 {
 /// context, which for a thread inside a system call holds the call number
 /// and arguments.
 fn linux_show_task_states() {
-    serial_write("ginux: sysrq: show task states\r\n");
+    serial_write("linox: sysrq: show task states\r\n");
     let current = current_linux_process_pid();
     let mut pid = 1;
     while let Some(next) = linux_process::next_live_pid(pid) {
         pid = next + 1;
         let mut name = [0_u8; 16];
-        serial_write("ginux: task ");
+        serial_write("linox: task ");
         serial_write_u64(u64::from(next));
         serial_write(" ");
         crate::serial_write_bytes(linux_process_name(next, &mut name));
@@ -53587,7 +53587,7 @@ fn linux_show_task_states() {
 
 fn linux_show_thread_state(thread: &LinuxThreadRuntimeState) {
     let frame = LinuxSyscallFrame::from_array(thread.registers);
-    serial_write("ginux:   tid ");
+    serial_write("linox:   tid ");
     serial_write_u64(u64::from(thread.tid));
     serial_write(match thread.state {
         LINUX_THREAD_READY => " ready",
@@ -55384,7 +55384,7 @@ fn linux_user_namespace_file(state: u16) -> Option<&'static [u8]> {
 }
 
 /// Renders /proc/meminfo from the frame allocator's counts.
-/// /proc/uptime: seconds since boot, and idle time, which Ginux does not
+/// /proc/uptime: seconds since boot, and idle time, which Linox does not
 /// account and reports as zero.
 fn linux_proc_uptime() -> &'static [u8] {
     static mut UPTIME: [u8; 32] = [0; 32];
@@ -55563,7 +55563,7 @@ fn linux_regular_file(state: u16) -> Option<&'static [u8]> {
         LINUX_FILE_PROC_FILE_MAX => return Some(LINUX_PROC_FILE_MAX),
         LINUX_FILE_PROC_USER_NAMESPACE => return Some(b""),
         LINUX_FILE_PROC_FDINFO => return Some(b""),
-        LINUX_FILE_PROC_HOSTNAME => return Some(b"ginux\n"),
+        LINUX_FILE_PROC_HOSTNAME => return Some(b"linox\n"),
         LINUX_FILE_PROC_BOOT_ID => return Some(linux_boot_id()),
         LINUX_FILE_PROC_DYNAMIC_STAT
         | LINUX_FILE_PROC_DYNAMIC_STATUS
@@ -55688,7 +55688,7 @@ fn linux_regular_file_inode(state: u16) -> Option<u64> {
         _ => {}
     }
     if linux_tmp_file(state) {
-        return linux_tmpfs::open(b"ginux-ready").map(linux_tmpfs::inode);
+        return linux_tmpfs::open(b"linox-ready").map(linux_tmpfs::inode);
     }
     match state & LINUX_FILE_MASK {
         LINUX_FILE_INIT => Some(5),
@@ -56293,7 +56293,7 @@ fn linux_fcntl_set_lease(descriptor: u64, kind: u64) -> u64 {
     if kind.is_some()
         && current_linux_credentials().is_none_or(|credentials| {
             credentials.user.filesystem != metadata.owner
-                && !credentials.has(ginux_credentials::capability::LEASE)
+                && !credentials.has(linox_credentials::capability::LEASE)
         })
     {
         return LINUX_EACCES;
@@ -56640,14 +56640,14 @@ fn linux_close_all_descriptors() -> bool {
     crate::framebuffer::set_owned(false);
     crate::linux_input::flush();
     if linux_close_overflow_range(LINUX_DESCRIPTOR_TABLE_LIMIT, u64::MAX, false) != 0 {
-        serial_write("ginux: descriptor teardown failed above the fixed table\r\n");
+        serial_write("linox: descriptor teardown failed above the fixed table\r\n");
         return false;
     }
     for descriptor in 0..LINUX_DESCRIPTOR_TABLE_LIMIT {
         if linux_descriptor_open(descriptor) {
             let result = linux_descriptor_close(descriptor);
             if result != 0 {
-                serial_write("ginux: descriptor teardown failed fd/result ");
+                serial_write("linox: descriptor teardown failed fd/result ");
                 serial_write_u64(descriptor);
                 serial_write(" ");
                 serial_write_u64(result);
@@ -56658,7 +56658,7 @@ fn linux_close_all_descriptors() -> bool {
     }
     for descriptor in 0..LINUX_DESCRIPTOR_TABLE_LIMIT {
         if linux_descriptor_open(descriptor) {
-            serial_write("ginux: descriptor remained open after teardown fd ");
+            serial_write("linox: descriptor remained open after teardown fd ");
             serial_write_u64(descriptor);
             serial_write("\r\n");
             return false;
@@ -57582,7 +57582,7 @@ fn linux_descriptor_fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
                 }
                 if requested > linux_pipe_max_size()
                     && !current_linux_credentials()
-                        .is_some_and(|value| value.has(ginux_credentials::capability::SYS_RESOURCE))
+                        .is_some_and(|value| value.has(linox_credentials::capability::SYS_RESOURCE))
                 {
                     return LINUX_EPERM;
                 }
@@ -59169,7 +59169,7 @@ fn linux_prlimit_permitted(pid: u32) -> bool {
 /// Every user and group id of `target` is `caller`'s real one: what ptrace
 /// and prlimit require of a caller without the capability.
 fn linux_ids_match(caller: &linux_user::Credentials, target: &linux_user::Credentials) -> bool {
-    let all_are = |ids: ginux_credentials::Ids, id: u32| {
+    let all_are = |ids: linox_credentials::Ids, id: u32| {
         [ids.real, ids.effective, ids.saved]
             .into_iter()
             .all(|candidate| candidate == id)
@@ -59272,10 +59272,10 @@ fn verify_linux_cross_process_prlimit(pid: u32) -> bool {
         X86_RUNTIME
             .LINUX_CROSS_PROCESS_PRLIMIT_VALIDATED
             .store(true, Ordering::SeqCst);
-        serial_write("ginux: Linux cross-process resource limits validated\r\n");
-        serial_write("ginux: Linux generation-bound pidfds validated\r\n");
+        serial_write("linox: Linux cross-process resource limits validated\r\n");
+        serial_write("linox: Linux generation-bound pidfds validated\r\n");
     } else {
-        serial_write("ginux: Linux cross-process resource/pidfd validation failed:");
+        serial_write("linox: Linux cross-process resource/pidfd validation failed:");
         for value in [
             changed,
             restored,
@@ -59378,12 +59378,12 @@ fn verify_linux_running_child_wait_selectors(pid: u32) -> bool {
         && parent_closed
         && child_closed;
     if valid {
-        serial_write("ginux: Linux process-group wait selectors validated\r\n");
-        serial_write("ginux: Linux nonblocking pidfd wait validated\r\n");
-        serial_write("ginux: Linux cross-process memory transfer validated\r\n");
-        serial_write("ginux: Linux cross-process resource comparison validated\r\n");
-        serial_write("ginux: Linux shared open-file position validated\r\n");
-        serial_write("ginux: Linux cross-process pidfd descriptor duplication validated\r\n");
+        serial_write("linox: Linux process-group wait selectors validated\r\n");
+        serial_write("linox: Linux nonblocking pidfd wait validated\r\n");
+        serial_write("linox: Linux cross-process memory transfer validated\r\n");
+        serial_write("linox: Linux cross-process resource comparison validated\r\n");
+        serial_write("linox: Linux shared open-file position validated\r\n");
+        serial_write("linox: Linux cross-process pidfd descriptor duplication validated\r\n");
     }
     valid
 }
@@ -59459,7 +59459,7 @@ fn verify_linux_cross_process_vm(pid: u32) -> bool {
     let mut workspace = [0_u8; 192];
     let mut original = [0_u8; LENGTH];
     let mut parent = [0_u8; LENGTH];
-    let pattern = *b"GINUX-PROCESS-VM";
+    let pattern = *b"LINOX-PROCESS-VM";
     let mut local_write = [0_u8; 16];
     local_write[..8].copy_from_slice(&(mapping + INPUT_OFFSET).to_ne_bytes());
     local_write[8..].copy_from_slice(&(LENGTH as u64).to_ne_bytes());
@@ -59549,7 +59549,7 @@ fn verify_linux_cross_process_vm(pid: u32) -> bool {
     let workspace_restored = copy_to_linux_user(mapping, &workspace);
     let valid = partial && permission && errors && restored && workspace_restored;
     if !valid {
-        serial_write("ginux: Linux cross-process memory validation failed:");
+        serial_write("linox: Linux cross-process memory validation failed:");
         for value in [
             prepared,
             written,
@@ -60267,7 +60267,7 @@ fn linux_available_cpu_count() -> usize {
 /// mlock, mlock2 (`lock`) and munlock. The range must be mapped (ENOMEM
 /// past the areas and present pages). An unprivileged caller (no
 /// CAP_IPC_LOCK) is bound by RLIMIT_MEMLOCK: a zero limit forbids locking
-/// (EPERM), a smaller one refuses the range (ENOMEM); Ginux keeps no count
+/// (EPERM), a smaller one refuses the range (ENOMEM); Linox keeps no count
 /// of locked pages, so each call is measured alone.
 fn linux_memory_lock(address: u64, length: u64, flags: u64, lock: bool) -> u64 {
     let flags = flags as u32;
@@ -60315,7 +60315,7 @@ fn linux_memory_lock(address: u64, length: u64, flags: u64, lock: bool) -> u64 {
             return LINUX_ENOMEM;
         }
     }
-    // MLOCK_ONFAULT locks pages as they are touched instead of now; Ginux
+    // MLOCK_ONFAULT locks pages as they are touched instead of now; Linox
     // has no reclaim, so a touched page stays resident either way.
     const MLOCK_ONFAULT: u32 = 1;
     if lock
@@ -60366,7 +60366,7 @@ fn linux_mlockall(flags: u64) -> u64 {
             }
         }
     }
-    // Every present and future Ginux userspace mapping is resident because the
+    // Every present and future Linox userspace mapping is resident because the
     // kernel has no swap or page-reclaim path; the areas record the locks
     // (VmLck) and whether later mappings are locked.
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
@@ -60861,7 +60861,7 @@ fn linux_framebuffer_ioctl(request: u64, argument: u64) -> u64 {
         }
         FBIOGET_FSCREENINFO => {
             let mut info = [0_u8; 80];
-            info[..7].copy_from_slice(b"ginuxfb");
+            info[..7].copy_from_slice(b"linoxfb");
             info[16..24].copy_from_slice(&display.physical.to_ne_bytes());
             info[24..28].copy_from_slice(&(display.length as u32).to_ne_bytes());
             // FB_TYPE_PACKED_PIXELS, then FB_VISUAL_TRUECOLOR.
@@ -61946,12 +61946,12 @@ fn linux_volume_device(
 }
 
 /// The ext filesystem type a mount type names (all are served by
-/// ginux_ext2, which takes the features each type's Linux driver does).
-fn linux_volume_type(filesystem: &[u8]) -> Option<ginux_ext2::FsType> {
+/// linox_ext2, which takes the features each type's Linux driver does).
+fn linux_volume_type(filesystem: &[u8]) -> Option<linox_ext2::FsType> {
     match filesystem {
-        b"ext2" => Some(ginux_ext2::FsType::Ext2),
-        b"ext3" => Some(ginux_ext2::FsType::Ext3),
-        b"ext4" => Some(ginux_ext2::FsType::Ext4),
+        b"ext2" => Some(linox_ext2::FsType::Ext2),
+        b"ext3" => Some(linox_ext2::FsType::Ext3),
+        b"ext4" => Some(linox_ext2::FsType::Ext4),
         _ => None,
     }
 }
@@ -61959,14 +61959,14 @@ fn linux_volume_type(filesystem: &[u8]) -> Option<ginux_ext2::FsType> {
 /// The quota options of an ext filesystem's mount option string
 /// (usrquota or quota, grpquota, prjquota; noquota clears them). Other
 /// options are taken and have no effect here.
-fn linux_volume_quota_options(data: &[u8]) -> ginux_ext2::QuotaOptions {
-    let mut quota = ginux_ext2::QuotaOptions::default();
+fn linux_volume_quota_options(data: &[u8]) -> linox_ext2::QuotaOptions {
+    let mut quota = linox_ext2::QuotaOptions::default();
     for option in data.split(|byte| *byte == b',') {
         match option {
             b"usrquota" | b"quota" => quota.user = true,
             b"grpquota" => quota.group = true,
             b"prjquota" => quota.project = true,
-            b"noquota" => quota = ginux_ext2::QuotaOptions::default(),
+            b"noquota" => quota = linox_ext2::QuotaOptions::default(),
             _ => {}
         }
     }
@@ -61976,16 +61976,16 @@ fn linux_volume_quota_options(data: &[u8]) -> ginux_ext2::QuotaOptions {
 /// The errors= option of an ext filesystem's mount option string
 /// (continue, remount-ro, panic; EINVAL for another value), the last one
 /// given if several are.
-fn linux_volume_error_option(data: &[u8]) -> Result<Option<ginux_ext2::ErrorPolicy>, u64> {
+fn linux_volume_error_option(data: &[u8]) -> Result<Option<linox_ext2::ErrorPolicy>, u64> {
     let mut policy = None;
     for option in data.split(|byte| *byte == b',') {
         let Some(value) = option.strip_prefix(b"errors=") else {
             continue;
         };
         policy = Some(match value {
-            b"continue" => ginux_ext2::ErrorPolicy::Continue,
-            b"remount-ro" => ginux_ext2::ErrorPolicy::ReadOnly,
-            b"panic" => ginux_ext2::ErrorPolicy::Panic,
+            b"continue" => linox_ext2::ErrorPolicy::Continue,
+            b"remount-ro" => linox_ext2::ErrorPolicy::ReadOnly,
+            b"panic" => linox_ext2::ErrorPolicy::Panic,
             _ => return Err(LINUX_EINVAL),
         });
     }
@@ -61994,7 +61994,7 @@ fn linux_volume_error_option(data: &[u8]) -> Result<Option<ginux_ext2::ErrorPoli
 
 /// Whether the caller may go past quota limits (CAP_SYS_RESOURCE).
 pub(crate) fn linux_quota_exempt() -> bool {
-    linux_has_capability(ginux_credentials::capability::SYS_RESOURCE)
+    linux_has_capability(linox_credentials::capability::SYS_RESOURCE)
 }
 
 /// mount(2) of the ext2, ext3 or ext4 filesystem (`fs_type`) on the block
@@ -62004,7 +62004,7 @@ fn linux_mount_volume(
     source: &[u8],
     target: &[u8],
     options: u32,
-    fs_type: ginux_ext2::FsType,
+    fs_type: linox_ext2::FsType,
     data: &[u8],
 ) -> u64 {
     let mut source_name = [0_u8; crate::linux_overlay::PATH_CAPACITY + 1];
@@ -62089,9 +62089,9 @@ fn linux_mount_volume(
     let named = &source_name[..source_name_length];
     let space = linux_mount_space();
     let type_name: &[u8] = match fs_type {
-        ginux_ext2::FsType::Ext2 => b"ext2",
-        ginux_ext2::FsType::Ext3 => b"ext3",
-        ginux_ext2::FsType::Ext4 => b"ext4",
+        linox_ext2::FsType::Ext2 => b"ext2",
+        linox_ext2::FsType::Ext3 => b"ext3",
+        linox_ext2::FsType::Ext4 => b"ext4",
     };
     let Ok(id) = crate::linux_mounts::mount(space, target, named, type_name, options, superblock)
     else {
@@ -62385,11 +62385,11 @@ fn linux_tmpfs_statfs_data(path: &[u8]) -> Option<[u8; 120]> {
 
 /// statfs(2)'s answer for a volume: ext2's counts, and the options of the
 /// mount at canonical `path`.
-fn linux_volume_statfs_data(statfs: ginux_ext2::Statfs, path: &[u8]) -> [u8; 120] {
+fn linux_volume_statfs_data(statfs: linox_ext2::Statfs, path: &[u8]) -> [u8; 120] {
     let flags = linux_mount_statfs_flags(crate::linux_mounts::flags_at(linux_mount_space(), path));
     let mut stat = [0_u8; 120];
     let block_size = u64::from(statfs.block_size);
-    stat[0..8].copy_from_slice(&u64::from(ginux_ext2::MAGIC).to_ne_bytes());
+    stat[0..8].copy_from_slice(&u64::from(linox_ext2::MAGIC).to_ne_bytes());
     stat[8..16].copy_from_slice(&block_size.to_ne_bytes());
     stat[16..24].copy_from_slice(&statfs.blocks.to_ne_bytes());
     stat[24..32].copy_from_slice(&statfs.free_blocks.to_ne_bytes());
@@ -62523,7 +62523,7 @@ fn linux_kernel_filesystem(path: &[u8]) -> crate::linux_mounts::KernelFilesystem
     } else if below(b"sys/fs/cgroup") {
         (b"cgroup2", b"cgroup2", 3)
     } else {
-        (b"ginux-root", b"rootfs", LINUX_ROOT_FILESYSTEM_DEVICE)
+        (b"linox-root", b"rootfs", LINUX_ROOT_FILESYSTEM_DEVICE)
     };
     crate::linux_mounts::KernelFilesystem {
         filesystem,
@@ -62770,7 +62770,7 @@ pub(super) fn linux_mount_setattr_at(
         return LINUX_EINVAL;
     }
     if !linux_privileged_operation_allowed(linux_user::PrivilegedOperation::ManageMounts)
-        || !linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+        || !linux_has_capability(linox_credentials::capability::SYS_ADMIN)
     {
         return LINUX_EPERM;
     }
@@ -63251,7 +63251,7 @@ fn linux_file_size(state: u16) -> u64 {
     } else if state & !3 == LINUX_FILE_PROC_FDINFO {
         64
     } else if linux_tmp_file(state) {
-        linux_tmpfs::open(b"ginux-ready")
+        linux_tmpfs::open(b"linox-ready")
             .and_then(linux_tmpfs::size)
             .map_or(0, |size| size as u64)
     } else {
@@ -63721,14 +63721,14 @@ fn release_linux_process_keys(pid: u32) {
 
 /// The domain's key quotas: /proc/sys/kernel/keys as written, else Linux's
 /// defaults.
-fn linux_key_limits() -> ginux_keyrings::Limits {
-    let defaults = ginux_keyrings::Limits::LINUX;
+fn linux_key_limits() -> linox_keyrings::Limits {
+    let defaults = linox_keyrings::Limits::LINUX;
     let value = |path: &[u8], default: u32| {
         linux_proc_sysctl_value(path)
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or(default)
     };
-    ginux_keyrings::Limits {
+    linox_keyrings::Limits {
         root_max_keys: value(b"sys/kernel/keys/root_maxkeys", defaults.root_max_keys),
         root_max_bytes: value(b"sys/kernel/keys/root_maxbytes", defaults.root_max_bytes),
         max_keys: value(b"sys/kernel/keys/maxkeys", defaults.max_keys),
@@ -63760,8 +63760,8 @@ fn linux_key_string(address: u64, limit: usize) -> Result<Vec<u8>, u64> {
 /// Copies a key type name, refusing reserved names (EPERM) before any later
 /// argument is read, as Linux does.
 fn linux_key_type(address: u64) -> Result<Vec<u8>, u64> {
-    let name = linux_key_string(address, ginux_keyrings::TYPE_LIMIT)?;
-    ginux_keyrings::check_type_name(&name).map_err(linux_key_error)?;
+    let name = linux_key_string(address, linox_keyrings::TYPE_LIMIT)?;
+    linox_keyrings::check_type_name(&name).map_err(linux_key_error)?;
     Ok(name)
 }
 
@@ -63801,7 +63801,7 @@ fn linux_add_key(
 ) -> u64 {
     let Some(payload_length) = usize::try_from(payload_length)
         .ok()
-        .filter(|length| *length <= ginux_keyrings::PAYLOAD_LIMIT)
+        .filter(|length| *length <= linox_keyrings::PAYLOAD_LIMIT)
     else {
         return LINUX_EINVAL;
     };
@@ -63810,7 +63810,7 @@ fn linux_add_key(
         let description = if description_address == 0 {
             Vec::new()
         } else {
-            linux_key_string(description_address, ginux_keyrings::DESCRIPTION_LIMIT)?
+            linux_key_string(description_address, linox_keyrings::DESCRIPTION_LIMIT)?
         };
         if key_type == b"keyring" && description.first() == Some(&b'.') {
             return Err(LINUX_EPERM);
@@ -63839,13 +63839,13 @@ fn linux_request_key(
 ) -> u64 {
     let requested = (|| {
         let key_type = linux_key_type(type_address)?;
-        let description = linux_key_string(description_address, ginux_keyrings::DESCRIPTION_LIMIT)?;
+        let description = linux_key_string(description_address, linox_keyrings::DESCRIPTION_LIMIT)?;
         let callout = if callout_address == 0 {
             None
         } else {
             Some(linux_key_string(
                 callout_address,
-                ginux_keyrings::CALLOUT_LIMIT,
+                linox_keyrings::CALLOUT_LIMIT,
             )?)
         };
         let now = linux_key_clock();
@@ -63909,14 +63909,14 @@ fn linux_keyctl(command: u64, second: u64, third: u64, fourth: u64, fifth: u64) 
             let name = if second == 0 {
                 None
             } else {
-                Some(linux_key_string(second, ginux_keyrings::DESCRIPTION_LIMIT)?)
+                Some(linux_key_string(second, linox_keyrings::DESCRIPTION_LIMIT)?)
             };
             linux_with_keys(|keys, caller| keys.join_session_keyring(caller, name.as_deref()))
         })()),
         UPDATE => unit((|| {
             let length = usize::try_from(fourth)
                 .ok()
-                .filter(|length| *length <= ginux_keyrings::UPDATE_LIMIT)
+                .filter(|length| *length <= linox_keyrings::UPDATE_LIMIT)
                 .ok_or(LINUX_EINVAL)?;
             let payload = linux_key_payload(third, length)?;
             linux_with_keys(|keys, caller| keys.update(caller, id, &payload, now))
@@ -63943,7 +63943,7 @@ fn linux_keyctl(command: u64, second: u64, third: u64, fourth: u64, fifth: u64) 
         })),
         SEARCH => serial((|| {
             let key_type = linux_key_type(third)?;
-            let description = linux_key_string(fourth, ginux_keyrings::DESCRIPTION_LIMIT)?;
+            let description = linux_key_string(fourth, linox_keyrings::DESCRIPTION_LIMIT)?;
             linux_with_keys(|keys, caller| {
                 keys.search(caller, id, &key_type, &description, fifth as i32, now)
             })
@@ -64000,7 +64000,7 @@ fn linux_keyctl(command: u64, second: u64, third: u64, fourth: u64, fifth: u64) 
             let restriction = if fourth == 0 {
                 None
             } else {
-                Some(linux_key_string(fourth, ginux_keyrings::DESCRIPTION_LIMIT)?)
+                Some(linux_key_string(fourth, linox_keyrings::DESCRIPTION_LIMIT)?)
             };
             linux_with_keys(|keys, caller| {
                 keys.restrict_keyring(caller, id, key_type.as_deref(), restriction.as_deref(), now)
@@ -64034,7 +64034,7 @@ fn linux_keyctl_dh_compute(
     kdf: u64,
     now: u64,
 ) -> Result<u64, u64> {
-    use ginux_keyrings::dh;
+    use linox_keyrings::dh;
     const KDF_BYTES: usize = 56;
     let kdf = if kdf == 0 {
         None
@@ -64243,10 +64243,10 @@ fn linux_capset(header_address: u64, data_address: u64) -> u64 {
     let Some(mut credentials) = linux_process::live_process_credentials(current) else {
         return LINUX_ESRCH;
     };
-    let new = ginux_credentials::Capabilities {
-        effective: sets[0] & ginux_credentials::capability::ALL,
-        permitted: sets[1] & ginux_credentials::capability::ALL,
-        inheritable: sets[2] & ginux_credentials::capability::ALL,
+    let new = linox_credentials::Capabilities {
+        effective: sets[0] & linox_credentials::capability::ALL,
+        permitted: sets[1] & linox_credentials::capability::ALL,
+        inheritable: sets[2] & linox_credentials::capability::ALL,
         bounding: credentials.capabilities.bounding,
         ambient: credentials.capabilities.ambient,
     };
@@ -64332,7 +64332,7 @@ fn linux_set_scheduling(pid: u64, policy: u8, parameter_address: u64) -> u64 {
 
 /// sched_setattr(2), in Linux's order: no attributes, a negative pid or
 /// flags are EINVAL; the size is read next (0 meaning version 0; smaller,
-/// past a page, or with nonzero bytes past what Ginux knows is E2BIG, with
+/// past a page, or with nonzero bytes past what Linox knows is E2BIG, with
 /// the size it takes written back); then a negative policy (EINVAL), the
 /// process (ESRCH), the flags, policy and priority (EINVAL), SCHED_DEADLINE's
 /// runtime <= deadline <= period, 100 us to 4 s (EINVAL), and permission
@@ -64450,7 +64450,7 @@ fn linux_sched_setattr(pid: u64, attribute_address: u64, flags: u64) -> u64 {
         return LINUX_EPERM;
     };
     if (realtime || policy == SCHED_DEADLINE)
-        && !caller.has(ginux_credentials::capability::SYS_NICE)
+        && !caller.has(linox_credentials::capability::SYS_NICE)
     {
         return LINUX_EPERM;
     }
@@ -64483,7 +64483,7 @@ fn linux_sched_setattr(pid: u64, attribute_address: u64, flags: u64) -> u64 {
 /// sched_getattr(2): no attributes, a negative pid, a size below version 0
 /// or past a page, or flags are EINVAL; then the process (ESRCH). Its
 /// policy, SCHED_RESET_ON_FORK, nice, priority and deadline parameters
-/// are written, in as much of the caller's struct as Ginux's fills, and
+/// are written, in as much of the caller's struct as Linox's fills, and
 /// any larger rest zeroed.
 fn linux_sched_getattr(pid: u64, attribute_address: u64, size: u64, flags: u64) -> u64 {
     const SCHED_ATTR_VER0: u64 = 48;
@@ -64575,7 +64575,7 @@ fn linux_arch_prctl(option: u64, argument: u64) -> u64 {
                 LINUX_EFAULT
             }
         }
-        // CPUID stays available: Ginux does not offer CPUID faulting
+        // CPUID stays available: Linox does not offer CPUID faulting
         // (no "cpuid_fault" in /proc/cpuinfo), so setting it is ENODEV.
         ARCH_GET_CPUID => 1,
         ARCH_SET_CPUID => LINUX_ENODEV,
@@ -64586,7 +64586,7 @@ fn linux_arch_prctl(option: u64, argument: u64) -> u64 {
 /// Runs `change` on the calling process's credentials and keeps what it
 /// leaves: its result, or EINVAL or EPERM for its error.
 fn linux_current_credentials_result(
-    change: impl FnOnce(&mut ginux_credentials::Credentials) -> Result<u64, ginux_credentials::Error>,
+    change: impl FnOnce(&mut linox_credentials::Credentials) -> Result<u64, linox_credentials::Error>,
 ) -> u64 {
     let current = current_linux_process_pid();
     let Some(mut credentials) = linux_process::live_process_credentials(current) else {
@@ -64595,8 +64595,8 @@ fn linux_current_credentials_result(
     match change(&mut credentials) {
         Ok(result) if linux_process::set_live_process_credentials(current, credentials) => result,
         Ok(_) => LINUX_ESRCH,
-        Err(ginux_credentials::Error::Invalid) => LINUX_EINVAL,
-        Err(ginux_credentials::Error::Permission) => LINUX_EPERM,
+        Err(linox_credentials::Error::Invalid) => LINUX_EINVAL,
+        Err(linox_credentials::Error::Permission) => LINUX_EPERM,
     }
 }
 
@@ -64653,7 +64653,7 @@ fn linux_prctl(option: u64, argument2: u64, argument3: u64, argument4: u64, argu
         }
         LINUX_PR_SET_SECUREBITS
             if !current_linux_credentials().is_some_and(|credentials| {
-                credentials.has(ginux_credentials::capability::SETPCAP)
+                credentials.has(linox_credentials::capability::SETPCAP)
             }) =>
         {
             LINUX_EPERM
@@ -64765,8 +64765,8 @@ fn linux_prctl(option: u64, argument2: u64, argument3: u64, argument4: u64, argu
                     u64::from(set)
                 }
                 Ok(_) => LINUX_ESRCH,
-                Err(ginux_credentials::Error::Permission) => LINUX_EPERM,
-                Err(ginux_credentials::Error::Invalid) => LINUX_EINVAL,
+                Err(linox_credentials::Error::Permission) => LINUX_EPERM,
+                Err(linox_credentials::Error::Invalid) => LINUX_EINVAL,
             }
         }
         _ => LINUX_EINVAL,
@@ -64955,7 +64955,7 @@ fn dispatch_charged_call(
         control_abi::CONSOLE_READ_LINE_OPERATION => {
             console_read_line(caller_domain, capability, frame)
         }
-        ginux_native_abi::NATIVE_CONSOLE_READ_BYTE_OPERATION => {
+        linox_native_abi::NATIVE_CONSOLE_READ_BYTE_OPERATION => {
             console_read_byte(caller_domain, capability, frame)
         }
         control_abi::HOST_INSPECT_OPERATION => host_inspect(caller_domain, capability, frame),
@@ -64965,19 +64965,19 @@ fn dispatch_charged_call(
         control_abi::LINUX_ABI_TEST_OPERATION => {
             linux_abi_test_results(caller_domain, capability, frame)
         }
-        ginux_native_abi::NATIVE_IMAGE_STORE_OPERATION => {
+        linox_native_abi::NATIVE_IMAGE_STORE_OPERATION => {
             image_store_call(caller_domain, capability, frame)
         }
-        ginux_native_abi::NATIVE_PROGRESS_OPERATION => {
+        linox_native_abi::NATIVE_PROGRESS_OPERATION => {
             native_progress_call(caller_domain, capability, frame)
         }
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_OPERATION => {
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_OPERATION => {
             network_inventory_call(caller_domain, capability, frame)
         }
         // The frequency is the one the Linux clock profile already trusts; it
         // grants no authority, so no capability is required.
-        ginux_native_abi::NATIVE_TIMESTAMP_FREQUENCY_OPERATION => timer::monotonic_frequency()
-            .unwrap_or(ginux_native_abi::NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE),
+        linox_native_abi::NATIVE_TIMESTAMP_FREQUENCY_OPERATION => timer::monotonic_frequency()
+            .unwrap_or(linox_native_abi::NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE),
         control_abi::PACKET_PUBLISH_OPERATION => {
             packet_publish_call(caller_domain, capability, frame)
         }
@@ -65024,7 +65024,7 @@ fn native_progress_call(caller_domain: u64, capability: u64, frame: *const UserT
     if !domain::handle_permits(
         caller_domain,
         capability,
-        ginux_native_abi::NATIVE_IMAGE_STORE_OBJECT,
+        linox_native_abi::NATIVE_IMAGE_STORE_OBJECT,
         Rights::WRITE,
     ) {
         return u64::MAX - 2;
@@ -65035,10 +65035,10 @@ fn native_progress_call(caller_domain: u64, capability: u64, frame: *const UserT
     let Ok(size) = usize::try_from(frame.second_argument()) else {
         return u64::MAX - 2;
     };
-    if size == 0 || size > ginux_native_abi::NATIVE_PROGRESS_MAX_SIZE {
+    if size == 0 || size > linox_native_abi::NATIVE_PROGRESS_MAX_SIZE {
         return u64::MAX - 2;
     }
-    let mut bytes = [0; ginux_native_abi::NATIVE_PROGRESS_MAX_SIZE];
+    let mut bytes = [0; linox_native_abi::NATIVE_PROGRESS_MAX_SIZE];
     if !address_space::copy_from_current_user(frame.first_argument(), &mut bytes[..size])
         || !bytes[..size]
             .iter()
@@ -65047,7 +65047,7 @@ fn native_progress_call(caller_domain: u64, capability: u64, frame: *const UserT
         return u64::MAX - 2;
     }
     if oci_progress_is_console_visible(&bytes[..size]) {
-        serial_write("ginux: OCI ");
+        serial_write("linox: OCI ");
         crate::serial_write_bytes(&bytes[..size]);
         serial_write("\r\n");
     }
@@ -65079,24 +65079,24 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn image_store_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let failed = ginux_native_abi::NATIVE_IMAGE_STORE_RESULT_FAILED;
+    let failed = linox_native_abi::NATIVE_IMAGE_STORE_RESULT_FAILED;
     let Some(frame) = (unsafe { frame.as_ref() }) else {
         return failed;
     };
     if !domain::handle_permits(
         caller_domain,
         capability,
-        ginux_native_abi::NATIVE_IMAGE_STORE_OBJECT,
+        linox_native_abi::NATIVE_IMAGE_STORE_OBJECT,
         Rights::WRITE,
     ) {
         return failed;
     }
-    let mut request = [0_u8; ginux_native_abi::NATIVE_IMAGE_STORE_REQUEST_SIZE as usize];
+    let mut request = [0_u8; linox_native_abi::NATIVE_IMAGE_STORE_REQUEST_SIZE as usize];
     if !address_space::copy_from_current_user(frame.first_argument(), &mut request)
         || u32::from_le_bytes(request[0..4].try_into().unwrap())
-            != ginux_native_abi::NATIVE_IMAGE_STORE_REQUEST_SIZE
+            != linox_native_abi::NATIVE_IMAGE_STORE_REQUEST_SIZE
         || u16::from_le_bytes(request[4..6].try_into().unwrap())
-            != ginux_native_abi::NATIVE_IMAGE_STORE_REQUEST_VERSION
+            != linox_native_abi::NATIVE_IMAGE_STORE_REQUEST_VERSION
         || request[36..40] != [0; 4]
     {
         return failed;
@@ -65108,7 +65108,7 @@ fn image_store_call(caller_domain: u64, capability: u64, frame: *const UserTrapF
     let buffer_size = u32::from_le_bytes(request[32..36].try_into().unwrap());
     let digest: [u8; 32] = request[40..72].try_into().unwrap();
     let result = match command {
-        ginux_native_abi::NATIVE_IMAGE_STORE_STAGE
+        linox_native_abi::NATIVE_IMAGE_STORE_STAGE
             if raw_handle == 0
                 && buffer_address == 0
                 && buffer_size == 0
@@ -65119,19 +65119,19 @@ fn image_store_call(caller_domain: u64, capability: u64, frame: *const UserTrapF
                 return failed;
             };
             image_store::stage(digest, expected_length)
-                .map(ginux_image_store::StagingHandle::into_raw)
+                .map(linox_image_store::StagingHandle::into_raw)
                 .unwrap_or(failed)
         }
-        ginux_native_abi::NATIVE_IMAGE_STORE_APPEND
+        linox_native_abi::NATIVE_IMAGE_STORE_APPEND
             if expected_length == 0
                 && digest == [0; 32]
-                && (1..=ginux_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT)
+                && (1..=linox_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT)
                     .contains(&buffer_size) =>
         {
-            let Some(handle) = ginux_image_store::StagingHandle::from_raw(raw_handle) else {
+            let Some(handle) = linox_image_store::StagingHandle::from_raw(raw_handle) else {
                 return failed;
             };
-            let mut bytes = [0_u8; ginux_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT as usize];
+            let mut bytes = [0_u8; linox_native_abi::NATIVE_IMAGE_STORE_CHUNK_LIMIT as usize];
             let size = buffer_size as usize;
             if !address_space::copy_from_current_user(buffer_address, &mut bytes[..size]) {
                 return failed;
@@ -65140,24 +65140,24 @@ fn image_store_call(caller_domain: u64, capability: u64, frame: *const UserTrapF
                 .map(|written| written as u64)
                 .unwrap_or(failed)
         }
-        ginux_native_abi::NATIVE_IMAGE_STORE_PUBLISH
+        linox_native_abi::NATIVE_IMAGE_STORE_PUBLISH
             if expected_length == 0
                 && buffer_address == 0
                 && buffer_size == 0
                 && digest == [0; 32] =>
         {
-            let Some(handle) = ginux_image_store::StagingHandle::from_raw(raw_handle) else {
+            let Some(handle) = linox_image_store::StagingHandle::from_raw(raw_handle) else {
                 return failed;
             };
             image_store::publish(handle).map_or(failed, |_| 0)
         }
-        ginux_native_abi::NATIVE_IMAGE_STORE_ABORT
+        linox_native_abi::NATIVE_IMAGE_STORE_ABORT
             if expected_length == 0
                 && buffer_address == 0
                 && buffer_size == 0
                 && digest == [0; 32] =>
         {
-            let Some(handle) = ginux_image_store::StagingHandle::from_raw(raw_handle) else {
+            let Some(handle) = linox_image_store::StagingHandle::from_raw(raw_handle) else {
                 return failed;
             };
             image_store::abort(handle).map_or(failed, |()| 0)
@@ -66209,7 +66209,7 @@ fn network_device_call(caller_domain: u64, capability: u64, frame: *mut UserTrap
         {
             u64::from(X86_RUNTIME.NETWORK_PING_RESULT.swap(0, Ordering::AcqRel))
         }
-        ginux_native_abi::NATIVE_NETWORK_DEVICE_DHCP
+        linox_native_abi::NATIVE_NETWORK_DEVICE_DHCP
             if argument == 0
                 && domain::handle_permits(
                     caller_domain,
@@ -66239,7 +66239,7 @@ fn network_device_call(caller_domain: u64, capability: u64, frame: *mut UserTrap
             }
             u64::MAX
         }
-        ginux_native_abi::NATIVE_NETWORK_DEVICE_QUERY_DHCP
+        linox_native_abi::NATIVE_NETWORK_DEVICE_QUERY_DHCP
             if argument == 0
                 && domain::handle_permits(
                     caller_domain,
@@ -66842,12 +66842,12 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
     {
         return u64::MAX - 2;
     }
-    let mut request = [0_u8; ginux_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE as usize];
+    let mut request = [0_u8; linox_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE as usize];
     if !address_space::copy_from_current_user(frame.first_argument(), &mut request)
-        || read_u32_at(&request, 0) != ginux_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE
-        || read_u16_at(&request, 4) != ginux_native_abi::NATIVE_NETWORK_INVENTORY_VERSION
-        || usize::from(read_u16_at(&request, 16)) > ginux_native_abi::NATIVE_NETWORK_MAX_NAME_SIZE
-        || usize::from(read_u16_at(&request, 20)) > ginux_native_abi::NATIVE_NETWORK_MAX_NAME_SIZE
+        || read_u32_at(&request, 0) != linox_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE
+        || read_u16_at(&request, 4) != linox_native_abi::NATIVE_NETWORK_INVENTORY_VERSION
+        || usize::from(read_u16_at(&request, 16)) > linox_native_abi::NATIVE_NETWORK_MAX_NAME_SIZE
+        || usize::from(read_u16_at(&request, 20)) > linox_native_abi::NATIVE_NETWORK_MAX_NAME_SIZE
         || usize::from(read_u16_at(&request, 22)) > control_abi::DOMAIN_MAX_NAME_SIZE
     {
         return u64::MAX - 2;
@@ -66860,7 +66860,7 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
     let uplink = &request[40..40 + uplink_size];
     let domain_name = &request[56..56 + domain_size];
     let result = match command {
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_QUERY => {
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_QUERY => {
             let Ok(cursor) = usize::try_from(read_u64_at(&request, 8)) else {
                 return u64::MAX - 2;
             };
@@ -66869,10 +66869,10 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
             };
             request.fill(0);
             request[0..4].copy_from_slice(
-                &ginux_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE.to_le_bytes(),
+                &linox_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE.to_le_bytes(),
             );
             request[4..6]
-                .copy_from_slice(&ginux_native_abi::NATIVE_NETWORK_INVENTORY_VERSION.to_le_bytes());
+                .copy_from_slice(&linox_native_abi::NATIVE_NETWORK_INVENTORY_VERSION.to_le_bytes());
             request[6..8].copy_from_slice(&command.to_le_bytes());
             request[8..16].copy_from_slice(&record.next_cursor.to_le_bytes());
             request[16..18].copy_from_slice(&(record.name_size as u16).to_le_bytes());
@@ -66883,12 +66883,12 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
                 .copy_from_slice(&record.uplink[..record.uplink_size]);
             1
         }
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_CREATE_VIRTUAL
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_CREATE_VIRTUAL
             if network::create_virtual(name, uplink) =>
         {
             1
         }
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_ATTACH => {
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_ATTACH => {
             let Some(slot) = container_slot_by_name(domain_name) else {
                 return u64::MAX - 2;
             };
@@ -66902,13 +66902,13 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
             }
             1
         }
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_SET_LINK
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_SET_LINK
             if read_u64_at(&request, 8) <= 1
                 && network::set_virtual_link(name, read_u64_at(&request, 8) == 1) =>
         {
             1
         }
-        ginux_native_abi::NATIVE_NETWORK_INVENTORY_QUERY_ATTACHMENT => {
+        linox_native_abi::NATIVE_NETWORK_INVENTORY_QUERY_ATTACHMENT => {
             let Some(slot) = container_slot_by_name(domain_name) else {
                 return u64::MAX - 2;
             };
@@ -66921,10 +66921,10 @@ fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTra
             };
             request.fill(0);
             request[0..4].copy_from_slice(
-                &ginux_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE.to_le_bytes(),
+                &linox_native_abi::NATIVE_NETWORK_INVENTORY_REQUEST_SIZE.to_le_bytes(),
             );
             request[4..6]
-                .copy_from_slice(&ginux_native_abi::NATIVE_NETWORK_INVENTORY_VERSION.to_le_bytes());
+                .copy_from_slice(&linox_native_abi::NATIVE_NETWORK_INVENTORY_VERSION.to_le_bytes());
             request[6..8].copy_from_slice(&command.to_le_bytes());
             request[8..16].copy_from_slice(&next.to_le_bytes());
             request[16..18].copy_from_slice(&(attached_name_size as u16).to_le_bytes());
@@ -67440,7 +67440,7 @@ fn canonical_container_image(image: &[u8], output: &mut [u8]) -> Option<usize> {
         output.get_mut(..image.len())?.copy_from_slice(image);
         return Some(image.len());
     }
-    ginux_oci::ImageReference::parse(image)
+    linox_oci::ImageReference::parse(image)
         .ok()?
         .write_canonical(output)
         .ok()
@@ -68053,7 +68053,7 @@ fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
     };
     if failure_policy == Some(domain::ServiceFailurePolicy::StopOnly) {
         if !crate::packet::retire_egress_producer_if_bound(caller_domain) {
-            serial_write("ginux: auxiliary exit egress retirement failed\r\n");
+            serial_write("linox: auxiliary exit egress retirement failed\r\n");
             return u64::MAX;
         }
         if crate::packet::egress_is_empty() {
@@ -68061,7 +68061,7 @@ fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
                 if domain::take_blocked_auxiliary_drain_request(waiting_domain)
                     && !scheduler::wake_egress_waiter_drained(caller_domain, sequence)
                 {
-                    serial_write("ginux: auxiliary exit drain wake failed\r\n");
+                    serial_write("linox: auxiliary exit drain wake failed\r\n");
                     return u64::MAX;
                 }
             }
@@ -68069,11 +68069,11 @@ fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
     }
     let action = scheduler::exit_runtime(frame, USER_CODE_SELECTOR, USER_DATA_SELECTOR, close_wait);
     if matches!(action, RuntimeAction::Invalid) {
-        serial_write("ginux: runtime exit scheduling failed\r\n");
+        serial_write("linox: runtime exit scheduling failed\r\n");
         return u64::MAX;
     }
     if !domain::detach_thread(caller_domain) {
-        serial_write("ginux: runtime exit thread detach failed\r\n");
+        serial_write("linox: runtime exit thread detach failed\r\n");
         return u64::MAX;
     }
     if service_exit
@@ -68084,25 +68084,25 @@ fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
     if failure_policy == Some(domain::ServiceFailurePolicy::StopOnly) {
         if !domain::begin_auxiliary_runtime_exit(caller_domain, auxiliary_exit_status.unwrap_or(0))
         {
-            serial_write("ginux: auxiliary exit transition failed\r\n");
+            serial_write("linox: auxiliary exit transition failed\r\n");
             return u64::MAX;
         }
         if !address_space::quiesce_auxiliary_device(caller_domain) {
-            serial_write("ginux: auxiliary exit quiesce failed status: ");
+            serial_write("linox: auxiliary exit quiesce failed status: ");
             serial_write_u64(u64::from(auxiliary_exit_status.unwrap_or(0)));
             serial_write("\r\n");
             return u64::MAX;
         }
         if !address_space::activate_kernel_root_for_auxiliary(caller_domain) {
-            serial_write("ginux: auxiliary exit kernel-root restoration failed\r\n");
+            serial_write("linox: auxiliary exit kernel-root restoration failed\r\n");
             return u64::MAX;
         }
         if !address_space::release_auxiliary_address_space(caller_domain) {
-            serial_write("ginux: auxiliary exit address-space release failed\r\n");
+            serial_write("linox: auxiliary exit address-space release failed\r\n");
             return u64::MAX;
         }
         if !domain::retire_stopped_auxiliary_service(caller_domain) {
-            serial_write("ginux: auxiliary exit retirement failed\r\n");
+            serial_write("linox: auxiliary exit retirement failed\r\n");
             return u64::MAX;
         }
     }
@@ -68201,7 +68201,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
     }
     drop(reclaim);
     if fault_domain.is_some() && failure_policy.is_none() {
-        serial_write("ginux: unexpected control fault vector/rip: ");
+        serial_write("linox: unexpected control fault vector/rip: ");
         serial_write_u64(fault_metadata.vector);
         serial_write(" ");
         serial_write_u64(fault_metadata.instruction);
@@ -68213,7 +68213,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         && memory::take_user_frames_refused()
     {
         if linux_light_thread_here().is_some() {
-            serial_write("ginux: out of memory in a thread of process ");
+            serial_write("linox: out of memory in a thread of process ");
             serial_write_u64(u64::from(current_linux_process_pid()));
             serial_write("\r\n");
             return fault_linux_light_thread(frame, fault_metadata, LINUX_SIGKILL);
@@ -68237,7 +68237,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         }
     }
     if fault_domain.is_none() && X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst) {
-        serial_write("ginux: Linux user fault vector/error/address/rip:");
+        serial_write("linox: Linux user fault vector/error/address/rip:");
         serial_write_u64(fault_metadata.vector);
         serial_write(" ");
         serial_write_u64(fault_metadata.error);
@@ -68251,7 +68251,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
             let runtime_page = address_space::current_linux_runtime_page(page);
             let process_mapping =
                 linux_process::live_process_mapping(current_linux_process_pid(), page as usize);
-            serial_write("ginux: Linux fault pid/page/stack-low/stack-top/brk-limit/occupied/frame/file/protection/registry-frame/cow-frame: ");
+            serial_write("linox: Linux fault pid/page/stack-low/stack-top/brk-limit/occupied/frame/file/protection/registry-frame/cow-frame: ");
             for value in [
                 u64::from(current_linux_process_pid()),
                 page,
@@ -68270,7 +68270,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
             }
             serial_write("\r\n");
             if let Some(mapping) = process_mapping {
-                serial_write("ginux: Linux fault registry writable/executable/shared/dontfork: ");
+                serial_write("linox: Linux fault registry writable/executable/shared/dontfork: ");
                 for value in [
                     mapping.writable,
                     mapping.executable,
@@ -68284,14 +68284,14 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
             }
         }
         let context = frame.context();
-        serial_write("ginux: Linux fault tid/fs: ");
+        serial_write("linox: Linux fault tid/fs: ");
         serial_write_u64(current_linux_tid().map_or(0, u64::from));
         serial_write(" ");
         serial_write_u64(active_fs_base());
         serial_write("\r\n");
         let current_thread = current_linux_thread_handle();
         serial_write(
-            "ginux: Linux fault cpu/slot/generation/state/saved-rip/saved-rsp/saved-rcx/saved-r11: ",
+            "linox: Linux fault cpu/slot/generation/state/saved-rip/saved-rsp/saved-rcx/saved-r11: ",
         );
         for value in [
             current_linux_runtime_cpu_index() as u64,
@@ -68322,14 +68322,14 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         serial_write("\r\n");
         let mut instruction = [0_u8; 16];
         if copy_from_linux_user(context.rip, &mut instruction) {
-            serial_write("ginux: Linux fault instruction bytes:");
+            serial_write("linox: Linux fault instruction bytes:");
             for byte in instruction {
                 serial_write(" ");
                 serial_write_u64(u64::from(byte));
             }
             serial_write("\r\n");
         }
-        serial_write("ginux: Linux user fault rax/rbx/rcx/rdx/rdi/rsi/rsp/rbp/r12/r13/r14/r15:");
+        serial_write("linox: Linux user fault rax/rbx/rcx/rdx/rdi/rsi/rsp/rbp/r12/r13/r14/r15:");
         for value in [
             context.rax,
             context.rbx,
@@ -68348,7 +68348,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
             serial_write_u64(value);
         }
         serial_write("\r\n");
-        serial_write("ginux: Linux user fault r8/r9/r10/r11:");
+        serial_write("linox: Linux user fault r8/r9/r10/r11:");
         for value in [context.r8, context.r9, context.r10, context.r11] {
             serial_write(" ");
             serial_write_u64(value);
@@ -68356,13 +68356,13 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         serial_write("\r\n");
         let mut return_address = [0_u8; size_of::<u64>()];
         if copy_from_linux_user(context.rsp, &mut return_address) {
-            serial_write("ginux: Linux user fault stack return address: ");
+            serial_write("linox: Linux user fault stack return address: ");
             serial_write_u64(u64::from_ne_bytes(return_address));
             serial_write("\r\n");
         }
         // Which thread ran with which TLS, and the faulting instruction, so
         // a fault can be disassembled from the log.
-        serial_write("ginux: Linux user fault pid/tid/slot/fs:");
+        serial_write("linox: Linux user fault pid/tid/slot/fs:");
         for value in [
             u64::from(current_linux_process_pid()),
             current_linux_tid().map_or(0, u64::from),
@@ -68446,7 +68446,7 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         }
     }
     if failure_policy == Some(domain::ServiceFailurePolicy::StopOnly) {
-        serial_write("ginux: auxiliary user fault vector/error/address/rip: ");
+        serial_write("linox: auxiliary user fault vector/error/address/rip: ");
         for value in [
             fault_metadata.vector,
             fault_metadata.error,
@@ -68458,15 +68458,15 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
         }
         serial_write("\r\n");
         if !domain::begin_auxiliary_runtime_fault(fault_domain, fault_metadata) {
-            serial_write("ginux: auxiliary fault transition failed\r\n");
+            serial_write("linox: auxiliary fault transition failed\r\n");
             return u64::MAX;
         }
         if !crate::packet::retire_egress_producer_if_bound(fault_domain) {
-            serial_write("ginux: auxiliary fault egress retirement failed\r\n");
+            serial_write("linox: auxiliary fault egress retirement failed\r\n");
             return u64::MAX;
         }
         if !address_space::quiesce_faulted_auxiliary_device(fault_domain) {
-            serial_write("ginux: auxiliary device quiesce failed vector/error/address/rip:");
+            serial_write("linox: auxiliary device quiesce failed vector/error/address/rip:");
             serial_write_u64(fault_metadata.vector);
             serial_write(" ");
             serial_write_u64(fault_metadata.error);
@@ -68478,15 +68478,15 @@ fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
             return u64::MAX;
         }
         if !address_space::activate_kernel_root_for_auxiliary(fault_domain) {
-            serial_write("ginux: auxiliary kernel-root restoration failed\r\n");
+            serial_write("linox: auxiliary kernel-root restoration failed\r\n");
             return u64::MAX;
         }
         if !address_space::release_auxiliary_address_space(fault_domain) {
-            serial_write("ginux: auxiliary address-space release failed\r\n");
+            serial_write("linox: auxiliary address-space release failed\r\n");
             return u64::MAX;
         }
         if !domain::retire_stopped_auxiliary_service(fault_domain) {
-            serial_write("ginux: auxiliary retirement failed\r\n");
+            serial_write("linox: auxiliary retirement failed\r\n");
             return u64::MAX;
         }
     }
@@ -68826,7 +68826,7 @@ extern "sysv64" fn kernel_linux_cow_fault_handler(error: u64, address: u64) -> u
     let cow = eligible && address_space::current_linux_cow_page(page).is_some();
     let materialized = cow && materialize_linux_cow_address(page);
     if eligible && !materialized {
-        serial_write("ginux: kernel Linux COW recovery failed address/cow/pid: ");
+        serial_write("linox: kernel Linux COW recovery failed address/cow/pid: ");
         serial_write_u64(address);
         serial_write(" ");
         serial_write_u64(u64::from(cow));
@@ -68865,7 +68865,7 @@ fn materialize_linux_cow_address(address: u64) -> bool {
     };
     let pid = current_linux_process_pid();
     let failed = |step: u64| {
-        serial_write("ginux: copy-on-write fault failed address/pid/step: ");
+        serial_write("linox: copy-on-write fault failed address/pid/step: ");
         for value in [address, u64::from(pid), step] {
             serial_write_u64(value);
             serial_write(" ");
@@ -69225,9 +69225,9 @@ extern "sysv64" fn fatal_exception_handler(
     frame: *const u64,
 ) -> ! {
     if FATAL_EXCEPTION_ACTIVE.swap(true, Ordering::SeqCst) {
-        fatal_write_hex("\r\nginux: nested fatal exception vector ", vector);
+        fatal_write_hex("\r\nlinox: nested fatal exception vector ", vector);
         fatal_write_hex(" at ", instruction);
-        crate::serial_write_raw(b"\r\nGINUX_KERNEL_PANIC\r\n");
+        crate::serial_write_raw(b"\r\nLINOX_KERNEL_PANIC\r\n");
         loop {
             core::hint::spin_loop();
         }
@@ -69236,7 +69236,7 @@ extern "sysv64" fn fatal_exception_handler(
         "r15", "r14", "r13", "r12", "r11", "r10", "r9", "r8", "rbp", "rdi", "rsi", "rdx", "rcx",
         "rbx", "rax",
     ];
-    fatal_write_hex("\r\nginux: fatal exception vector ", vector);
+    fatal_write_hex("\r\nlinox: fatal exception vector ", vector);
     fatal_write_hex(" error ", error);
     fatal_write_hex(" rip ", instruction);
     if vector == 14 {
@@ -69245,7 +69245,7 @@ extern "sysv64" fn fatal_exception_handler(
     // SAFETY: the entry stub pushed the 15 general registers, then the vector
     // and error code, and the CPU pushed rip, cs, rflags, rsp and ss.
     let saved = |index: usize| unsafe { frame.add(index).read_volatile() };
-    crate::serial_write_raw(b"\r\nginux: registers");
+    crate::serial_write_raw(b"\r\nlinox: registers");
     for (index, name) in REGISTERS.iter().enumerate() {
         if index % 5 == 0 {
             crate::serial_write_raw(b"\r\n ");
@@ -69269,13 +69269,13 @@ extern "sysv64" fn fatal_exception_handler(
     fatal_write_hex(" cr3 ", cr3);
     fatal_write_hex(" cr4 ", cr4);
     let (image_base, image_size) = crate::kernel_image_range();
-    fatal_write_hex("\r\nginux: kernel image base ", image_base);
+    fatal_write_hex("\r\nlinox: kernel image base ", image_base);
     fatal_write_hex(" size ", image_size);
     // Kernel-mode faults only: scan the interrupted stack for values that
     // point into the kernel image, which include the return addresses.
     let interrupted_stack = saved(20);
     if saved(18) & 3 == 0 && image_size != 0 {
-        crate::serial_write_raw(b"\r\nginux: kernel addresses on stack:");
+        crate::serial_write_raw(b"\r\nlinox: kernel addresses on stack:");
         let mut found = 0;
         // An overflow faults with rsp on the guard page; scanning then starts
         // on the first mapped page above it.
@@ -69304,7 +69304,7 @@ extern "sysv64" fn fatal_exception_handler(
             }
         }
     }
-    crate::serial_write_raw(b"\r\nginux: Linux snapshot/fork/pid: ");
+    crate::serial_write_raw(b"\r\nlinox: Linux snapshot/fork/pid: ");
     serial_write_u64(u64::from(
         X86_RUNTIME
             .LINUX_PROCESS_SNAPSHOT_STAGE
@@ -69318,7 +69318,7 @@ extern "sysv64" fn fatal_exception_handler(
     serial_write_u64(u64::from(current_linux_tid().unwrap_or(0)));
     crate::serial_write_raw(b"\r\n");
     write_linux_runtime_syscall_trace();
-    crate::serial_write_raw(b"GINUX_KERNEL_PANIC\r\n");
+    crate::serial_write_raw(b"LINOX_KERNEL_PANIC\r\n");
     loop {
         core::hint::spin_loop();
     }

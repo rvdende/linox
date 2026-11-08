@@ -51,7 +51,7 @@ external transfer failure, panic, or orphaned QEMU process is not a pass.
 | Rocky lifecycle | `make test-rocky-systemd` and `make test-domain-responsiveness` | Attached, warm, detached, login, and controller-latency paths pass. |
 | Networking/package workload | `make test-rocky-dnf` | Cached Rocky domain completes the package-network operation. |
 | Multiple domains | `make test-multi-domain` | At least two Rocky domains boot and remain operational concurrently on two vCPUs. |
-| Published single-CPU comparison | `GINUX_CPUS=1 make benchmark-ginux-boot`, `GINUX_CPUS=1 make benchmark-ginux-sysbench`, and `make benchmark-compare` | Three boot samples and nine samples per sysbench workload. Relative to `docs/paper/artifact/benchmark-2026-10-23`, boot median may increase at most 25%; throughput medians may fall at most 20%; mutex seconds/event may increase at most 20%. |
+| Published single-CPU comparison | `LINOX_CPUS=1 make benchmark-linox-boot`, `LINOX_CPUS=1 make benchmark-linox-sysbench`, and `make benchmark-compare` | Three boot samples and nine samples per sysbench workload. Relative to `docs/paper/artifact/benchmark-2026-10-23`, boot median may increase at most 25%; throughput medians may fall at most 20%; mutex seconds/event may increase at most 20%. |
 | SMP scaling | Matched one-thread/one-vCPU and two-thread/two-vCPU CPU and memory sysbench runs using the same local image and binary | Nine samples per workload/topology. Two-vCPU CPU throughput must reach at least 1.50x and memory throughput at least 1.25x the one-vCPU medians. |
 
 Raw final logs and reduced TSV results will be retained under

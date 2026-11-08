@@ -1,7 +1,7 @@
 #
-# Ginux kernel configuration, in Linux's .config form (/proc/config.gz).
-# It lists only what Ginux implements for Linux programs; an option
-# missing here is a feature Ginux does not have.
+# Linox kernel configuration, in Linux's .config form (/proc/config.gz).
+# It lists only what Linox implements for Linux programs; an option
+# missing here is a feature Linox does not have.
 #
 CONFIG_64BIT=y
 CONFIG_X86_64=y

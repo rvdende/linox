@@ -76,7 +76,7 @@ __vdso_clock_gettime:
 
 .Lread_clock:
     # AT_SYSINFO_EHDR is page aligned and this image occupies one page. The
-    # adjacent lower, read-only page is Ginux's vvar time snapshot.
+    # adjacent lower, read-only page is Linox's vvar time snapshot.
     leaq .Lread_clock(%rip), %r9
     andq $-4096, %r9
     subq $4096, %r9
@@ -143,23 +143,23 @@ __vdso_clock_gettime:
 # where the tick interrupted it, so the instructions after it never run. The
 # kernel finds this sequence by its bytes (linux_elf::vdso_preempt_entry).
 .p2align 4
-.type __ginux_preempt,@function
-__ginux_preempt:
+.type __linox_preempt,@function
+__linox_preempt:
     movl $0x4750, %eax
     syscall
     ud2
-.size __ginux_preempt, .-__ginux_preempt
+.size __linox_preempt, .-__linox_preempt
 
 # Where a signal handler installed without a usable restorer returns:
 # rt_sigreturn. LTP's raw rt_sigaction under musl passes a restorer it read
 # back from libc's sigaction, which musl does not fill in. The kernel finds
 # this sequence by its bytes (linux_elf::vdso_sigreturn_entry).
 .p2align 4
-.type __ginux_sigreturn,@function
-__ginux_sigreturn:
+.type __linox_sigreturn,@function
+__linox_sigreturn:
     movl $15, %eax
     syscall
     ud2
-.size __ginux_sigreturn, .-__ginux_sigreturn
+.size __linox_sigreturn, .-__linox_sigreturn
 
 .section .note.GNU-stack,"",@progbits

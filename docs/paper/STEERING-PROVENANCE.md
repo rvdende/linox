@@ -1,6 +1,6 @@
-# Ginux Steering and Decision Provenance
+# Linox Steering and Decision Provenance
 
-This document is a curated companion to the Ginux technical report. It records
+This document is a curated companion to the Linox technical report. It records
 how human direction and Codex implementation interacted during the research.
 It is not a verbatim transcript and does not claim access to private model
 reasoning. Its evidence is the user-visible conversation, repository history,
@@ -55,7 +55,7 @@ The resulting design packaged the kernel and controller in one EFI artifact,
 but launched the controller as an ordinary ring-3 process. Later discussion
 explicitly rejected a private controller execution ABI for normal process
 behavior: the controller should be a static Linux-compatible userspace binary,
-with Ginux-specific operations limited to a versioned management interface.
+with Linox-specific operations limited to a versioned management interface.
 
 Codex implemented UEFI entry, memory discovery, page tables, protection
 structures, exceptions, APIC timing, the first isolated address space, and
@@ -129,7 +129,7 @@ Evidence:
 
 The project lead corrected language that treated OCI as the execution runtime.
 OCI was limited to registry resolution, architecture selection, verified image
-content, and initial filesystem assembly. The Ginux domain remained the
+content, and initial filesystem assembly. The Linox domain remained the
 runtime, isolation, scheduling, and authority boundary.
 
 The image pipeline was also required to pull automatically on domain start,
@@ -177,7 +177,7 @@ mounting. The domain boundary was intended to be stronger than a conventional
 container boundary, allowing a Linux system inside a domain to use mounts,
 namespaces, and eventually nested container and virtualization facilities
 without receiving host authority. UID 0 was therefore authoritative inside the
-Linux domain but not over the Ginux host.
+Linux domain but not over the Linox host.
 
 Codex implemented the subset exercised by the current Rocky and systemd gates
 and documented the remaining namespace, cgroup, device, and KVM gaps. The

@@ -25,7 +25,7 @@ packet queue. Operation 22 copies only the exact requested egress sequence into
 the service's owned DMA page; a future sequence returns `STALE` without
 modifying the destination, and replay fails after destructive delivery.
 
-Bootstrap v0 and v1 remain frozen. The shared `ginux-native-abi` Rust layout,
+Bootstrap v0 and v1 remain frozen. The shared `linox-native-abi` Rust layout,
 C header, and independent C11 consumer freeze the v2 size and extension field
 offsets.
 

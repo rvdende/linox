@@ -1,4 +1,4 @@
-//! ginux-wm: a Wayland compositor and stacking window manager for Ginux,
+//! linox-wm: a Wayland compositor and stacking window manager for Linox,
 //! written in Rust on the pure-Rust wayland-server backend. It composes
 //! client windows in software onto the Linux framebuffer (/dev/fb0) and
 //! reads keyboards and pointers from evdev devices.
@@ -23,7 +23,7 @@ use backend::Output;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use wayland_server::Display;
 
-const USAGE: &str = "usage: ginux-wm [--headless WIDTHxHEIGHT] [--framebuffer PATH] \
+const USAGE: &str = "usage: linox-wm [--headless WIDTHxHEIGHT] [--framebuffer PATH] \
 [--input DIR] [--socket NAME] [--terminal COMMAND] [--keymap FILE | --no-keymap] [--spawn COMMAND]... \
 [--screenshot SECONDS PATH]";
 
@@ -56,7 +56,7 @@ fn parse_options() -> Result<Options, String> {
         framebuffer: PathBuf::from("/dev/fb0"),
         input: PathBuf::from("/dev/input"),
         socket: "wayland-0".into(),
-        terminal: "ginux-term".into(),
+        terminal: "linox-term".into(),
         keymap: Keymap::BuiltIn,
         spawn: Vec::new(),
         screenshot: None,
@@ -104,7 +104,7 @@ fn main() -> ExitCode {
     match run(options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("ginux-wm: {message}");
+            eprintln!("linox-wm: {message}");
             ExitCode::FAILURE
         }
     }
@@ -135,7 +135,7 @@ fn accept(listener: &UnixListener) -> Result<Option<UnixStream>, String> {
 
 fn run(options: Options) -> Result<(), String> {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        let directory = "/tmp/ginux-wayland";
+        let directory = "/tmp/linox-wayland";
         std::fs::create_dir_all(directory).map_err(|error| format!("{directory}: {error}"))?;
         std::env::set_var("XDG_RUNTIME_DIR", directory);
     }
@@ -165,8 +165,8 @@ fn run(options: Options) -> Result<(), String> {
     }
     let listener = listen(&options.socket)?;
     std::env::set_var("WAYLAND_DISPLAY", &options.socket);
-    eprintln!("ginux-wm: {width}x{height} on {}", options.socket);
-    println!("GINUX_WM_READY {width}x{height}");
+    eprintln!("linox-wm: {width}x{height} on {}", options.socket);
+    println!("LINOX_WM_READY {width}x{height}");
     for command in &options.spawn {
         state.spawn(command);
     }
@@ -202,7 +202,7 @@ fn run(options: Options) -> Result<(), String> {
                 .handle()
                 .insert_client(stream, Arc::new(protocol::ClientState))
             {
-                eprintln!("ginux-wm: cannot add client: {error}");
+                eprintln!("linox-wm: cannot add client: {error}");
             }
         }
         display
@@ -220,7 +220,7 @@ fn run(options: Options) -> Result<(), String> {
                 state.render_if_due(Instant::now() + Duration::from_secs(1));
                 backend::save_ppm(path, &state.frame, width, height)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
-                println!("GINUX_WM_SCREENSHOT {}", path.display());
+                println!("LINOX_WM_SCREENSHOT {}", path.display());
                 break;
             }
         }

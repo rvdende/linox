@@ -26,7 +26,7 @@ fn linux_fanotify_key(descriptor: u64) -> Option<(usize, u64)> {
 /// root): root of a namespace made in the domain does not.
 fn linux_fanotify_admin() -> bool {
     current_linux_credentials()
-        .is_none_or(|credentials| credentials.has(ginux_credentials::capability::SYS_ADMIN))
+        .is_none_or(|credentials| credentials.has(linox_credentials::capability::SYS_ADMIN))
         && current_linux_user_namespace()
             .is_none_or(|namespace| linux_user::parent(namespace).is_none())
 }

@@ -5,7 +5,7 @@
 //!
 //! - `new [FORMAT] MASTER LENGTH [DATA]` makes LENGTH (20 to 4096) bytes
 //!   of random data, or takes DATA as hex digits (Linux's
-//!   CONFIG_USER_DECRYPTED_DATA, which Ginux has);
+//!   CONFIG_USER_DECRYPTED_DATA, which Linox has);
 //! - `load [FORMAT] MASTER LENGTH BLOB` decrypts a blob KEYCTL_READ gave;
 //! - `update MASTER` (KEYCTL_UPDATE only) changes the master key.
 //!

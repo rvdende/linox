@@ -1,5 +1,5 @@
 //! AMD I/O MMU (AMD-Vi) support: a report of what firmware set up, and DMA
-//! remapping that confines each device Ginux drives to its own buffers.
+//! remapping that confines each device Linox drives to its own buffers.
 //!
 //! Remapping uses one device table for every unit, since a unit only sees
 //! the requester IDs behind it. Each device gets one of three policies:

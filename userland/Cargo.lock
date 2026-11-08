@@ -47,62 +47,62 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
-name = "ginux-compositor"
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "linox-compositor"
 version = "0.1.0"
 dependencies = [
- "ginux-gfx",
+ "linox-gfx",
  "rustix",
  "wayland-protocols",
  "wayland-server",
 ]
 
 [[package]]
-name = "ginux-fetch"
+name = "linox-fetch"
 version = "0.1.0"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
-name = "ginux-gfx"
+name = "linox-gfx"
 version = "0.1.0"
 dependencies = [
  "font8x8",
 ]
 
 [[package]]
-name = "ginux-init"
+name = "linox-init"
 version = "0.1.0"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
-name = "ginux-memtest"
+name = "linox-memtest"
 version = "0.1.0"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
-name = "ginux-term"
+name = "linox-term"
 version = "0.1.0"
 dependencies = [
- "ginux-gfx",
+ "linox-gfx",
  "rustix",
  "wayland-client",
  "wayland-protocols",
 ]
 
 [[package]]
-name = "ginux-threadtest"
+name = "linox-threadtest"
 version = "0.1.0"
-
-[[package]]
-name = "libc"
-version = "0.2.191"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "linux-raw-sys"

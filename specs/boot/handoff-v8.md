@@ -1,8 +1,8 @@
-# Ginux Boot Handoff v8
+# Linox Boot Handoff v8
 
 **Status:** Current. Supersedes the version-7 structure in source.
 
-Version 8 adds the firmware framebuffer so Ginux has a console on machines
+Version 8 adds the firmware framebuffer so Linox has a console on machines
 without a serial port, which is the common case for physical hardware.
 
 ## Framebuffer description
@@ -20,7 +20,7 @@ Protocol and records its active mode in `BootInfo.framebuffer`:
 
 Bit-mask modes are accepted when their masks match one of the two byte orders.
 Blt-only modes, missing protocols, and any other layout are recorded as format
-`0`. The firmware does not change modes on Ginux's behalf.
+`0`. The firmware does not change modes on Linox's behalf.
 
 ## Kernel contract
 

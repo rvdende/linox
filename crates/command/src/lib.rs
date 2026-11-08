@@ -393,7 +393,7 @@ mod tests {
         Command::leaf(b"status", b"status", b"Show status", 2, Arity::exact(0));
     const ROOT_CHILDREN: &[Command<'static>] = &[STATUS, DOMAIN];
     const ROOT: Command<'static> =
-        Command::group(b"ginux", b"ginux COMMAND", b"Ginux shell", ROOT_CHILDREN);
+        Command::group(b"linox", b"linox COMMAND", b"Linox shell", ROOT_CHILDREN);
 
     #[test]
     fn parses_nested_commands_and_normalizes_whitespace() {

@@ -1,6 +1,6 @@
 //! What a pidfd still tells about its process once a wait has reaped it:
 //! PIDFD_GET_INFO with PIDFD_INFO_EXIT reports the reaped process's wait
-//! status. Linux keeps it in the pid the pidfd holds; Ginux keeps the
+//! status. Linux keeps it in the pid the pidfd holds; Linox keeps the
 //! status of each domain's most recently reaped processes, by pid and
 //! slot generation, with the PID namespace each lived in, so a pidfd
 //! seen from another namespace stays refused.

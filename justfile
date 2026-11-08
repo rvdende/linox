@@ -1,4 +1,4 @@
-# Everyday Ginux workflows; `make help` lists the full build and test targets.
+# Everyday Linox workflows; `make help` lists the full build and test targets.
 
 ovmf_code := env_var_or_default("OVMF_CODE", "/usr/share/OVMF/OVMF_CODE_4M.fd")
 ovmf_vars := env_var_or_default("OVMF_VARS", "/usr/share/OVMF/OVMF_VARS_4M.fd")
@@ -7,7 +7,7 @@ ovmf_vars := env_var_or_default("OVMF_VARS", "/usr/share/OVMF/OVMF_VARS_4M.fd")
 default:
     @just --list
 
-# Build, boot Ginux in a window and start the Rust Wayland desktop on the all-Rust userland.
+# Build, boot Linox in a window and start the Rust Wayland desktop on the all-Rust userland.
 desktop:
     tools/qemu/desktop.sh
 
@@ -15,20 +15,20 @@ desktop:
 desktop-fast:
     tools/qemu/desktop.sh --no-build
 
-# Boot Ginux in a QEMU window with USB keyboard and tablet (console on this terminal).
+# Boot Linox in a QEMU window with USB keyboard and tablet (console on this terminal).
 window:
     make build
-    OVMF_CODE={{ovmf_code}} OVMF_VARS={{ovmf_vars}} GINUX_QEMU_DISPLAY=gtk GINUX_QEMU_USB_INPUT=1 GINUX_MEMORY=4G make run
+    OVMF_CODE={{ovmf_code}} OVMF_VARS={{ovmf_vars}} LINOX_QEMU_DISPLAY=gtk LINOX_QEMU_USB_INPUT=1 LINOX_MEMORY=4G make run
 
 # Attach to the desktop VM's serial console (detach with Ctrl-b d).
 console:
-    tmux attach -t ginux
+    tmux attach -t linox
 
 # Stop the desktop VM.
 stop:
-    tmux kill-session -t ginux
+    tmux kill-session -t linox
 
-# Build the desktop programs (ginux-wm, ginux-term, ginux-fetch).
+# Build the desktop programs (linox-wm, linox-term, linox-fetch).
 userland:
     make userland
 
@@ -52,7 +52,7 @@ rust-rootfs:
 ltp:
     make ltp
 
-# Run LTP syscall tests in a Ginux domain, one libtest trial each (all: ~25 min); fails on regressions against tests/ltp/baseline.txt. `just test-ltp '^mmap'` takes a regex, `just test-ltp '' 'kill12 getpid01'` names tests, further arguments go to tests/qemu/ltp.sh (`just test-ltp '' '' --strict`).
+# Run LTP syscall tests in a Linox domain, one libtest trial each (all: ~25 min); fails on regressions against tests/ltp/baseline.txt. `just test-ltp '^mmap'` takes a regex, `just test-ltp '' 'kill12 getpid01'` names tests, further arguments go to tests/qemu/ltp.sh (`just test-ltp '' '' --strict`).
 test-ltp filter="" tests="" *args:
     make ltp
     @echo "Results: target/ltp-results.txt; failure clusters: target/ltp-report.txt; per-test logs: target/ltp/logs/"

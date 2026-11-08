@@ -2,7 +2,7 @@
 
 **Status:** boot-local controller contract.
 
-The controller maintains independently named Ginux domains. A domain is the
+The controller maintains independently named Linox domains. A domain is the
 kernel isolation, ownership, accounting, scheduling, device, and failure
 boundary. OCI does not create that boundary; it is one way to populate a Linux
 personality domain's root filesystem.

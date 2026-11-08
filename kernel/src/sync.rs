@@ -372,7 +372,7 @@ pub(crate) fn kernel_entry_detach(count: u32) {
     if lock.cpu_owner.load(Ordering::Acquire) != cpu as u16 + 1
         || lock.depths[cpu].load(Ordering::Acquire) <= count
     {
-        crate::serial_write("ginux: kernel-entry detach cpu/owner/depth/count: ");
+        crate::serial_write("linox: kernel-entry detach cpu/owner/depth/count: ");
         for value in [
             cpu as u64,
             u64::from(lock.cpu_owner.load(Ordering::Acquire)),
@@ -383,7 +383,7 @@ pub(crate) fn kernel_entry_detach(count: u32) {
             crate::serial_write(" ");
         }
         crate::serial_write("\r\n");
-        crate::kernel_fail("ginux: invalid kernel-entry detach\r\n");
+        crate::kernel_fail("linox: invalid kernel-entry detach\r\n");
     }
     lock.depths[cpu].fetch_sub(count, Ordering::AcqRel);
 }
@@ -398,7 +398,7 @@ pub(crate) fn kernel_entry_attach(count: u32) {
         return;
     }
     if lock.cpu_owner.load(Ordering::Acquire) != cpu as u16 + 1 {
-        crate::kernel_fail("ginux: invalid kernel-entry attach\r\n");
+        crate::kernel_fail("linox: invalid kernel-entry attach\r\n");
     }
     lock.depths[cpu].fetch_add(count, Ordering::AcqRel);
 }
@@ -441,7 +441,7 @@ impl KernelEntryLock {
         if self.cpu_owner.load(Ordering::Acquire) == cpu as u16 + 1 {
             let previous = self.depths[cpu].fetch_add(1, Ordering::AcqRel);
             if previous == 0 {
-                crate::kernel_fail("ginux: invalid recursive kernel-entry depth\r\n");
+                crate::kernel_fail("linox: invalid recursive kernel-entry depth\r\n");
             }
             return KernelEntryGuard {
                 lock: self,
@@ -466,7 +466,7 @@ impl KernelEntryLock {
         if self.cpu_owner.load(Ordering::Acquire) == cpu as u16 + 1 {
             let previous = self.depths[cpu].fetch_add(1, Ordering::AcqRel);
             if previous == 0 {
-                crate::kernel_fail("ginux: invalid recursive kernel-entry depth\r\n");
+                crate::kernel_fail("linox: invalid recursive kernel-entry depth\r\n");
             }
             return Some(KernelEntryGuard {
                 lock: self,
@@ -541,7 +541,7 @@ impl Drop for KernelEntryGuard {
         let cpu = cpu_slot();
         let previous = self.lock.depths[cpu].fetch_sub(1, Ordering::AcqRel);
         if previous == 0 {
-            crate::kernel_fail("ginux: invalid kernel-entry release depth\r\n");
+            crate::kernel_fail("linox: invalid kernel-entry release depth\r\n");
         }
         // The last entry on this CPU to leave releases the lock.
         if previous == 1 {
@@ -599,7 +599,7 @@ fn enter_rank(rank: LockRank) -> u16 {
     let held = &HELD_RANKS[cpu_slot()];
     let previous = held.load(Ordering::Acquire);
     if previous >= rank.0 {
-        crate::kernel_fail("ginux: synchronization lock-order violation\r\n");
+        crate::kernel_fail("linox: synchronization lock-order violation\r\n");
     }
     held.store(rank.0, Ordering::Release);
     previous
@@ -608,7 +608,7 @@ fn enter_rank(rank: LockRank) -> u16 {
 fn leave_rank(rank: LockRank, previous: u16) {
     let held = &HELD_RANKS[cpu_slot()];
     if held.load(Ordering::Acquire) != rank.0 {
-        crate::kernel_fail("ginux: synchronization unlock-order violation\r\n");
+        crate::kernel_fail("linox: synchronization unlock-order violation\r\n");
     }
     held.store(previous, Ordering::Release);
 }

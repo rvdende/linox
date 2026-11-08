@@ -40,7 +40,7 @@ pub struct Controllers(u8);
 impl Controllers {
     pub const NONE: Self = Self(0);
     pub const MEMORY: Self = Self(1);
-    /// Every controller Ginux implements, as the root offers them.
+    /// Every controller Linox implements, as the root offers them.
     pub const ALL: Self = Self::MEMORY;
 
     const NAMES: [(Self, &'static [u8]); 1] = [(Self::MEMORY, b"memory")];
@@ -260,7 +260,7 @@ pub struct MemoryStat {
     pub reclaimed: u64,
 }
 
-/// `memory.stat` as Linux words it (in bytes, in its order). Ginux keeps
+/// `memory.stat` as Linux words it (in bytes, in its order). Linox keeps
 /// no LRU lists, so all anonymous memory is active and all page cache
 /// inactive, and the kernel-side counts are zero.
 pub fn write_memory_stat(stat: &MemoryStat, output: &mut Output<'_>) -> bool {

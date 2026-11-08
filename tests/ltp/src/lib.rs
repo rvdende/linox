@@ -1,12 +1,12 @@
-//! The Ginux LTP harness: runs the Linux Test Project syscall tests in an
-//! Alpine domain on Ginux under QEMU (docs/LTP.md).
+//! The Linox LTP harness: runs the Linux Test Project syscall tests in an
+//! Alpine domain on Linox under QEMU (docs/LTP.md).
 //!
 //! The test target `tests/ltp.rs` turns each entry of the run list into one
 //! libtest trial. One QEMU session runs the selected tests in list order on
 //! a background thread ([`session`]) and hands each trial its result over a
 //! channel.
 //!
-//! The session boots Ginux with `tools/qemu/run.sh`, starts an Alpine
+//! The session boots Linox with `tools/qemu/run.sh`, starts an Alpine
 //! domain, serves the LTP tree, the guest runner and the run list over HTTP
 //! ([`http`]; the guest reaches the host at 10.0.2.2) and starts the runner
 //! (`tools/ltp/ltp-runner.c`) from the domain's shell through

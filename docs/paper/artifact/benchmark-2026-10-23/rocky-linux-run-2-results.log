@@ -1,7 +1,7 @@
-GINUX_BENCH_READY
-GINUX_BENCH_KERNEL_TO_MULTI_USER_SECONDS 34.34
-GINUX_BENCH_SYSBENCH_SHA256 7cf6b71521436bd32a8ab197851035ff1632bee383fec5a35468d61969e7c18d
-GINUX_BENCH_WORKLOAD_BEGIN cpu 1
+LINOX_BENCH_READY
+LINOX_BENCH_KERNEL_TO_MULTI_USER_SECONDS 34.34
+LINOX_BENCH_SYSBENCH_SHA256 7cf6b71521436bd32a8ab197851035ff1632bee383fec5a35468d61969e7c18d
+LINOX_BENCH_WORKLOAD_BEGIN cpu 1
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -33,8 +33,8 @@ Threads fairness:
     events (avg/stddev):           693.0000/0.00
     execution time (avg/stddev):   2.9803/0.00
 
-GINUX_BENCH_WORKLOAD_END cpu 1 0
-GINUX_BENCH_WORKLOAD_BEGIN cpu 2
+LINOX_BENCH_WORKLOAD_END cpu 1 0
+LINOX_BENCH_WORKLOAD_BEGIN cpu 2
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -66,8 +66,8 @@ Threads fairness:
     events (avg/stddev):           699.0000/0.00
     execution time (avg/stddev):   2.9876/0.00
 
-GINUX_BENCH_WORKLOAD_END cpu 2 0
-GINUX_BENCH_WORKLOAD_BEGIN cpu 3
+LINOX_BENCH_WORKLOAD_END cpu 2 0
+LINOX_BENCH_WORKLOAD_BEGIN cpu 3
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -99,8 +99,8 @@ Threads fairness:
     events (avg/stddev):           758.0000/0.00
     execution time (avg/stddev):   2.9916/0.00
 
-GINUX_BENCH_WORKLOAD_END cpu 3 0
-GINUX_BENCH_WORKLOAD_BEGIN memory 1
+LINOX_BENCH_WORKLOAD_END cpu 3 0
+LINOX_BENCH_WORKLOAD_BEGIN memory 1
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -138,8 +138,8 @@ Threads fairness:
     events (avg/stddev):           2466041.0000/0.00
     execution time (avg/stddev):   1.2469/0.00
 
-GINUX_BENCH_WORKLOAD_END memory 1 0
-GINUX_BENCH_WORKLOAD_BEGIN memory 2
+LINOX_BENCH_WORKLOAD_END memory 1 0
+LINOX_BENCH_WORKLOAD_BEGIN memory 2
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -177,8 +177,8 @@ Threads fairness:
     events (avg/stddev):           2115361.0000/0.00
     execution time (avg/stddev):   1.2173/0.00
 
-GINUX_BENCH_WORKLOAD_END memory 2 0
-GINUX_BENCH_WORKLOAD_BEGIN memory 3
+LINOX_BENCH_WORKLOAD_END memory 2 0
+LINOX_BENCH_WORKLOAD_BEGIN memory 3
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -216,8 +216,8 @@ Threads fairness:
     events (avg/stddev):           2098663.0000/0.00
     execution time (avg/stddev):   1.2383/0.00
 
-GINUX_BENCH_WORKLOAD_END memory 3 0
-GINUX_BENCH_WORKLOAD_BEGIN threads 1
+LINOX_BENCH_WORKLOAD_END memory 3 0
+LINOX_BENCH_WORKLOAD_BEGIN threads 1
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -245,8 +245,8 @@ Threads fairness:
     events (avg/stddev):           932.0000/0.00
     execution time (avg/stddev):   2.9934/0.00
 
-GINUX_BENCH_WORKLOAD_END threads 1 0
-GINUX_BENCH_WORKLOAD_BEGIN threads 2
+LINOX_BENCH_WORKLOAD_END threads 1 0
+LINOX_BENCH_WORKLOAD_BEGIN threads 2
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -274,8 +274,8 @@ Threads fairness:
     events (avg/stddev):           919.0000/0.00
     execution time (avg/stddev):   2.9897/0.00
 
-GINUX_BENCH_WORKLOAD_END threads 2 0
-GINUX_BENCH_WORKLOAD_BEGIN threads 3
+LINOX_BENCH_WORKLOAD_END threads 2 0
+LINOX_BENCH_WORKLOAD_BEGIN threads 3
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -303,8 +303,8 @@ Threads fairness:
     events (avg/stddev):           930.0000/0.00
     execution time (avg/stddev):   2.9938/0.00
 
-GINUX_BENCH_WORKLOAD_END threads 3 0
-GINUX_BENCH_WORKLOAD_BEGIN mutex 1
+LINOX_BENCH_WORKLOAD_END threads 3 0
+LINOX_BENCH_WORKLOAD_BEGIN mutex 1
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -332,8 +332,8 @@ Threads fairness:
     events (avg/stddev):           1.0000/0.00
     execution time (avg/stddev):   1.5576/0.00
 
-GINUX_BENCH_WORKLOAD_END mutex 1 0
-GINUX_BENCH_WORKLOAD_BEGIN mutex 2
+LINOX_BENCH_WORKLOAD_END mutex 1 0
+LINOX_BENCH_WORKLOAD_BEGIN mutex 2
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -361,8 +361,8 @@ Threads fairness:
     events (avg/stddev):           1.0000/0.00
     execution time (avg/stddev):   1.5575/0.00
 
-GINUX_BENCH_WORKLOAD_END mutex 2 0
-GINUX_BENCH_WORKLOAD_BEGIN mutex 3
+LINOX_BENCH_WORKLOAD_END mutex 2 0
+LINOX_BENCH_WORKLOAD_BEGIN mutex 3
 sysbench 1.0.20 (using system LuaJIT 2.1.1720049189)
 
 Running the test with following options:
@@ -390,5 +390,5 @@ Threads fairness:
     events (avg/stddev):           1.0000/0.00
     execution time (avg/stddev):   1.5658/0.00
 
-GINUX_BENCH_WORKLOAD_END mutex 3 0
-GINUX_BENCH_COMPLETE
+LINOX_BENCH_WORKLOAD_END mutex 3 0
+LINOX_BENCH_COMPLETE

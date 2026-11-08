@@ -1,7 +1,7 @@
 # Gate 12 Performance Parity
 
 Gate 12 compared the same pinned x86-64 sysbench binary on Rocky Linux under
-Linux and Rocky Linux userspace under Ginux. Both sides used Q35 under QEMU
+Linux and Rocky Linux userspace under Linox. Both sides used Q35 under QEMU
 TCG, 2 GiB memory, identical one-, two-, and four-vCPU topologies, and nine
 samples per workload cell. Ratios below use the favorable direction: higher
 throughput is better for CPU, memory, and thread yield; lower elapsed time is
@@ -43,7 +43,7 @@ recognizing or special-casing sysbench:
 
 Profiling found roughly 699,000 operation-265 observations in one pre-fix
 scaled memory sample. Operation 265 is
-`FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME`; Ginux had returned `EINVAL`, causing
+`FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME`; Linox had returned `EINVAL`, causing
 glibc to re-enter the kernel continuously. After correction, focused scaled
 memory and mutex medians crossed the acceptance floor, and the final complete
 matrix confirmed the result.
@@ -59,8 +59,8 @@ The final code passed:
 - `make test-rocky-smp-shared-page`
 - `make test-rocky-smp-thread-context`
 
-The final matrix contains nine Linux and nine Ginux samples in every sysbench
+The final matrix contains nine Linux and nine Linox samples in every sysbench
 cell and uses the same binary digest throughout. Boot measurements remain
-observational because Linux and Ginux follow different startup paths. These
+observational because Linux and Linox follow different startup paths. These
 results characterize this QEMU TCG experiment; they are not native-hardware or
 general production-performance claims.

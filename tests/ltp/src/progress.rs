@@ -336,8 +336,8 @@ mod tests {
     fn status_line() {
         let mut counts = [0; Verdict::ALL.len()];
         assert_eq!(
-            status_text(0, 25, "boot 1: booting Ginux", 3, &counts, 3),
-            "[0/25] boot 1: booting Ginux 3s | 0m03s"
+            status_text(0, 25, "boot 1: booting Linox", 3, &counts, 3),
+            "[0/25] boot 1: booting Linox 3s | 0m03s"
         );
         counts[Verdict::Tpass.index()] = 380;
         counts[Verdict::Tfail.index()] = 20;
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn same_file_compares_inodes() {
-        let path = std::env::temp_dir().join(format!("ginux-ltp-same-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("linox-ltp-same-{}", std::process::id()));
         let a = File::create(&path).unwrap();
         let b = File::open(&path).unwrap();
         assert!(same_file(a.as_fd(), b.as_fd()));

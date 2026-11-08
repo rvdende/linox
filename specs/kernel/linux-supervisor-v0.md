@@ -4,7 +4,7 @@
 
 The measured `/sbin/init` performs the bounded namespace, filesystem, device,
 signal, futex, and child-lifecycle checks before publishing exactly one
-`GINUX_SYSTEM_INIT_V0` line through `/dev/console`. It does not close that
+`LINOX_SYSTEM_INIT_V0` line through `/dev/console`. It does not close that
 descriptor or exit after readiness.
 
 The added supervisor path expands this measured static init from one to two RX

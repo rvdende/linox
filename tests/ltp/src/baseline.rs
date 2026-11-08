@@ -7,7 +7,7 @@ use crate::Verdict;
 
 /// The comment that heads a baseline file written by the harness.
 const HEADER: &str = "\
-# LTP tests known not to pass on Ginux, one `NAME RESULT` per line
+# LTP tests known not to pass on Linox, one `NAME RESULT` per line
 # (docs/LTP.md). A listed test that fails again is reported as ignored
 # (\"known failure\"); a failure of any other test is a regression and fails
 # the run. Rewrite it from a run with LTP_UPDATE_BASELINE=1

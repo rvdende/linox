@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn volume_surfaces(data: &[u8]) {
-    use ginux_volume_format as vf;
+    use linox_volume_format as vf;
 
     // Harness modeling: libFuzzer inputs shorter than one sector are
     // zero-padded so short-input branches stay reachable; the kernel only

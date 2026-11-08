@@ -824,7 +824,7 @@ const fn linux_proc_sysctl_node_named(path: &[u8]) -> u16 {
 }
 
 /// `/proc/sys` values: node, path under `/proc`, contents. Values match
-/// what Ginux implements (four user namespaces); root may write them, and
+/// what Linox implements (four user namespaces); root may write them, and
 /// the kernel acts on those it reads back (`linux_proc_sysctl_value`).
 /// `/proc/sys/fs/aio-max-nr`: the most events one io_setup context may hold.
 pub(super) const LINUX_AIO_MAX_NR: u64 = 65_536;
@@ -845,16 +845,16 @@ pub(super) const LINUX_PROC_SYSCTLS: [(u16, &[u8], &[u8]); 64] = linux_numbered_
     (b"sys/vm/nr_hugepages", b"0\n"),
     (b"sys/vm/nr_overcommit_hugepages", b"0\n"),
     (b"sys/vm/hugetlb_shm_group", b"0\n"),
-    // How hard the kernel reclaims the dentry and inode caches; Ginux keeps
+    // How hard the kernel reclaims the dentry and inode caches; Linox keeps
     // the value (tests save and restore it).
     (b"sys/vm/vfs_cache_pressure", b"100\n"),
-    // The reserve below which allocations must reclaim. Ginux has no
+    // The reserve below which allocations must reclaim. Linox has no
     // watermarks; the value is the one Linux picks for 4 GiB
     // (sqrt(lowmem KiB * 16)), kept when written. Memory tests read it to
     // leave that much free.
     (b"sys/vm/min_free_kbytes", b"8192\n"),
     // How readily reclaim pages anonymous memory out to swap rather than
-    // dropping caches (0 to 200); Ginux keeps the value.
+    // dropping caches (0 to 200); Linox keeps the value.
     (b"sys/vm/swappiness", b"60\n"),
     // The random pool is always full, as Linux reports it since 5.18.
     (b"sys/kernel/random/entropy_avail", b"256\n"),
@@ -923,7 +923,7 @@ pub(super) const LINUX_PROC_SYSCTLS: [(u16, &[u8], &[u8]); 64] = linux_numbered_
     (b"sys/fs/mqueue/msg_default", b"10\n"),
     (b"sys/fs/mqueue/msgsize_default", b"8192\n"),
     // Values tests read to size themselves.
-    (b"sys/kernel/osrelease", b"6.12.0-ginux.0.1\n"),
+    (b"sys/kernel/osrelease", b"6.12.0-linox.0.1\n"),
     (b"sys/kernel/msgmni", b"32000\n"),
     // As many tasks as a domain may have processes (linux_process::
     // PROCESS_LIMIT): what tests size their forks by.
@@ -970,7 +970,7 @@ pub(super) const LINUX_PROC_FILESYSTEMS_NODE: u16 = 0xf300;
 pub(super) const LINUX_PROC_SWAPS_NODE: u16 = 0x9700;
 pub(super) const LINUX_FILE_PROC_SWAPS: u16 = LINUX_FILE_MASK | LINUX_PROC_SWAPS_NODE;
 pub(super) const LINUX_FILE_PROC_FILESYSTEMS: u16 = LINUX_FILE_MASK | LINUX_PROC_FILESYSTEMS_NODE;
-/// /proc/modules: the loaded modules, none (everything Ginux has is built
+/// /proc/modules: the loaded modules, none (everything Linox has is built
 /// in, as /lib/modules/RELEASE/modules.builtin lists it).
 pub(super) const LINUX_PROC_MODULES_NODE: u16 = 0xba00;
 pub(super) const LINUX_FILE_PROC_MODULES: u16 = LINUX_FILE_MASK | LINUX_PROC_MODULES_NODE;
@@ -1006,16 +1006,16 @@ pub(super) const LINUX_PROC_SYS_DIRECTORY_INODES: u64 = 0x10_1000;
 /// Files whose inode is their node's (`linux_proc_node_inode`).
 pub(super) const LINUX_PROC_NODE_INODES: u64 = 0x10_2000;
 /// /proc/keys and /proc/key-users: the domain's keys a reader may view,
-/// and each user's key count and quota (ginux_keyrings).
+/// and each user's key count and quota (linox_keyrings).
 pub(super) const LINUX_PROC_KEYS_NODE: u16 = 0x9e00;
 pub(super) const LINUX_FILE_PROC_KEYS: u16 = LINUX_FILE_MASK | LINUX_PROC_KEYS_NODE;
 pub(super) const LINUX_PROC_KEY_USERS_NODE: u16 = 0x9f00;
 pub(super) const LINUX_FILE_PROC_KEY_USERS: u16 = LINUX_FILE_MASK | LINUX_PROC_KEY_USERS_NODE;
-/// /proc/config.gz: Ginux's kernel configuration (`kernel_config`).
+/// /proc/config.gz: Linox's kernel configuration (`kernel_config`).
 pub(super) const LINUX_PROC_CONFIG_NODE: u16 = 0xa900;
 pub(super) const LINUX_FILE_PROC_CONFIG: u16 = LINUX_FILE_MASK | LINUX_PROC_CONFIG_NODE;
 
-/// The kernel configuration as Linux's .config lists it: only what Ginux
+/// The kernel configuration as Linux's .config lists it: only what Linox
 /// implements for Linux programs, so a test that needs a missing feature
 /// (CONFIG_BLK_DEV_LOOP, CONFIG_TIME_NS, ...) skips itself.
 const LINUX_KERNEL_CONFIG: &[u8] = include_bytes!("kernel_config");
@@ -1085,7 +1085,7 @@ pub(super) const LINUX_PROC_PID2_STAT_NODE: u16 = 0xef00;
 pub(super) const LINUX_FILE_PROC_PID2_STAT: u16 = LINUX_FILE_MASK | LINUX_PROC_PID2_STAT_NODE;
 pub(super) const LINUX_PROC_PID2_STATM_NODE: u16 = 0xee00;
 pub(super) const LINUX_FILE_PROC_PID2_STATM: u16 = LINUX_FILE_MASK | LINUX_PROC_PID2_STATM_NODE;
-/// /proc/PID/coredump_filter: which memory core files hold. Ginux's hold
+/// /proc/PID/coredump_filter: which memory core files hold. Linox's hold
 /// none (an ELF header and a process-information note), so it is 0.
 pub(super) const LINUX_PROC_COREDUMP_FILTER_NODE: u16 = 0xae00;
 pub(super) const LINUX_FILE_PROC_COREDUMP_FILTER: u16 =
@@ -1174,22 +1174,22 @@ pub(super) const LINUX_PROC_PID1_STATUS: &[u8] =
     b"Name:\tinit\nState:\tR (running)\nPid:\t1\nPPid:\t0\n\
 CapInh:\t0000000000000000\nCapPrm:\t000001ffffffffff\nCapEff:\t000001ffffffffff\n\
 CapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\n";
-const _: () = assert!(ginux_credentials::capability::ALL == 0x1ff_ffff_ffff);
+const _: () = assert!(linox_credentials::capability::ALL == 0x1ff_ffff_ffff);
 pub(super) const LINUX_PROC_PID2_RUNNING_STATUS: &[u8] =
     b"Name:\tinit\nState:\tR (running)\nPid:\t2\nPPid:\t1\n";
 pub(super) const LINUX_PROC_PID2_STOPPED_STATUS: &[u8] =
     b"Name:\tinit\nState:\tT (stopped)\nPid:\t2\nPPid:\t1\n";
 pub(super) const LINUX_PROC_PID2_ZOMBIE_STATUS: &[u8] =
     b"Name:\tinit\nState:\tZ (zombie)\nPid:\t2\nPPid:\t1\n";
-pub(super) const LINUX_PROC_CPUINFO: &[u8] = b"processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 158\nmodel name\t: Ginux virtual x86-64 CPU\nstepping\t: 10\ncpu MHz\t\t: 1000.000\ncache size\t: 16384 KB\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\nfpu\t\t: yes\ncpuid level\t: 13\nflags\t\t: fpu tsc msr pae cx8 apic sep mtrr pge cmov pat clflush mmx fxsr sse sse2 syscall nx lm constant_tsc rep_good nopl xtopology cpuid tsc_known_freq pni ssse3 cx16 sse4_1 sse4_2 x2apic popcnt aes xsave avx rdrand hypervisor\nbogomips\t: 2000.00\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 48 bits virtual\n\n";
+pub(super) const LINUX_PROC_CPUINFO: &[u8] = b"processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 158\nmodel name\t: Linox virtual x86-64 CPU\nstepping\t: 10\ncpu MHz\t\t: 1000.000\ncache size\t: 16384 KB\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\nfpu\t\t: yes\ncpuid level\t: 13\nflags\t\t: fpu tsc msr pae cx8 apic sep mtrr pge cmov pat clflush mmx fxsr sse sse2 syscall nx lm constant_tsc rep_good nopl xtopology cpuid tsc_known_freq pni ssse3 cx16 sse4_1 sse4_2 x2apic popcnt aes xsave avx rdrand hypervisor\nbogomips\t: 2000.00\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 48 bits virtual\n\n";
 pub(super) const LINUX_PROC_STAT: &[u8] = b"cpu  1 0 1 100 0 0 0 0 0 0\ncpu0 1 0 1 100 0 0 0 0 0 0\nintr 0\nctxt 1\nbtime 0\nprocesses 1\nprocs_running 1\nprocs_blocked 0\nsoftirq 0 0 0 0 0 0 0 0 0 0 0\n";
 pub(super) const LINUX_PROC_LOADAVG: &[u8] = b"0.00 0.00 0.00 1/1 1\n";
 pub(super) const LINUX_PROC_FILESYSTEMS: &[u8] =
     b"nodev\tproc\nnodev\ttmpfs\nnodev\tramfs\nnodev\tdevtmpfs\n\text2\n\text3\n\text4\nnodev\toverlay\n";
-pub(super) const LINUX_PROC_CMDLINE: &[u8] = b"ginux immutable=1\n";
+pub(super) const LINUX_PROC_CMDLINE: &[u8] = b"linox immutable=1\n";
 pub(super) const LINUX_PROC_CGROUP: &[u8] = b"0::/\n";
 pub(super) const LINUX_PROC_PROCESS_CMDLINE: &[u8] = b"/sbin/init\0";
-pub(super) const LINUX_PROC_PROCESS_ENVIRON: &[u8] = b"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0PWD=/\0TERM=linux\0container=ginux\0SYSTEMD_GETTY_AUTO=1\0";
+pub(super) const LINUX_PROC_PROCESS_ENVIRON: &[u8] = b"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0PWD=/\0TERM=linux\0container=linox\0SYSTEMD_GETTY_AUTO=1\0";
 pub(super) const LINUX_PROC_FILE_MAX: &[u8] = b"9223372036854775807\n";
 pub(super) const LINUX_PROC_NR_OPEN: &[u8] = b"1048576\n";
 pub(super) const LINUX_PROC_PID1_STAT: &[u8] = b"1 (init) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 1 1048576 256 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0\n";

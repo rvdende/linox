@@ -136,7 +136,7 @@ struct NamespaceLimits {
 /// How many queued events a new one may merge with (Linux's limit).
 const MERGE_DEPTH: usize = 128;
 
-/// The file handle type of Ginux's handles (name_to_handle_at).
+/// The file handle type of Linox's handles (name_to_handle_at).
 pub(crate) const HANDLE_TYPE: i32 = 0x474e;
 /// The handle type reported for an object with no handle.
 const FILEID_INVALID: i32 = 0xff;

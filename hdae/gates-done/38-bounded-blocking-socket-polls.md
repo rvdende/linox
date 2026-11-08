@@ -68,7 +68,7 @@ the serialized kernel-entry path in an unbounded busy-wait.
 - Issue #22's code-path report matches `kernel/src/linux_socket.rs`.
 - The existing `BLOCKING_POLL_LIMIT` provides an established repository bound;
   it was not consistently applied to guest timeouts or accept.
-- `cargo check --package ginux-kernel --target x86_64-unknown-none` passed.
+- `cargo check --package linox-kernel --target x86_64-unknown-none` passed.
 - `make check` passed, including the unchanged 1,033-block unsafe baseline and
   the Linux compatibility matrix.
 - `make test` passed and emitted

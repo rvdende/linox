@@ -53,7 +53,7 @@ existing CLI while preserving serial recovery and kernel isolation.
 - `make test-controller-graphics-runtime` -> passed the multi-boot QEMU suite;
   both service generations emitted the bounded ready message, the faulted
   generation was contained, the replacement preserved service identity, all
-  grants and frames retired, and the CLI reached `ginux>` and shut down.
+  grants and frames retired, and the CLI reached `linox>` and shut down.
 - `make check` -> passed architecture checks, Linux compatibility validation,
   ABI conformance, formatting, clippy, and unit tests, including the new
   graphics bootstrap ABI layout/negative tests.

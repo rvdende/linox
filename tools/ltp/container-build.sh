@@ -27,7 +27,7 @@ fi
 src="/work/ltp-full-$LTP_VERSION"
 # Changing these options rebuilds from a fresh source tree.
 #
-# Static position-independent executables (static-pie): Ginux loads a file
+# Static position-independent executables (static-pie): Linox loads a file
 # written at runtime only if it is position independent; its fixed-address
 # (ET_EXEC) loader takes only tiny programs (5 code pages, 8 in all).
 cflags="-O2 -pipe -fPIE"
@@ -47,7 +47,7 @@ esac
 # The libraries configure finds are part of the stamp, so a tree configured
 # before libnuma was installed is configured again.
 configure_args="--prefix=/opt/ltp CFLAGS=$cflags LDFLAGS=$ldflags libs=numa"
-stamp="$src/.ginux-configured"
+stamp="$src/.linox-configured"
 
 if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$configure_args" ]; then
     echo "Configuring LTP $LTP_VERSION"
@@ -89,9 +89,9 @@ make -j"$JOBS" -C tools/apicmds >/work/make-apicmds.log 2>&1 ||
     echo testcases/kernel/controllers/memcg
     echo testcases/cve
 } | LC_ALL=C sort -u >/work/leaf-dirs.txt
-xargs -P "$JOBS" -I{} sh -c 'make -k -C "$1" >"$1/.ginux-make.log" 2>&1 || true' sh {} \
+xargs -P "$JOBS" -I{} sh -c 'make -k -C "$1" >"$1/.linox-make.log" 2>&1 || true' sh {} \
     </work/leaf-dirs.txt
-while IFS= read -r dir; do cat "$dir/.ginux-make.log"; done </work/leaf-dirs.txt >/work/make.log
+while IFS= read -r dir; do cat "$dir/.linox-make.log"; done </work/leaf-dirs.txt >/work/make.log
 
 echo "Installing"
 rm -rf /work/install
@@ -101,8 +101,8 @@ make -k -C testcases/lib install DESTDIR=/work/install >>/work/install.log 2>&1 
 make -C tools/apicmds install DESTDIR=/work/install >>/work/install.log 2>&1
 root=/work/install/opt/ltp
 
-# Ginux's own tests (tools/ltp/tests), built against libltp as LTP's are.
-: >/work/ginux-tests.txt
+# Linox's own tests (tools/ltp/tests), built against libltp as LTP's are.
+: >/work/linox-tests.txt
 for test in /scripts/tests/*.c; do
     name=${test##*/}
     name=${name%.c}
@@ -110,7 +110,7 @@ for test in /scripts/tests/*.c; do
         -o "$root/testcases/bin/$name" "$test" \
         -L"$src/libs/swap" -L"$src/lib" -lltpswap -lltp ||
         { echo "building $name failed"; exit 1; }
-    printf '%s\tginux\n' "$name" >>/work/ginux-tests.txt
+    printf '%s\tlinox\n' "$name" >>/work/linox-tests.txt
 done
 
 # useradd and friends, which tests run as on a distribution that has them
@@ -162,7 +162,7 @@ while IFS= read -r dir; do
             printf '%s\t%s\n' "${file##*/}" "${dir#testcases/kernel/}"
         fi
     done
-done </work/leaf-dirs.txt | cat - /work/ginux-tests.txt | LC_ALL=C sort >/work/test-dirs.txt
+done </work/leaf-dirs.txt | cat - /work/linox-tests.txt | LC_ALL=C sort >/work/test-dirs.txt
 mkdir -p "$root/runtest"
 cp runtest/syscalls "$root/runtest/syscalls"
 cp VERSION "$root/VERSION"

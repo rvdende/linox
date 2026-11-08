@@ -214,7 +214,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ginux-ltp"
+name = "linox-ltp"
 version = "0.1.0"
 dependencies = [
  "chrono",

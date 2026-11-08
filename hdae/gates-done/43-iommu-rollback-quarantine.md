@@ -70,7 +70,7 @@ unless rollback proves translation disabled and the root pointer cleared.
 - `make check` -> passed; architecture checks, Clippy, unit tests, and the
   unchanged unsafe baseline of 1,033 blocks all passed.
 - `make test` -> passed on the default two-vCPU QEMU profile, including
-  `ginux: failed IOMMU activation rollback quarantined` and the existing VT-d
+  `linox: failed IOMMU activation rollback quarantined` and the existing VT-d
   activation, fault recovery, teardown, native-service, and replacement
   proofs.
 - The deterministic retirement matrix released all six frames after a clean

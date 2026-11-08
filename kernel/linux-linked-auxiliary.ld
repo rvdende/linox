@@ -1,4 +1,4 @@
-ENTRY(ginux_auxiliary_symbol)
+ENTRY(linox_auxiliary_symbol)
 
 PHDRS
 {

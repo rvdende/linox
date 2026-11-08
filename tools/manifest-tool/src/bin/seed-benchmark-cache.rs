@@ -5,9 +5,9 @@ use std::{
     process,
 };
 
-use ginux_oci_cache::{Catalog, Layer, Platform, ENCODED_SIZE, OBJECT_START_SECTOR};
-use ginux_volume_format::SECTOR_SIZE;
-use ginux_volume_service::{
+use linox_oci_cache::{Catalog, Layer, Platform, ENCODED_SIZE, OBJECT_START_SECTOR};
+use linox_volume_format::SECTOR_SIZE;
+use linox_volume_service::{
     commit_oci_catalog, open_host_volume, BlockDevice, OCI_OBJECT_START_SECTOR,
 };
 use sha2::{Digest as _, Sha256};
@@ -93,7 +93,7 @@ fn diagnose_rootfs(bytes: &[u8]) -> String {
                 let mut prefix = Vec::with_capacity(boundaries[middle] + 1024);
                 prefix.extend_from_slice(&bytes[..boundaries[middle]]);
                 prefix.resize(prefix.len() + 1024, 0);
-                if ginux_oci::Rootfs::parse(&prefix).is_some() {
+                if linox_oci::Rootfs::parse(&prefix).is_some() {
                     low = middle + 1;
                 } else {
                     high = middle;
@@ -202,7 +202,7 @@ fn main() {
         fail("rootfs is empty");
     }
     normalize_exported_tar(&mut rootfs);
-    ginux_oci::Rootfs::parse(&rootfs).unwrap_or_else(|| fail(&diagnose_rootfs(&rootfs)));
+    linox_oci::Rootfs::parse(&rootfs).unwrap_or_else(|| fail(&diagnose_rootfs(&rootfs)));
     let digest: [u8; 32] = Sha256::digest(&rootfs).into();
     let file = OpenOptions::new()
         .create(true)

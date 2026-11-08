@@ -52,7 +52,7 @@ temporary, observable, and safely revocable.
 
 ## Evidence
 
-- `cargo test --package ginux-display-protocol` -> 6 tests passed, including
+- `cargo test --package linox-display-protocol` -> 6 tests passed, including
   concurrent lease contention, secure attention, timeout, owner death, stale
   handles, and cross-client input isolation.
 - `make test-controller-seat-leases` -> ring-3 contract probe and full boot test

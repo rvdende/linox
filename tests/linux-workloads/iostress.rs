@@ -1,4 +1,4 @@
-// File I/O stress test for Ginux: threads write, read back, rename, copy,
+// File I/O stress test for Linox: threads write, read back, rename, copy,
 // append to and positionally rewrite files of many sizes in a directory,
 // checking every byte and that no read writes past the buffer it was given
 // (guard bytes on both sides of each read buffer).

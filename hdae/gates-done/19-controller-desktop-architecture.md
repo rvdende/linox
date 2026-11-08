@@ -72,7 +72,7 @@ protocol boundary, state model, and initial non-goals before implementation.
 
 ## Decisions and limitations
 
-- Custom Ginux display protocol in ring 3; no host Wayland compositor.
+- Custom Linox display protocol in ring 3; no host Wayland compositor.
 - Linux domains use their own Wayland compositor and export one desktop surface.
 - Physical devices remain controller-owned; exclusive use is a revocable lease.
 

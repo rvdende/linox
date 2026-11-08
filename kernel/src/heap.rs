@@ -2,10 +2,10 @@
 //! size is only known at run time, such as tasks, kernel stacks and tables
 //! that grow.
 //!
-//! Requests of up to 2016 bytes come from slabs (`ginux_slab`): a frame per
+//! Requests of up to 2016 bytes come from slabs (`linox_slab`): a frame per
 //! slab, one size class each, as in Linux's slab allocators. A slab whose
 //! objects are all freed goes back to the frame allocator, but for a few
-//! kept for the next slab of any class (`ginux_slab::SPARE_EMPTY`), so a
+//! kept for the next slab of any class (`linox_slab::SPARE_EMPTY`), so a
 //! burst of kernel objects leaves no memory behind once it is over.
 //! Larger requests take a run of contiguous frames of their own and return
 //! it to the frame allocator when freed. All heap memory is reached through
@@ -19,7 +19,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use ginux_slab::{Frames, Slabs};
+use linox_slab::{Frames, Slabs};
 
 use crate::arch::x86_64::paging;
 use crate::memory::{self, FrameOwner};
@@ -27,7 +27,7 @@ use crate::sync::{IrqSpinLock, LockRank};
 
 const PAGE_SIZE: usize = 4096;
 
-const _: () = assert!(ginux_slab::FRAME_SIZE == PAGE_SIZE);
+const _: () = assert!(linox_slab::FRAME_SIZE == PAGE_SIZE);
 
 struct KernelHeap {
     slabs: IrqSpinLock<Slabs>,
@@ -59,7 +59,7 @@ static KERNEL_HEAP: KernelHeap = KernelHeap {
 
 /// The slab class serving `layout`, or `None` for a frame-run allocation.
 fn size_class(layout: Layout) -> Option<usize> {
-    ginux_slab::class_for(layout.size(), layout.align())
+    linox_slab::class_for(layout.size(), layout.align())
 }
 
 /// Slab frames from the frame allocator, through the direct map.
@@ -79,7 +79,7 @@ impl Frames for KernelFrames {
             .and_then(|physical| memory::live_frame_lease(FrameOwner::KERNEL, physical))
             .is_some_and(|lease| memory::scrub_and_release_frames(FrameOwner::KERNEL, &[lease]));
         if !released {
-            crate::kernel_fail("ginux: kernel heap released a slab it never took\r\n");
+            crate::kernel_fail("linox: kernel heap released a slab it never took\r\n");
         }
         HEAP_FRAMES.fetch_sub(1, Ordering::AcqRel);
         SLAB_FRAMES.fetch_sub(1, Ordering::AcqRel);
@@ -97,13 +97,13 @@ impl KernelHeap {
 
     fn free_object(&self, class: usize, object: *mut u8) {
         if paging::direct_map_physical(object as usize).is_none() {
-            crate::kernel_fail("ginux: kernel heap free of a pointer it never allocated\r\n");
+            crate::kernel_fail("linox: kernel heap free of a pointer it never allocated\r\n");
         }
         let mut slabs = self.slabs.lock();
         // SAFETY: as in allocate_object; the caller gives back an object of
         // this class that it no longer uses.
         if unsafe { slabs.free(class, object, &mut KernelFrames) }.is_err() {
-            crate::kernel_fail("ginux: kernel heap free of a pointer it never allocated\r\n");
+            crate::kernel_fail("linox: kernel heap free of a pointer it never allocated\r\n");
         }
     }
 }
@@ -137,7 +137,7 @@ fn free_pages(pointer: *mut u8, layout: Layout) {
             )
         });
     if !released {
-        crate::kernel_fail("ginux: kernel heap free of frames it never allocated\r\n");
+        crate::kernel_fail("linox: kernel heap free of frames it never allocated\r\n");
     }
     HEAP_FRAMES.fetch_sub(page_count(layout), Ordering::AcqRel);
 }

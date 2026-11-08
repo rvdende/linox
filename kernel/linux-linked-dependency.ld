@@ -1,4 +1,4 @@
-ENTRY(ginux_dependency_symbol)
+ENTRY(linox_dependency_symbol)
 
 PHDRS
 {

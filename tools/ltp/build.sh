@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the Linux Test Project (LTP) syscall tests as static musl binaries
-# for running inside a Ginux domain (tests/qemu/ltp.sh, docs/LTP.md).
+# for running inside a Linox domain (tests/qemu/ltp.sh, docs/LTP.md).
 #
 #   tools/ltp/build.sh [--clean | --force | --runner-only | --variant NAME]
 #
@@ -18,7 +18,7 @@
 #
 # --variant no-oom-protection builds a diagnostic copy in build/ltp-NAME
 # (tree in target/ltp-build-NAME) whose library skips the oom_score_adj
-# check that stops every new-API test on Ginux today; see
+# check that stops every new-API test on Linox today; see
 # tools/ltp/no-oom-protection.c. Run it with tests/qemu/ltp.sh --variant NAME.
 # --variant harness is a plain copy (build/ltp-harness) for trying changes
 # to these scripts without touching build/ltp, which other runs may use.
@@ -43,7 +43,7 @@ ltp_version=20260930
 ltp_sha256=b9837481134fa6eabce91c2fba57d96695f81360468f83e11e6982584ad4d29d
 ltp_url="https://github.com/linux-test-project/ltp/releases/download/${ltp_version}/ltp-full-${ltp_version}.tar.xz"
 # alpine:3.22, pinned by digest so the toolchain and musl do not drift.
-builder_image="${GINUX_LTP_BUILDER_IMAGE:-alpine@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f}"
+builder_image="${LINOX_LTP_BUILDER_IMAGE:-alpine@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f}"
 
 cache_dir="$repo_root/build/ltp-cache"
 tarball="$cache_dir/ltp-full-${ltp_version}.tar.xz"
@@ -126,7 +126,7 @@ docker run --rm \
     -e RUNNER_ONLY="$runner_only" \
     -e VARIANT="$variant" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-    -e JOBS="${GINUX_LTP_JOBS:-$(nproc)}" \
+    -e JOBS="${LINOX_LTP_JOBS:-$(nproc)}" \
     -v "$cache_dir:/cache:ro" \
     -v "$repo_root/tools/ltp:/scripts:ro" \
     -v "$work_dir:/work" \

@@ -1,4 +1,4 @@
-// Allocator and threading stress test for Ginux: threads allocate, grow,
+// Allocator and threading stress test for Linox: threads allocate, grow,
 // verify and free patterned buffers of many sizes, so malloc's mmap, munmap,
 // mremap and madvise traffic and timer preemption all run concurrently.
 // Any lost or zeroed page shows up as a pattern mismatch.

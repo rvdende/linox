@@ -2,7 +2,7 @@
 
 **Status:** Independently measured deterministic proof image published read-only during QEMU boot.
 
-Ginux uses a bounded ASCII `newc` CPIO profile as the first step toward a
+Linox uses a bounded ASCII `newc` CPIO profile as the first step toward a
 read-only system-container root. The manifest tool generates the proof archive
 deterministically, records its exact size and SHA-256 digest in the signed boot
 manifest, and embeds the bytes in the EFI image. Handoff v4 carries the range;
@@ -24,15 +24,15 @@ executable regular file named `init`.
 The generated proof contains `bin`, `dev`, `etc`, `proc`, `sys`, `tmp`, `var`,
 `var/lib`, `var/lib/state`, `var/lib/version`, the native `init` marker,
 `etc/hostname`, `etc/os-release`, `etc/motd`, the validated
-authenticated `etc/ginux-system-profile` Linux ABI profile and the build-produced
+authenticated `etc/linox-system-profile` Linux ABI profile and the build-produced
 Linux ELF artifacts
 under internal `linux/*` names: the main, interpreter, primary DSO, and auxiliary
 DSO. Two distinct static exec targets are published at their Linux-visible
 measured-root paths `bin/signal-probe` and `bin/exec-second`. Both use separately
 bounded two-page RX layouts; the first is dedicated to measured signal-runtime
 behavior, while the second retains an independent address layout. The hostname is immutable mode `0555` with exact contents
-`ginux\n`; `os-release` is immutable mode `0555` with exact contents
-`NAME=Ginux\nID=ginux\n`; `motd` contains `Welcome to Ginux\n`; and the nested
+`linox\n`; `os-release` is immutable mode `0555` with exact contents
+`NAME=Linox\nID=linox\n`; `motd` contains `Welcome to Linox\n`; and the nested
 state file contains `ready\n` and the version marker contains `0\n`. The archive
 also contains a separately linked static candidate at `sbin/init`. Its
 four-page RX and one-page RW plan is validated from the measured root. A
@@ -111,7 +111,7 @@ bytes to the authenticated archive. The PID 1 proof enumerates both synthetic
 directories, reads the status record, and verifies the immutable root mount
 and user-namespace records.
 The measured `tmp` node similarly anchors a generation-safe, quota-bound RAM
-store. Its Linux view admits one 64-byte `ginux-ready` file created and
+store. Its Linux view admits one 64-byte `linox-ready` file created and
 unlinked at runtime. Backing bytes occupy dynamically allocated, kernel-owned
 pages rather than inline metadata. The contract also proves multiple named
 objects, cross-page I/O, hidden staging, atomic publish, page-quota rejection,

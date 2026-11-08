@@ -1,4 +1,4 @@
-//! Each Linux process's memory areas (`ginux-memory-areas`), kept as its
+//! Each Linux process's memory areas (`linox-memory-areas`), kept as its
 //! mappings change: mmap, munmap, mprotect and mremap record them, a fork
 //! copies the parent's, and exec and exit drop them.
 //!
@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-pub(crate) use ginux_memory_areas::{
+pub(crate) use linox_memory_areas::{
     Area, Areas, Backing, Policy, Protection, HUGE_PAGE_SIZE, PAGE_SIZE,
 };
 
@@ -424,7 +424,7 @@ pub(crate) fn huge_reserved_pages(instance: usize) -> u64 {
         .filter(|process| process.instance == instance)
         .map(|process| process.areas.huge_reserved_bytes())
         .sum::<u64>()
-        .div_ceil(ginux_memory_areas::HUGE_PAGE_SIZE)
+        .div_ceil(linox_memory_areas::HUGE_PAGE_SIZE)
 }
 
 /// Gives the areas of `pid` in `[start, end)` memory policy `policy`

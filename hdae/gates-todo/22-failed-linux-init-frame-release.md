@@ -54,7 +54,7 @@ successful process exit.
   runtime returned `valid=false`.
 - `make check` -> passed, including architecture checks, warning-denying
   clippy, formatting, and unit tests.
-- `make test` on QEMU 10.1.2/TCG -> `GINUX_KERNEL_OK`; `Boot test passed.`
+- `make test` on QEMU 10.1.2/TCG -> `LINOX_KERNEL_OK`; `Boot test passed.`
 - Delivery: [PR #37](https://github.com/gmkurtzer/ginux/pull/37).
 - Source response: [issue #26 comment](https://github.com/gmkurtzer/ginux/issues/26#issuecomment-6561988902).
 - Reciprocal response: [PR #37 comment](https://github.com/gmkurtzer/ginux/pull/37#issuecomment-6561988454).

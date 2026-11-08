@@ -11,7 +11,7 @@ metadata="$output_directory/image.tsv"
 source "$profile"
 
 reference="$ROCKY_IMAGE_REPOSITORY@$ROCKY_IMAGE_DIGEST"
-container="ginux-rocky-image-$$"
+container="linox-rocky-image-$$"
 
 fail() {
     echo "rocky-image: $*" >&2
@@ -52,7 +52,7 @@ write_metadata() {
     local rootfs_digest
     rootfs_digest=$(hash_file "$rootfs")
     {
-        printf 'GINUX_ROCKY_IMAGE_V0\n'
+        printf 'LINOX_ROCKY_IMAGE_V0\n'
         printf 'source\t%s:%s\n' "$ROCKY_IMAGE_REPOSITORY" "$ROCKY_IMAGE_TAG"
         printf 'manifest\t%s\n' "$ROCKY_IMAGE_DIGEST"
         printf 'platform\t%s\n' "$ROCKY_IMAGE_PLATFORM"

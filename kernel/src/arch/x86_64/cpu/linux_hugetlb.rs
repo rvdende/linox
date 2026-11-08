@@ -14,7 +14,7 @@
 
 use super::*;
 
-/// The huge page size, 2 MiB, the only one Ginux has.
+/// The huge page size, 2 MiB, the only one Linox has.
 pub(super) const LINUX_HUGE_PAGE_SIZE: u64 = crate::linux_areas::HUGE_PAGE_SIZE;
 /// log2 of the huge page size, as MAP_HUGE_*, MFD_HUGE_* and SHM_HUGE_*
 /// name a size.
@@ -37,7 +37,7 @@ fn linux_huge_pages_for(length: u64) -> u64 {
 }
 
 /// Whether a huge page size encoded in `flags` (MAP_HUGE_*, MFD_HUGE_*,
-/// SHM_HUGE_*) is one Ginux has: the default, or 2 MiB.
+/// SHM_HUGE_*) is one Linox has: the default, or 2 MiB.
 fn linux_huge_size_supported(flags: u64) -> bool {
     matches!(
         (flags >> LINUX_HUGE_SIZE_SHIFT) & LINUX_HUGE_SIZE_MASK,
@@ -150,7 +150,7 @@ pub(super) struct LinuxHugeMapping {
 /// and rewrites `arguments` (address, length, protection, flags, fd,
 /// offset) into the small-page mapping that backs it, 2 MiB aligned and
 /// rounded up to whole huge pages; None for any other mapping. As Linux:
-/// MAP_HUGETLB of a file that is not of huge pages, a huge page size Ginux
+/// MAP_HUGETLB of a file that is not of huge pages, a huge page size Linox
 /// lacks, or a fixed address or file offset off a huge page boundary is
 /// EINVAL; a mapping the pool cannot reserve is ENOMEM.
 pub(super) fn linux_huge_mmap_arguments(
@@ -267,7 +267,7 @@ pub(super) fn linux_huge_split(address: u64, length: u64) -> bool {
 
 /// memfd_create's huge page flags, MFD_HUGETLB with a size: Ok(true) for a
 /// memfd of huge pages; EINVAL for unknown flags, ENODEV for a huge page
-/// size Ginux lacks (memfd_create04).
+/// size Linox lacks (memfd_create04).
 pub(super) fn linux_memfd_huge_flags(flags: u64, known: u64) -> Result<bool, u64> {
     if flags & LINUX_MFD_HUGETLB == 0 {
         return if flags & !known == 0 {
@@ -291,7 +291,7 @@ pub(super) const LINUX_SHM_HUGE_FLAGS: u64 =
 
 /// Whether the caller may make a SHM_HUGETLB segment of `size` bytes and
 /// the pool can give it its pages, as Linux's hugetlb_file_setup: EINVAL
-/// for a huge page size Ginux lacks, EPERM for a caller without
+/// for a huge page size Linox lacks, EPERM for a caller without
 /// CAP_IPC_LOCK outside vm.hugetlb_shm_group whose RLIMIT_MEMLOCK does not
 /// cover it, ENOMEM when the pool is short.
 pub(super) fn linux_shm_huge_allowed(size: u64, flags: u64) -> Result<(), u64> {

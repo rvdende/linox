@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Collect the hardware facts needed to bring Ginux up on a physical machine.
+# Collect the hardware facts needed to bring Linox up on a physical machine.
 #
 # Run on the target computer under a Linux distribution (e.g. Ubuntu) as root:
 #   sudo tools/hardware/probe.sh
-# The script only reads system state. It writes ginux-probe-<host>-<date>.tar.gz
+# The script only reads system state. It writes linox-probe-<host>-<date>.tar.gz
 # in the current directory; copy that archive back to the development machine.
 
 set -uo pipefail
@@ -14,7 +14,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 stamp="$(date +%Y%m%d-%H%M%S)"
-name="ginux-probe-$(hostname -s)-$stamp"
+name="linox-probe-$(hostname -s)-$stamp"
 work="$(mktemp -d)"
 out="$work/$name"
 mkdir -p "$out/acpi"

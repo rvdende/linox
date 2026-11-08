@@ -6,7 +6,7 @@
 
 ## 1. Vision
 
-Build a new, Rust-first operating system that boots directly via UEFI and acts as a small, immutable, capability-secure container host for AI/HPC servers. One authenticated `GINUX.EFI` contains the kernel, boot-required modules, a statically linked Linux-ABI controller payload, recovery support, and a component catalog. The kernel launches the controller as the first ring-3 process; that controller starts Linux-compatible system containers and the few optional native services that remain outside the kernel. There is no conventional host distribution or host root filesystem.
+Build a new, Rust-first operating system that boots directly via UEFI and acts as a small, immutable, capability-secure container host for AI/HPC servers. One authenticated `LINOX.EFI` contains the kernel, boot-required modules, a statically linked Linux-ABI controller payload, recovery support, and a component catalog. The kernel launches the controller as the first ring-3 process; that controller starts Linux-compatible system containers and the few optional native services that remain outside the kernel. There is no conventional host distribution or host root filesystem.
 
 The product acceptance benchmark is an unmodified Rocky Linux 10 x86-64 userspace booting `/sbin/init` as PID 1 inside a system container and behaving like a normal independently networked system. Smaller fixtures may prove individual interfaces, but they are test scaffolding rather than the product environment. Linux compatibility is a container interface; the native host is not a Linux distribution.
 
@@ -83,7 +83,7 @@ The kernel creates exactly one initial userspace authority: the native control-p
 
 ### Embedded Linux-ABI controller
 
-The controller is packaged inside `GINUX.EFI` but executes in ring 3 as a statically linked Linux-ABI userspace process and the only initial holder of boot-authorized host capabilities. It uses ordinary Linux `read`, `write`, and `exit` syscalls. Ginux-specific domain and device management is exposed through a versioned device/ioctl UAPI rather than a private syscall convention. Its authenticated local configuration declares which domains start automatically, their personality, system image, resource grants, network attachments, and init path (normally `/sbin/init`). It:
+The controller is packaged inside `LINOX.EFI` but executes in ring 3 as a statically linked Linux-ABI userspace process and the only initial holder of boot-authorized host capabilities. It uses ordinary Linux `read`, `write`, and `exit` syscalls. Linox-specific domain and device management is exposed through a versioned device/ioctl UAPI rather than a private syscall convention. Its authenticated local configuration declares which domains start automatically, their personality, system image, resource grants, network attachments, and init path (normally `/sbin/init`). It:
 
 - Starts, stops, inspects, and restarts native services and workload domains.
 - Creates domain process trees and assigns CPU, memory, storage, network, and device resources.
@@ -162,13 +162,13 @@ The native host does not require a traditional distribution root filesystem. It 
 
 The acceptance goal is a repository-pinned Rocky Linux 10 x86-64 userspace reaching a systemd-managed console. Required behavior includes x86-64 ELF loading, dynamic linking, signals, futexes, clocks, process lifecycle, mounts, sockets, cgroups v2, console devices, and the `/proc`, `/sys`, `/dev`, credential, and isolation behavior systemd and Rocky exercise. Every system container receives independent PID, mount, user, IPC, cgroup, time, hostname, device, and network views; UID 0 remains local to the container. Unsupported interfaces must fail predictably rather than silently provide weaker semantics. Smaller images remain useful for incremental tests but do not replace the Rocky acceptance gate.
 
-Linux ABI compatibility is libc-neutral. Ginux never selects a musl, glibc, or other libc mode: it resolves the configured init inside the container root, reads the executable's ELF `PT_INTERP`, and admits that declared interpreter from the same immutable root under the normal ELF and resource policy.
+Linux ABI compatibility is libc-neutral. Linox never selects a musl, glibc, or other libc mode: it resolves the configured init inside the container root, reads the executable's ELF `PT_INTERP`, and admits that declared interpreter from the same immutable root under the normal ELF and resource policy.
 
 ## 5. ABI and binary component contracts
 
 ### 5.1 Three distinct interfaces
 
-1. **Linux userspace ABI:** Syscalls and observable Linux behavior required by the controller, the pinned Rocky Linux 10 profile, and later distribution/application profiles. Ginux-specific controller operations use a versioned Linux device/ioctl UAPI.
+1. **Linux userspace ABI:** Syscalls and observable Linux behavior required by the controller, the pinned Rocky Linux 10 profile, and later distribution/application profiles. Linox-specific controller operations use a versioned Linux device/ioctl UAPI.
 2. **Native service ABI:** Stable, language-neutral binary contract for narrowly scoped isolated services; it is not a second general-purpose application syscall ABI.
 3. **Kernel/driver and service ABI:** A stable native kABI for authenticated modules plus IPC, capabilities, shared-memory, resource, lifecycle, failure, and device contracts for isolated components.
 
@@ -186,11 +186,11 @@ Linux ABI compatibility is libc-neutral. Ginux never selects a musl, glibc, or o
 
 ### 5.3 Linux `.ko` compatibility
 
-Linux `.ko` files depend on Linux-specific exported symbols, data layouts, relocations, build configuration, versioning, and internal semantics. Unmodified Linux `.ko` loading is not a proof-of-concept acceptance criterion. Ginux must nevertheless preserve an architectural path to a bounded compatibility layer for selected, authenticated `.ko` files. Near-term drivers may be implemented as native kABI modules, source-adapted to that kABI, or placed in isolated userspace when they are nonessential and recoverable. No design decision may make future `.ko` investigation impossible without a recorded ADR.
+Linux `.ko` files depend on Linux-specific exported symbols, data layouts, relocations, build configuration, versioning, and internal semantics. Unmodified Linux `.ko` loading is not a proof-of-concept acceptance criterion. Linox must nevertheless preserve an architectural path to a bounded compatibility layer for selected, authenticated `.ko` files. Near-term drivers may be implemented as native kABI modules, source-adapted to that kABI, or placed in isolated userspace when they are nonessential and recoverable. No design decision may make future `.ko` investigation impossible without a recorded ADR.
 
 ### 5.4 NVIDIA priority
 
-Early feasibility must establish whether NVIDIA's available open kernel-module sources can be adapted as a native module, split across kernel and an isolated driver domain, or supported through a later compatibility layer while retaining matching, unmodified userspace CUDA components. Evaluate firmware dependencies, memory management, GPU faults, unified and pinned memory, MMU/IOMMU interactions, interrupts, command submission, peer memory, licensing, and supportability. The NVIDIA userspace and driver components may update together; the stable Ginux kABI must allow the kernel to update independently within its published compatibility contract. An **actual CUDA workload on a selected GPU** is the hardware go/no-go milestone. Do not claim compatibility before it is demonstrated.
+Early feasibility must establish whether NVIDIA's available open kernel-module sources can be adapted as a native module, split across kernel and an isolated driver domain, or supported through a later compatibility layer while retaining matching, unmodified userspace CUDA components. Evaluate firmware dependencies, memory management, GPU faults, unified and pinned memory, MMU/IOMMU interactions, interrupts, command submission, peer memory, licensing, and supportability. The NVIDIA userspace and driver components may update together; the stable Linox kABI must allow the kernel to update independently within its published compatibility contract. An **actual CUDA workload on a selected GPU** is the hardware go/no-go milestone. Do not claim compatibility before it is demonstrated.
 
 ## 6. Security and isolation
 
@@ -216,7 +216,7 @@ Build one UEFI PE/COFF executable with a minimal Rust/assembly EFI entry path an
 
 ### 7.2 Boot sequence
 
-1. UEFI loads and authenticates `GINUX.EFI`.
+1. UEFI loads and authenticates `LINOX.EFI`.
 2. Boot code validates the embedded component catalog and independently authenticated local configuration.
 3. The kernel initializes memory, scheduling, interrupts, IPC, boot storage/filesystems, networking, and required IOMMU/device support from built-in code and authenticated modules.
 4. Kernel/module executable integrity, immutable data, and the boot authority envelope are sealed.
@@ -249,7 +249,7 @@ edit config at runtime
 
 ### 7.4 Trust choices
 
-Support deployer-managed public-key verification and optional TPM-backed key protection, measurements, sealed secrets, and anti-rollback. TPM is not mandatory. The EFI image is a unified authenticated artifact, while independently signed configuration and container images may be updated without rebuilding it. Separate signing identities and delegation policies for firmware, Ginux images, Linux container images, and site configuration.
+Support deployer-managed public-key verification and optional TPM-backed key protection, measurements, sealed secrets, and anti-rollback. TPM is not mandatory. The EFI image is a unified authenticated artifact, while independently signed configuration and container images may be updated without rebuilding it. Separate signing identities and delegation policies for firmware, Linox images, Linux container images, and site configuration.
 
 ## 8. Cryptography and FIPS boundary
 
@@ -303,7 +303,7 @@ Work proceeds through hard verification checkpoints. Complete the implementation
 | Checkpoint | Demonstrable result | Human verification boundary |
 |---|---|---|
 | C0: Architecture alignment | This document, ADRs, and roadmap consistently describe the unified image, embedded ring-3 controller, kernel/module device boundary, Rocky benchmark, and future `.ko` path | Review documentation and signed commit |
-| C1: Interactive unified boot | One `GINUX.EFI` boots on the Mac QEMU profile and presents controller diagnostics, including measured-root `ls` and live-domain `ps` | User boots and interacts; no container yet |
+| C1: Interactive unified boot | One `LINOX.EFI` boots on the Mac QEMU profile and presents controller diagnostics, including measured-root `ls` and live-domain `ps` | User boots and interacts; no container yet |
 | C2: Runtime domain lifecycle | No workload domain exists implicitly; the resident host-PID-1 controller creates and configures one named Linux-personality domain backed by a boot-local minimal fixture, then starts, observes, stops, and restarts it without relaunching itself (**implemented; awaiting human verification**) | User verifies creation, personality/image configuration, lifecycle, and failure recovery |
 | C3: Alpine shell container | Control networking automatically pulls a missing Alpine x86-64 OCI image into the verified persistent layer cache; explicit static/DHCP domain networking is configured; `/bin/sh` executes with an attachable console and retained boot log | User interacts with the unmodified Alpine BusyBox shell, detaches back to the controller with `Ctrl-]`, reattaches, reboots, and verifies the next start uses the cache without a registry transfer |
 | C4: Operational Rocky | Required mounts, devices, processes, credentials, cgroups, clocks, and console behavior work normally | User interacts with a functioning Rocky system |

@@ -11,7 +11,7 @@ use core::{
     sync::atomic::{compiler_fence, AtomicUsize, Ordering},
 };
 
-use ginux_native_abi::{
+use linox_native_abi::{
     native_control_abi_is_compatible, native_control_abi_supports_packet_handoff,
     NativeControlDescriptorV4, NativeNetworkBootV0, NativeNetworkBootV1, NativeNetworkBootV2,
     NativeNetworkBootV3, NativeNetworkBootV4, NativeNetworkBootV5, NativeNetworkBootV6,
@@ -85,7 +85,7 @@ fn reset_registry_allocator() {
     REGISTRY_HEAP.next.store(0, Ordering::Release);
 }
 
-static SERVICE_IDENTITY: &[u8] = b"GINUX_NETWORK_SERVICE_V0";
+static SERVICE_IDENTITY: &[u8] = b"LINOX_NETWORK_SERVICE_V0";
 
 const DMA_PAGE_SIZE: usize = 4096;
 const QUEUE_SIZE: u16 = 8;
@@ -139,7 +139,7 @@ global_asm!(
     .global _start
 _start:
     mov rdi, rbx
-    call ginux_network_service_main
+    call linox_network_service_main
     int3
 "#
 );
@@ -150,10 +150,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[no_mangle]
-extern "C" fn ginux_network_service_main(info: *const NativeNetworkBootV0) -> ! {
+extern "C" fn linox_network_service_main(info: *const NativeNetworkBootV0) -> ! {
     let identity = unsafe { core::ptr::read_volatile(&SERVICE_IDENTITY) };
     let discovery = discover_control_abi();
-    if identity != b"GINUX_NETWORK_SERVICE_V0"
+    if identity != b"LINOX_NETWORK_SERVICE_V0"
         || !native_control_abi_is_compatible(discovery)
         || !discover_control_descriptor().is_compatible()
     {

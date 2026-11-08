@@ -58,9 +58,9 @@ pub(super) struct VirtioNet {
     tx_used: Cell<u16>,
     loopback: RefCell<VecDeque<Vec<u8>>>,
     /// The TUN and TAP devices, whose traffic is a part of the interface's
-    /// (`ginux_tun`): what the stack sends them waits for their readers
+    /// (`linox_tun`): what the stack sends them waits for their readers
     /// instead of going to the wire.
-    pub(super) tun: RefCell<ginux_tun::Tun>,
+    pub(super) tun: RefCell<linox_tun::Tun>,
 }
 
 impl VirtioNet {
@@ -113,7 +113,7 @@ impl VirtioNet {
             tx_avail: Cell::new(0),
             tx_used: Cell::new(0),
             loopback: RefCell::new(VecDeque::new()),
-            tun: RefCell::new(ginux_tun::Tun::new()),
+            tun: RefCell::new(linox_tun::Tun::new()),
         };
         device.post_receive();
         Some(device)
@@ -350,10 +350,10 @@ impl TxToken for TransmitToken<'_> {
         let interface = <[u8; 6]>::try_from(&frame[6..12]).unwrap_or([0; 6]);
         let egress = device.tun.borrow_mut().egress(frame, interface);
         match egress {
-            ginux_tun::Egress::Taken => {}
-            ginux_tun::Egress::Local => device.loop_back(frame),
-            ginux_tun::Egress::Answer(answer) => device.loop_back(&answer),
-            ginux_tun::Egress::Pass => {
+            linox_tun::Egress::Taken => {}
+            linox_tun::Egress::Local => device.loop_back(frame),
+            linox_tun::Egress::Answer(answer) => device.loop_back(&answer),
+            linox_tun::Egress::Pass => {
                 if let Some(advert) = loopback_neighbor_advert(frame) {
                     device.loop_back(&advert);
                 } else if frame_loops_back(frame, device.local_address) {

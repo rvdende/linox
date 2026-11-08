@@ -22,7 +22,7 @@ const TYPE_MASK: u32 = 0o170000;
 const DIRECTORY: u32 = 0o040000;
 const REGULAR: u32 = 0o100000;
 const SYMLINK: u32 = 0o120000;
-const SYSTEM_PROFILE_HEADER: &[u8] = b"GINUX_SYSTEM_PROFILE_V0\n";
+const SYSTEM_PROFILE_HEADER: &[u8] = b"LINOX_SYSTEM_PROFILE_V0\n";
 
 struct PublishedRootOwner {
     published: AtomicBool,
@@ -237,7 +237,7 @@ pub(crate) fn verify_pinned_image(bytes: &[u8]) -> bool {
     };
     archive.entry_count() == 27
         && archive.find(b"init").is_some_and(|entry| {
-            entry.mode == 0o100555 && entry.data == b"GINUX_INITRAMFS_INIT_V0\n"
+            entry.mode == 0o100555 && entry.data == b"LINOX_INITRAMFS_INIT_V0\n"
         })
         && [
             b"bin" as &[u8],
@@ -257,15 +257,15 @@ pub(crate) fn verify_pinned_image(bytes: &[u8]) -> bool {
         })
         && archive
             .find(b"etc/hostname")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"linox\n")
         && archive
             .find(b"etc/os-release")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"NAME=Ginux\nID=ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"NAME=Linox\nID=linox\n")
         && archive
             .find(b"etc/motd")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"Welcome to Ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"Welcome to Linox\n")
         && archive
-            .find(b"etc/ginux-system-profile")
+            .find(b"etc/linox-system-profile")
             .is_some_and(|entry| entry.mode == 0o100444 && valid_system_profile(entry.data))
         && archive
             .find(b"var/lib")
@@ -280,13 +280,13 @@ pub(crate) fn verify_pinned_image(bytes: &[u8]) -> bool {
             .find(b"linux/init")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && archive
-            .find(b"linux/ld-ginux.so")
+            .find(b"linux/ld-linox.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && archive
-            .find(b"linux/libginux.so")
+            .find(b"linux/liblinox.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && archive
-            .find(b"linux/libginux-aux.so")
+            .find(b"linux/liblinox-aux.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && archive
             .find(b"bin/exec-second")
@@ -826,7 +826,7 @@ pub(crate) fn verify_read_only_index(source: &[u8]) -> bool {
     let valid = root.node_count == 27
         && init.is_some_and(|entry| {
             entry.mode == 0o100555
-                && entry.data == b"GINUX_INITRAMFS_INIT_V0\n"
+                && entry.data == b"LINOX_INITRAMFS_INIT_V0\n"
                 && base.is_some_and(|start| {
                     let address = entry.data.as_ptr() as usize;
                     (start..start + PAGE_SIZE).contains(&address)
@@ -849,15 +849,15 @@ pub(crate) fn verify_read_only_index(source: &[u8]) -> bool {
         })
         && root
             .lookup(b"etc/hostname")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"linox\n")
         && root
             .lookup(b"etc/os-release")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"NAME=Ginux\nID=ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"NAME=Linox\nID=linox\n")
         && root
             .lookup(b"etc/motd")
-            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"Welcome to Ginux\n")
+            .is_some_and(|entry| entry.mode == 0o100555 && entry.data == b"Welcome to Linox\n")
         && root
-            .lookup(b"etc/ginux-system-profile")
+            .lookup(b"etc/linox-system-profile")
             .is_some_and(|entry| entry.mode == 0o100444 && valid_system_profile(entry.data))
         && root
             .lookup(b"var/lib")
@@ -872,13 +872,13 @@ pub(crate) fn verify_read_only_index(source: &[u8]) -> bool {
             .lookup(b"linux/init")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && root
-            .lookup(b"linux/ld-ginux.so")
+            .lookup(b"linux/ld-linox.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && root
-            .lookup(b"linux/libginux.so")
+            .lookup(b"linux/liblinox.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && root
-            .lookup(b"linux/libginux-aux.so")
+            .lookup(b"linux/liblinox-aux.so")
             .is_some_and(|entry| entry.mode == 0o100555 && !entry.data.is_empty())
         && root
             .lookup(b"bin/exec-second")

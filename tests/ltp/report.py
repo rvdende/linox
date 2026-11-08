@@ -5,7 +5,7 @@
 
 Reads target/ltp-results.txt and the per-test logs in target/ltp/logs and
 writes target/ltp-report.txt: results by syscall area (the LTP source
-directory), by normalized first failure message, by errno, by Ginux kernel
+directory), by normalized first failure message, by errno, by Linox kernel
 diagnostic, and the crashes and hangs. With --variant, the files of that
 run (target/ltp-results-NAME.txt, ...) are used instead.
 """
@@ -92,7 +92,7 @@ def main():
         lines = text.splitlines()
         failures = [line for line in lines if FAILURE_LINE.search(line)]
         for line in lines:
-            if line.startswith("ginux: "):
+            if line.startswith("linox: "):
                 kernel[kernel_message(line)].add(name)
         if result == "CRASH":
             crashes.append((name, area, detail))
@@ -139,7 +139,7 @@ def main():
     for errno, names in sorted(errnos.items(), key=lambda item: (-len(item[1]), item[0])):
         out.append(f"{len(names):5}  {errno:12} e.g. {' '.join(names[:10])}")
     out.append("")
-    out.append("== Ginux kernel diagnostics in non-passing tests (tests per message) ==")
+    out.append("== Linox kernel diagnostics in non-passing tests (tests per message) ==")
     for message, names in sorted(kernel.items(), key=lambda item: (-len(item[1]), item[0]))[:60]:
         out.append(f"{len(names):5}  {message}")
         out.append(f"       e.g. {' '.join(sorted(names)[:8])}")

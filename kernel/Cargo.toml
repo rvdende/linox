@@ -1,5 +1,5 @@
 [package]
-name = "ginux-kernel"
+name = "linox-kernel"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -14,33 +14,33 @@ linux-boot-profile = []
 path = "src/lib.rs"
 
 [dependencies]
-ginux-credentials = { path = "../crates/credentials" }
-ginux-keyrings = { path = "../crates/keyrings" }
-ginux-landlock = { path = "../crates/landlock" }
-ginux-rtnetlink = { path = "../crates/rtnetlink" }
-ginux-udplite = { path = "../crates/udplite" }
-ginux-tun = { path = "../crates/tun" }
-ginux-ktls = { path = "../crates/ktls" }
-ginux-tty = { path = "../crates/tty" }
-ginux-image-store = { path = "../crates/image-store" }
-ginux-memory-areas = { path = "../crates/memory-areas" }
-ginux-deadline-heap = { path = "../crates/deadline-heap" }
-ginux-slab = { path = "../crates/slab" }
-ginux-cgroup = { path = "../crates/cgroup" }
-ginux-ext2 = { path = "../crates/ext2" }
-ginux-seccomp = { path = "../crates/seccomp" }
-ginux-kernel-policy = { path = "../crates/kernel-policy" }
-ginux-oci = { path = "../crates/oci" }
-ginux-oci-cache = { path = "../crates/oci-cache" }
+linox-credentials = { path = "../crates/credentials" }
+linox-keyrings = { path = "../crates/keyrings" }
+linox-landlock = { path = "../crates/landlock" }
+linox-rtnetlink = { path = "../crates/rtnetlink" }
+linox-udplite = { path = "../crates/udplite" }
+linox-tun = { path = "../crates/tun" }
+linox-ktls = { path = "../crates/ktls" }
+linox-tty = { path = "../crates/tty" }
+linox-image-store = { path = "../crates/image-store" }
+linox-memory-areas = { path = "../crates/memory-areas" }
+linox-deadline-heap = { path = "../crates/deadline-heap" }
+linox-slab = { path = "../crates/slab" }
+linox-cgroup = { path = "../crates/cgroup" }
+linox-ext2 = { path = "../crates/ext2" }
+linox-seccomp = { path = "../crates/seccomp" }
+linox-kernel-policy = { path = "../crates/kernel-policy" }
+linox-oci = { path = "../crates/oci" }
+linox-oci-cache = { path = "../crates/oci-cache" }
 ed25519-dalek = { version = "=3.0.0", default-features = false }
 font8x8 = { version = "=0.3.1", default-features = false }
-ginux-native-abi = { path = "../crates/native-abi" }
-ginux-usb-audio = { path = "../crates/usb-audio" }
-ginux-usb-hid = { path = "../crates/usb-hid" }
-ginux-virtio-gpu = { path = "../crates/virtio-gpu" }
-ginux-drm = { path = "../crates/drm" }
-ginux-volume-format = { path = "../crates/volume-format" }
-ginux-volume-service = { path = "../crates/volume-service" }
+linox-native-abi = { path = "../crates/native-abi" }
+linox-usb-audio = { path = "../crates/usb-audio" }
+linox-usb-hid = { path = "../crates/usb-hid" }
+linox-virtio-gpu = { path = "../crates/virtio-gpu" }
+linox-drm = { path = "../crates/drm" }
+linox-volume-format = { path = "../crates/volume-format" }
+linox-volume-service = { path = "../crates/volume-service" }
 miniz_oxide = { version = "=0.9.1", default-features = false }
 smoltcp = { version = "=0.14.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp", "socket-raw", "auto-icmp-echo-reply", "iface-max-addr-count-8"] }
 

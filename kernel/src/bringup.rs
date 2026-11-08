@@ -28,9 +28,9 @@ const MAX_LISTED_PARTITIONS: u32 = 128;
 
 /// Reports the platform and runs the hardware drivers, then halts.
 pub(crate) fn run(boot_info: &BootInfo) -> ! {
-    say!("\nginux: QEMU reference devices not found; entering hardware bring-up mode\n");
+    say!("\nlinox: QEMU reference devices not found; entering hardware bring-up mode\n");
     say!(
-        "ginux: serial console {}\n",
+        "linox: serial console {}\n",
         if crate::SERIAL_PRESENT.load(core::sync::atomic::Ordering::Acquire) {
             "present"
         } else {
@@ -40,7 +40,7 @@ pub(crate) fn run(boot_info: &BootInfo) -> ! {
     let framebuffer = &boot_info.framebuffer;
     if crate::framebuffer::mapped_length(framebuffer).is_some() {
         say!(
-            "ginux: framebuffer {}x{} stride {} at {:#x}\n",
+            "linox: framebuffer {}x{} stride {} at {:#x}\n",
             framebuffer.width,
             framebuffer.height,
             framebuffer.stride,
@@ -62,7 +62,7 @@ pub(crate) fn run(boot_info: &BootInfo) -> ! {
         .all(|controller| controller.keyboards().next().is_none())
         && !crate::SERIAL_PRESENT.load(core::sync::atomic::Ordering::Acquire)
     {
-        say!("ginux: no keyboard or serial input; halted\n");
+        say!("linox: no keyboard or serial input; halted\n");
         halt();
     }
     shell(boot_info, keyboards)
@@ -91,7 +91,7 @@ fn functions(
 }
 
 fn report_pci() {
-    say!("ginux: PCI devices:\n");
+    say!("linox: PCI devices:\n");
     pci::for_each_function(|device| {
         say!(
             "  {:02x}:{:02x}.{} {:04x}:{:04x} {:02x}{:02x}{:02x} {}\n",
@@ -117,7 +117,7 @@ fn report_network() {
         }
         let address = device.address;
         say!(
-            "ginux: network {:02x}:{:02x}.{}: ",
+            "linox: network {:02x}:{:02x}.{}: ",
             address.bus,
             address.device,
             address.function
@@ -177,11 +177,11 @@ fn report_network() {
         match unsafe { realtek::Controller::open(address) } {
             Some(mut nic) => {
                 if nic.link_speed().is_none() {
-                    say!("ginux:   link did not return after reset\n");
+                    say!("linox:   link did not return after reset\n");
                 }
                 report_dhcp(&mut nic, transaction);
             }
-            None => say!("ginux:   reset failed\n"),
+            None => say!("linox:   reset failed\n"),
         }
     });
 }
@@ -194,7 +194,7 @@ fn report_audio() {
         }
         let address = device.address;
         say!(
-            "ginux: audio {:02x}:{:02x}.{}: {:04x}:{:04x} HD Audio",
+            "linox: audio {:02x}:{:02x}.{}: {:04x}:{:04x} HD Audio",
             address.bus,
             address.device,
             address.function,
@@ -215,12 +215,12 @@ fn report_audio() {
             let codec = match codec {
                 Ok(codec) => codec,
                 Err(error) => {
-                    say!("ginux:   codec: {:?}\n", error);
+                    say!("linox:   codec: {:?}\n", error);
                     continue;
                 }
             };
             say!(
-                "ginux:   codec {}: {:04x}:{:04x}, {} output converters, outputs:",
+                "linox:   codec {}: {:04x}:{:04x}, {} output converters, outputs:",
                 codec.address,
                 codec.vendor,
                 codec.device,
@@ -260,11 +260,11 @@ fn play_test_tones() {
         for codec in codecs.iter().flatten() {
             match controller.play_tone(codec, 1000) {
                 Ok(advanced) => say!(
-                    "ginux: codec {} played a 440 Hz tone; DMA moved {} bytes\n",
+                    "linox: codec {} played a 440 Hz tone; DMA moved {} bytes\n",
                     codec.address,
                     advanced
                 ),
-                Err(error) => say!("ginux: codec {}: {:?}\n", codec.address, error),
+                Err(error) => say!("linox: codec {}: {:?}\n", codec.address, error),
             }
         }
     });
@@ -276,7 +276,7 @@ fn report_dhcp(nic: &mut impl Nic, transaction: u32) {
     match net::dhcp_discover(nic, transaction) {
         Some(offer) => {
             say!(
-                "ginux:   DHCP offer {} from {}",
+                "linox:   DHCP offer {} from {}",
                 net::Ipv4(offer.address),
                 net::Ipv4(offer.server)
             );
@@ -291,7 +291,7 @@ fn report_dhcp(nic: &mut impl Nic, transaction: u32) {
             }
             say!("\n");
         }
-        None => say!("ginux:   no DHCP offer\n"),
+        None => say!("linox:   no DHCP offer\n"),
     }
 }
 
@@ -309,7 +309,7 @@ fn report_disks(remapping: &mut Remapping) {
             Ok(opened) => opened,
             Err(error) => {
                 say!(
-                    "ginux: AHCI {:02x}:{:02x}.{}: {:?}\n",
+                    "linox: AHCI {:02x}:{:02x}.{}: {:?}\n",
                     function.bus,
                     function.device,
                     function.function,
@@ -319,7 +319,7 @@ fn report_disks(remapping: &mut Remapping) {
             }
         };
         say!(
-            "ginux: AHCI {:02x}:{:02x}.{}: version {}.{}, ports {:#x}\n",
+            "linox: AHCI {:02x}:{:02x}.{}: version {}.{}, ports {:#x}\n",
             function.bus,
             function.device,
             function.function,
@@ -338,7 +338,7 @@ fn report_disks(remapping: &mut Remapping) {
                     slot += 1;
                     let bytes = disk.sectors.saturating_mul(u64::from(disk.sector_size));
                     say!(
-                        "ginux:   port {}: {} (serial {}), {} sectors of {} bytes ({} MiB)\n",
+                        "linox:   port {}: {} (serial {}), {} sectors of {} bytes ({} MiB)\n",
                         disk.port(),
                         trimmed(&disk.model),
                         trimmed(&disk.serial),
@@ -349,7 +349,7 @@ fn report_disks(remapping: &mut Remapping) {
                     list_partitions(&mut disk);
                 }
                 Err(ahci::Error::NoDevice) => {}
-                Err(error) => say!("ginux:   port {}: {:?}\n", port, error),
+                Err(error) => say!("linox:   port {}: {:?}\n", port, error),
             }
         }
     }
@@ -362,11 +362,11 @@ fn open_keyboards() -> UsbKeyboards {
     let mut opened = [const { None }; MAX_CONTROLLERS];
     let (controllers, count) = functions(pci::Identity::is_xhci);
     if count == 0 {
-        say!("ginux: no xHCI controller\n");
+        say!("linox: no xHCI controller\n");
     }
     for (slot, function) in controllers.iter().flatten().enumerate() {
         say!(
-            "ginux: xHCI {:02x}:{:02x}.{}: looking for keyboards\n",
+            "linox: xHCI {:02x}:{:02x}.{}: looking for keyboards\n",
             function.bus,
             function.device,
             function.function
@@ -378,7 +378,7 @@ fn open_keyboards() -> UsbKeyboards {
             Ok(controller) => {
                 for speaker in controller.speakers() {
                     say!(
-                        "ginux:   USB speaker {:04x}:{:04x} on port {}: {}, {} channels, {}-bit\n",
+                        "linox:   USB speaker {:04x}:{:04x} on port {}: {}, {} channels, {}-bit\n",
                         speaker.vendor,
                         speaker.product,
                         speaker.location,
@@ -389,7 +389,7 @@ fn open_keyboards() -> UsbKeyboards {
                 }
                 for input in controller.inputs() {
                     say!(
-                        "ginux:   {} {:04x}:{:04x} on port {}\n",
+                        "linox:   {} {:04x}:{:04x} on port {}\n",
                         match input.kind {
                             xhci::InputKind::Keyboard => "keyboard",
                             xhci::InputKind::Mouse => "mouse",
@@ -402,14 +402,14 @@ fn open_keyboards() -> UsbKeyboards {
                 }
                 opened[slot] = Some(controller);
             }
-            Err(error) => say!("ginux:   {:?}\n", error),
+            Err(error) => say!("linox:   {:?}\n", error),
         }
     }
     opened
 }
 
 fn shell(boot_info: &BootInfo, mut usb: UsbKeyboards) -> ! {
-    say!("\nGinux bring-up shell. Type 'help' for commands.\n");
+    say!("\nLinox bring-up shell. Type 'help' for commands.\n");
     let mut decoders: [[keyboard::Keyboard; xhci::MAX_INPUTS]; MAX_CONTROLLERS] =
         core::array::from_fn(|_| core::array::from_fn(|_| keyboard::Keyboard::new()));
     let mut line = [0_u8; LINE_CAPACITY];
@@ -492,7 +492,7 @@ fn run_command(boot_info: &BootInfo, usb: &mut UsbKeyboards, line: &[u8]) {
                     };
                     if let Some(sent) = controller.play_tone(index, 1000) {
                         say!(
-                            "ginux: USB speaker {:04x}:{:04x} played a 500 Hz tone ({} packets) on its {}\n",
+                            "linox: USB speaker {:04x}:{:04x} played a 500 Hz tone ({} packets) on its {}\n",
                             vendor,
                             product,
                             sent,
@@ -519,7 +519,7 @@ fn run_command(boot_info: &BootInfo, usb: &mut UsbKeyboards, line: &[u8]) {
 }
 
 fn reset(boot_info: &BootInfo, kind: u32) {
-    say!("ginux: resetting through UEFI runtime services\n");
+    say!("linox: resetting through UEFI runtime services\n");
     // SAFETY: bring-up never calls SetVirtualAddressMap, so the runtime
     // services remain callable through the firmware identity map.
     unsafe { (boot_info.reset_system)(kind, 0, 0, core::ptr::null()) };
@@ -554,7 +554,7 @@ fn report_memory(boot_info: &BootInfo) {
         }
     }
     say!(
-        "ginux: memory {} MiB usable, {} MiB below 4 GiB, map ends at {:#x}\n",
+        "linox: memory {} MiB usable, {} MiB below 4 GiB, map ends at {:#x}\n",
         usable >> 20,
         usable_low >> 20,
         highest
@@ -568,7 +568,7 @@ fn report_acpi(rsdp: u64) -> [u64; MAX_IOMMUS] {
     // bounded by the table lengths the firmware recorded.
     unsafe {
         if rsdp == 0 || read_bytes::<8>(rsdp) != *b"RSD PTR " {
-            say!("ginux: ACPI root pointer missing\n");
+            say!("linox: ACPI root pointer missing\n");
             return iommus;
         }
         let revision = read_unaligned((rsdp + 15) as *const u8);
@@ -578,7 +578,7 @@ fn report_acpi(rsdp: u64) -> [u64; MAX_IOMMUS] {
             (u64::from(read_unaligned((rsdp + 16) as *const u32)), 4)
         };
         let length = u64::from(read_unaligned((root + 4) as *const u32));
-        say!("ginux: ACPI tables:");
+        say!("linox: ACPI tables:");
         let mut offset = 36;
         while offset + entry_size <= length {
             let table = if entry_size == 8 {
@@ -607,7 +607,7 @@ fn report_acpi(rsdp: u64) -> [u64; MAX_IOMMUS] {
             // covers it; the registers read have no side effects.
             let report = amd_iommu::probe(base);
             say!(
-                "ginux: AMD-Vi {:#x}: {} by firmware, status {:#x}, features ",
+                "linox: AMD-Vi {:#x}: {} by firmware, status {:#x}, features ",
                 base,
                 if report.enabled {
                     "enabled"
@@ -626,7 +626,7 @@ fn report_acpi(rsdp: u64) -> [u64; MAX_IOMMUS] {
 /// The AMD-Vi units with remapping on.
 type Remapping = [Option<amd_iommu::Remapping>; MAX_IOMMUS];
 
-/// Turns on DMA remapping on every AMD-Vi unit. Devices Ginux drives reach
+/// Turns on DMA remapping on every AMD-Vi unit. Devices Linox drives reach
 /// only their driver's buffers, display controllers keep untranslated access
 /// for the firmware framebuffer, and every other device is blocked.
 fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
@@ -676,7 +676,7 @@ fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
         }
     });
     if let Some(error) = failure {
-        say!("ginux: AMD-Vi remapping not enabled: {:?}\n", error);
+        say!("linox: AMD-Vi remapping not enabled: {:?}\n", error);
         return units;
     }
     for (slot, base) in iommus.iter().enumerate() {
@@ -688,7 +688,7 @@ fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
         match unsafe { amd_iommu::Remapping::enable(*base, &table) } {
             Ok(unit) => {
                 say!(
-                    "ginux: AMD-Vi {:#x}: DMA remapping on; {} devices confined to their \
+                    "linox: AMD-Vi {:#x}: DMA remapping on; {} devices confined to their \
                      driver's buffers, {} displays passed through, {} blocked\n",
                     base,
                     confined,
@@ -697,7 +697,7 @@ fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
                 );
                 units[slot] = Some(unit);
             }
-            Err(error) => say!("ginux: AMD-Vi {:#x}: remapping failed: {:?}\n", base, error),
+            Err(error) => say!("linox: AMD-Vi {:#x}: remapping failed: {:?}\n", base, error),
         }
     }
     units
@@ -729,7 +729,7 @@ fn verify_dma_confinement(
     }
     if untouched {
         say!(
-            "ginux:   AMD-Vi blocked a stray DMA from this controller to {:#x}",
+            "linox:   AMD-Vi blocked a stray DMA from this controller to {:#x}",
             probe as u64
         );
         match fault {
@@ -747,7 +747,7 @@ fn verify_dma_confinement(
         }
     } else {
         say!(
-            "ginux:   WARNING: AMD-Vi did not stop a stray DMA to {:#x} (command {})\n",
+            "linox:   WARNING: AMD-Vi did not stop a stray DMA to {:#x} (command {})\n",
             probe as u64,
             if result.is_ok() {
                 "completed"
@@ -830,7 +830,7 @@ unsafe fn read_bytes<const N: usize>(address: u64) -> [u8; N] {
     read_unaligned(address as *const [u8; N])
 }
 
-/// Checks NVMe writes on every Ginux volume partition without changing it:
+/// Checks NVMe writes on every Linox volume partition without changing it:
 /// saves the partition's last block, writes a pattern, reads it back,
 /// restores the block and reads that back, and checks that a write one block
 /// past the partition is refused. Disks without such a partition are not
@@ -844,7 +844,7 @@ fn test_disk_writes() {
             Ok((controller, _)) => controller,
             Err(error) => {
                 say!(
-                    "ginux: NVMe {:02x}:{:02x}.{}: {:?}\n",
+                    "linox: NVMe {:02x}:{:02x}.{}: {:?}\n",
                     function.bus,
                     function.device,
                     function.function,
@@ -856,7 +856,7 @@ fn test_disk_writes() {
         let extents = gpt::writable_extents(&mut controller);
         if extents.iter().all(Option::is_none) {
             say!(
-                "ginux: NVMe {:02x}:{:02x}.{}: no Ginux volume partition; nothing written\n",
+                "linox: NVMe {:02x}:{:02x}.{}: no Linox volume partition; nothing written\n",
                 function.bus,
                 function.device,
                 function.function
@@ -864,7 +864,7 @@ fn test_disk_writes() {
         }
         for extent in extents.iter().flatten() {
             say!(
-                "ginux: NVMe {:02x}:{:02x}.{}: Ginux volume blocks {}-{}: {}\n",
+                "linox: NVMe {:02x}:{:02x}.{}: Linox volume blocks {}-{}: {}\n",
                 function.bus,
                 function.device,
                 function.function,
@@ -894,7 +894,7 @@ fn check_extent_writes(
     for (index, byte) in pattern[..size].iter_mut().enumerate() {
         *byte = (index as u8) ^ 0x5a;
     }
-    pattern[..8].copy_from_slice(b"GINUXWR1");
+    pattern[..8].copy_from_slice(b"LINOXWR1");
     if controller.write(extent, block, &pattern[..size]).is_err()
         || controller.read(block, 1).ok() != Some(&pattern[..size])
     {
@@ -917,7 +917,7 @@ fn check_extent_writes(
 
 fn probe_nvme(function: pci::Function, remapping: &mut Remapping) {
     say!(
-        "ginux: NVMe {:02x}:{:02x}.{}: ",
+        "linox: NVMe {:02x}:{:02x}.{}: ",
         function.bus,
         function.device,
         function.function
@@ -948,7 +948,7 @@ fn probe_nvme(function: pci::Function, remapping: &mut Remapping) {
         (bytes >> 20, "MiB")
     };
     say!(
-        "ginux:   namespace {}: {} blocks of {} bytes ({} {})\n",
+        "linox:   namespace {}: {} blocks of {} bytes ({} {})\n",
         controller.namespace,
         controller.block_count,
         controller.block_size,
@@ -965,15 +965,15 @@ fn list_partitions(disk: &mut impl BlockDevice) {
     let header = match disk.read_blocks(gpt::HEADER_LBA, 1) {
         Some(block) => gpt::parse_header(block),
         None => {
-            say!("ginux:   reading the partition table failed\n");
+            say!("linox:   reading the partition table failed\n");
             return;
         }
     };
     let Some(header) = header else {
-        say!("ginux:   no valid GPT\n");
+        say!("linox:   no valid GPT\n");
         return;
     };
-    say!("ginux:   GPT disk {}\n", header.disk);
+    say!("linox:   GPT disk {}\n", header.disk);
     let block_size = u64::from(disk.block_size());
     let entry_size = u64::from(header.entry_size);
     let mut cached_block = u64::MAX;
@@ -985,7 +985,7 @@ fn list_partitions(disk: &mut impl BlockDevice) {
             match disk.read_blocks(lba, 1) {
                 Some(data) => block[..data.len()].copy_from_slice(data),
                 None => {
-                    say!("ginux:   reading partition entries failed\n");
+                    say!("linox:   reading partition entries failed\n");
                     return;
                 }
             }
@@ -1000,7 +1000,7 @@ fn list_partitions(disk: &mut impl BlockDevice) {
         };
         let size = (partition.last_lba + 1).saturating_sub(partition.first_lba) * block_size;
         say!(
-            "ginux:   partition {}: {} MiB {} \"",
+            "linox:   partition {}: {} MiB {} \"",
             index + 1,
             size >> 20,
             gpt::type_name(partition.kind)

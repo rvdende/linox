@@ -1,16 +1,16 @@
 [package]
-name = "ginux-controller-runtime"
+name = "linox-controller-runtime"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
 
 [[bin]]
-name = "ginux-controller-runtime"
+name = "linox-controller-runtime"
 path = "src/main.rs"
 test = false
 bench = false
 
 [dependencies]
-ginux-command = { path = "../../crates/command" }
-ginux-native-abi = { path = "../../crates/native-abi" }
+linox-command = { path = "../../crates/command" }
+linox-native-abi = { path = "../../crates/native-abi" }

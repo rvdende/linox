@@ -5,8 +5,8 @@
 use super::*;
 
 use crate::linux_pty::{self, OpenError};
-use ginux_tty::termios::{self, Termios};
-use ginux_tty::{End, Error as TtyError};
+use linox_tty::termios::{self, Termios};
+use linox_tty::{End, Error as TtyError};
 
 const LINUX_TCGETA: u32 = 0x5405;
 const LINUX_TCSETA: u32 = 0x5406;
@@ -39,7 +39,7 @@ const LINUX_SIGHUP: u64 = 1;
 const LINUX_SIGWINCH: u64 = 28;
 /// The longest read or write one call moves: a canonical line or a full
 /// read buffer, and what a pair can queue.
-const LINUX_PTY_TRANSFER_LIMIT: usize = ginux_tty::RECEIVE_LIMIT + 4096;
+const LINUX_PTY_TRANSFER_LIMIT: usize = linox_tty::RECEIVE_LIMIT + 4096;
 
 fn linux_pty_owner() -> usize {
     current_container_slot().unwrap_or(crate::control_abi::DOMAIN_LIMIT)
@@ -69,7 +69,7 @@ fn linux_pty_open_error(error: OpenError) -> u64 {
 
 fn linux_pty_privileged() -> bool {
     current_linux_credentials()
-        .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_ADMIN))
+        .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_ADMIN))
 }
 
 /// A descriptor for object `slot` with the access `flags` ask.

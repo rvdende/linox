@@ -6,8 +6,8 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 
 source_roots=(kernel control-plane services boot)
-scratch=$(mktemp "${TMPDIR:-/tmp}/ginux-writable-globals.XXXXXX")
-cell_types=$(mktemp "${TMPDIR:-/tmp}/ginux-interior-types.XXXXXX")
+scratch=$(mktemp "${TMPDIR:-/tmp}/linox-writable-globals.XXXXXX")
+cell_types=$(mktemp "${TMPDIR:-/tmp}/linox-interior-types.XXXXXX")
 trap 'rm -f "$scratch" "$cell_types"' EXIT
 
 emit_matches() {

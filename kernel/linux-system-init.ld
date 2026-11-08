@@ -1,4 +1,4 @@
-ENTRY(ginux_linux_system_init)
+ENTRY(linox_linux_system_init)
 
 PHDRS
 {

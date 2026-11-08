@@ -65,12 +65,12 @@ pub(super) static TLB_SHOOTDOWN_ACKNOWLEDGED: AtomicU32 = AtomicU32::new(0);
 
 global_asm!(
     r#"
-    .pushsection .text.ginux_ap_trampoline,"ax"
-    .set ginux_ap_gdt_pointer_physical, ginux_ap_trampoline_gdt_pointer - ginux_ap_trampoline_start + 0x8000
-    .set ginux_ap_cr3_pointer_physical, ginux_ap_trampoline_cr3_pointer - ginux_ap_trampoline_start + 0x8000
+    .pushsection .text.linox_ap_trampoline,"ax"
+    .set linox_ap_gdt_pointer_physical, linox_ap_trampoline_gdt_pointer - linox_ap_trampoline_start + 0x8000
+    .set linox_ap_cr3_pointer_physical, linox_ap_trampoline_cr3_pointer - linox_ap_trampoline_start + 0x8000
     .balign 16
-    .global ginux_ap_trampoline_start
-ginux_ap_trampoline_start:
+    .global linox_ap_trampoline_start
+linox_ap_trampoline_start:
     .code16
     cli
     cld
@@ -78,16 +78,16 @@ ginux_ap_trampoline_start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov si, offset ginux_ap_gdt_pointer_physical
+    mov si, offset linox_ap_gdt_pointer_physical
     lgdt [si]
     mov eax, cr0
     or eax, 1
     mov cr0, eax
     .byte 0x66, 0xea
-    .long ginux_ap_trampoline_protected - ginux_ap_trampoline_start + 0x8000
+    .long linox_ap_trampoline_protected - linox_ap_trampoline_start + 0x8000
     .word 0x08
 
-ginux_ap_trampoline_protected:
+linox_ap_trampoline_protected:
     .code32
     mov ax, 0x10
     mov ds, ax
@@ -96,7 +96,7 @@ ginux_ap_trampoline_protected:
     mov eax, cr4
     or eax, 1 << 5
     mov cr4, eax
-    mov esi, ginux_ap_cr3_pointer_physical
+    mov esi, linox_ap_cr3_pointer_physical
     mov eax, dword ptr [esi]
     mov cr3, eax
     mov ecx, 0xc0000080
@@ -107,53 +107,53 @@ ginux_ap_trampoline_protected:
     or eax, 0x80000001
     mov cr0, eax
     .byte 0xea
-    .long ginux_ap_trampoline_long - ginux_ap_trampoline_start + 0x8000
+    .long linox_ap_trampoline_long - linox_ap_trampoline_start + 0x8000
     .word 0x18
 
-ginux_ap_trampoline_long:
+linox_ap_trampoline_long:
     .code64
     mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov rbx, qword ptr [rip + ginux_ap_trampoline_stack_pointer]
+    mov rbx, qword ptr [rip + linox_ap_trampoline_stack_pointer]
     mov rsp, qword ptr [rbx]
     and rsp, -16
-    mov rbx, qword ptr [rip + ginux_ap_trampoline_cpu_pointer]
+    mov rbx, qword ptr [rip + linox_ap_trampoline_cpu_pointer]
     mov edi, dword ptr [rbx]
-    mov rbx, qword ptr [rip + ginux_ap_trampoline_entry_pointer]
+    mov rbx, qword ptr [rip + linox_ap_trampoline_entry_pointer]
     mov rax, qword ptr [rbx]
     call rax
     ud2
 
     .balign 8
-ginux_ap_trampoline_cr3_pointer:
+linox_ap_trampoline_cr3_pointer:
     .quad {mailbox_cr3}
-ginux_ap_trampoline_stack_pointer:
+linox_ap_trampoline_stack_pointer:
     .quad {mailbox_stack}
-ginux_ap_trampoline_entry_pointer:
+linox_ap_trampoline_entry_pointer:
     .quad {mailbox_entry}
-ginux_ap_trampoline_cpu_pointer:
+linox_ap_trampoline_cpu_pointer:
     .quad {mailbox_cpu}
 
     .balign 8
-ginux_ap_trampoline_gdt:
+linox_ap_trampoline_gdt:
     .quad 0
     .quad 0x00cf9a000000ffff
     .quad 0x00cf92000000ffff
     .quad 0x00af9a000000ffff
-ginux_ap_trampoline_gdt_end:
-ginux_ap_trampoline_gdt_pointer:
-    .word ginux_ap_trampoline_gdt_end - ginux_ap_trampoline_gdt - 1
-    .long ginux_ap_trampoline_gdt - ginux_ap_trampoline_start + 0x8000
-    .global ginux_ap_trampoline_end
-ginux_ap_trampoline_end:
+linox_ap_trampoline_gdt_end:
+linox_ap_trampoline_gdt_pointer:
+    .word linox_ap_trampoline_gdt_end - linox_ap_trampoline_gdt - 1
+    .long linox_ap_trampoline_gdt - linox_ap_trampoline_start + 0x8000
+    .global linox_ap_trampoline_end
+linox_ap_trampoline_end:
     .code64
     .popsection
 
     .text
-    .global ginux_ipi_entry
-ginux_ipi_entry:
+    .global linox_ipi_entry
+linox_ipi_entry:
     test qword ptr [rsp + 8], 3
     jz 1f
     swapgs
@@ -208,14 +208,14 @@ ginux_ipi_entry:
 );
 
 unsafe extern "C" {
-    static ginux_ap_trampoline_start: u8;
-    static ginux_ap_trampoline_end: u8;
-    fn ginux_ipi_entry();
+    static linox_ap_trampoline_start: u8;
+    static linox_ap_trampoline_end: u8;
+    fn linox_ipi_entry();
 }
 
 pub(crate) fn prepare_trampoline() -> bool {
-    let start = core::ptr::addr_of!(ginux_ap_trampoline_start) as usize;
-    let end = core::ptr::addr_of!(ginux_ap_trampoline_end) as usize;
+    let start = core::ptr::addr_of!(linox_ap_trampoline_start) as usize;
+    let end = core::ptr::addr_of!(linox_ap_trampoline_end) as usize;
     let size = end.saturating_sub(start);
     if size == 0 || size > 4096 {
         return false;
@@ -231,7 +231,7 @@ pub(crate) fn start_application_processors(platform: PlatformInfo, apic: &LocalA
     if platform.enabled_processors == 0 || platform.enabled_processors > CPU_LIMIT {
         return false;
     }
-    if !cpu::install_interrupt_gate(IPI_VECTOR, ginux_ipi_entry as *const () as usize) {
+    if !cpu::install_interrupt_gate(IPI_VECTOR, linox_ipi_entry as *const () as usize) {
         return false;
     }
     APIC_BASE.store(apic.physical_base, Ordering::Release);

@@ -13,7 +13,7 @@ flush request through its generation-bound object-7 wait capability.
 
 On empty media the service reads both slots, prepares generation one in the
 inactive slot, flushes it, writes its commit marker last, flushes again, and
-recovers the exact `ginux-isolated-volume\n` payload. This is ten completed
+recovers the exact `linox-isolated-volume\n` payload. This is ten completed
 requests: two initial reads and two complete four-operation recovery scans
 around the prepare and commit writes. On the second VM boot, two reads recover
 the committed record without rewriting either sector. The automated gate

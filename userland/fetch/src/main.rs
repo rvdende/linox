@@ -1,4 +1,4 @@
-//! ginux-fetch: prints the system summary neofetch-style tools show — OS,
+//! linox-fetch: prints the system summary neofetch-style tools show — OS,
 //! kernel, CPU, memory, uptime, display and input devices — from uname(2),
 //! /etc/os-release, /proc and the fbdev and evdev interfaces.
 
@@ -147,8 +147,8 @@ mod tests {
             Some("Alpine Linux".into())
         );
         assert_eq!(
-            field("model name\t: Ginux CPU", "model name", ':'),
-            Some("Ginux CPU".into())
+            field("model name\t: Linox CPU", "model name", ':'),
+            Some("Linox CPU".into())
         );
         assert_eq!(field("ID=x", "NAME", '='), None);
     }

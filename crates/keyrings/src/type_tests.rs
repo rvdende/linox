@@ -114,6 +114,7 @@ fn certificates_make_asymmetric_keys() {
     let caller = root();
     let key = add(&mut keys, "asymmetric", "", CERTIFICATE).unwrap();
     let description = keys.describe(&caller, key, NOW).unwrap();
+    // The test certificate (made before the rename) names its subject Ginux.
     let mut expected = String::from("asymmetric;0;0;39010000;Ginux Tests: ginux-keyrings-test: ");
     expected.push_str(core::str::from_utf8(SUBJECT_KEY_ID_HEX).unwrap());
     expected.push('\0');

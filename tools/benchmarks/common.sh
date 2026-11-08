@@ -8,8 +8,8 @@ source "$benchmark_root/tools/qemu/common.sh"
 # shellcheck source=/dev/null
 source "$benchmark_root/profiles/benchmarks/rocky10-single-vcpu.env"
 
-benchmark_dir="${GINUX_BENCHMARK_DIR:-$benchmark_root/build/benchmark/rocky10-single-vcpu}"
-benchmark_asset_dir="${GINUX_BENCHMARK_ASSET_DIR:-$benchmark_dir}"
+benchmark_dir="${LINOX_BENCHMARK_DIR:-$benchmark_root/build/benchmark/rocky10-single-vcpu}"
+benchmark_asset_dir="${LINOX_BENCHMARK_ASSET_DIR:-$benchmark_dir}"
 export benchmark_root benchmark_dir benchmark_asset_dir
 
 hash_file() {

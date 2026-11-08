@@ -67,7 +67,7 @@ None.
 - `make test` -> passed after clearing a retired thread slot from
   `LINUX_LAST_PREEMPTED_THREAD_SLOT`; the previously excluded replacement child
   now reaches its futex wait, all ELF/runtime categories pass, and QEMU exits
-  cleanly with `GINUX_KERNEL_OK`.
+  cleanly with `LINOX_KERNEL_OK`.
 - `make check` -> passed with the static privilege-entry verifier requiring the
   leaf NMI handler, six injection sites, guarded IST policy, canonical return
   validation, and hostile-entry validator.

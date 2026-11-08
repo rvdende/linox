@@ -1,17 +1,17 @@
 .intel_syntax noprefix
-#ifdef GINUX_LINKED
-#define GINUX_DEPENDENCY_BASE qword ptr [rip + .Ldependency_base]
-#define GINUX_AUXILIARY_BASE qword ptr [rip + .Lauxiliary_dependency_base]
+#ifdef LINOX_LINKED
+#define LINOX_DEPENDENCY_BASE qword ptr [rip + .Ldependency_base]
+#define LINOX_AUXILIARY_BASE qword ptr [rip + .Lauxiliary_dependency_base]
 #else
-#define GINUX_DEPENDENCY_BASE 0x610000
+#define LINOX_DEPENDENCY_BASE 0x610000
 #endif
 .section .text
-.global ginux_linux_interpreter
-ginux_linux_interpreter:
+.global linox_linux_interpreter
+linox_linux_interpreter:
     lea rbx, [rip]
     and rbx, -4096
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov qword ptr [rip + .Linitial_stack], rsp
     cmp dword ptr [rbx], 0x464c457f
     jne .Linvalid_dynamic
@@ -84,7 +84,7 @@ ginux_linux_interpreter:
     add rdx, rbx
     mov qword ptr [rcx], rdx
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov qword ptr [rip + .Lmain_phdr], 0
     mov qword ptr [rip + .Lmain_phnum], 0
     mov qword ptr [rip + .Lmain_entry], 0
@@ -156,7 +156,7 @@ ginux_linux_interpreter:
     xor r8d, r8d
     xor r13d, r13d
     xor r12d, r12d
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov qword ptr [rip + .Lsecondary_needed], rax
     mov qword ptr [rip + .Lmain_relocation_size], rax
     mov qword ptr [rip + .Lmain_relocation_entry_size], rax
@@ -180,7 +180,7 @@ ginux_linux_interpreter:
     cmove r13, qword ptr [rdi + 8]
     cmp qword ptr [rdi], 23
     cmove rbx, qword ptr [rdi + 8]
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp qword ptr [rdi], 8
     jne .Lscan_main_relocation_entry_size
     mov rdx, qword ptr [rdi + 8]
@@ -239,7 +239,7 @@ ginux_linux_interpreter:
     mov r12, qword ptr [rdi + 8]
     jmp .Lnext_main_dynamic
 .Lrecord_secondary_needed:
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp qword ptr [rip + .Lsecondary_needed], 0
     jne .Linvalid_dynamic
     mov rdx, qword ptr [rdi + 8]
@@ -263,7 +263,7 @@ ginux_linux_interpreter:
     jz .Linvalid_dynamic
     test r12, r12
     jz .Linvalid_dynamic
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp qword ptr [rip + .Lsecondary_needed], 0
     je .Linvalid_dynamic
     cmp qword ptr [rip + .Lmain_relocation_size], 96
@@ -294,7 +294,7 @@ ginux_linux_interpreter:
     add rbx, r15
     add r12, r13
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov rdx, qword ptr [rip + .Lsecondary_needed]
     add rdx, r13
     jc .Linvalid_dynamic
@@ -351,7 +351,7 @@ ginux_linux_interpreter:
     xor r11d, r11d
     xor r14d, r14d
     xor ebp, ebp
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov qword ptr [rip + .Lprimary_init_function], r9
     mov qword ptr [rip + .Lprimary_relocation_size], r9
     mov qword ptr [rip + .Lprimary_relocation_entry_size], r9
@@ -373,7 +373,7 @@ ginux_linux_interpreter:
     cmove r14, qword ptr [rdi + 8]
     cmp qword ptr [rdi], 23
     cmove rbp, qword ptr [rdi + 8]
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp qword ptr [rdi], 8
     jne .Lscan_primary_relocation_entry_size
     mov rdx, qword ptr [rdi + 8]
@@ -433,7 +433,7 @@ ginux_linux_interpreter:
     jz .Linvalid_dynamic
     test rbp, rbp
     jz .Linvalid_dynamic
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp qword ptr [rip + .Lprimary_init_function], 0
     je .Linvalid_dynamic
     cmp qword ptr [rip + .Lprimary_relocation_size], 72
@@ -453,28 +453,28 @@ ginux_linux_interpreter:
     cmp qword ptr [rip + .Lprimary_init_array_size], 8
     jne .Linvalid_dynamic
 #endif
-    add r9, GINUX_DEPENDENCY_BASE
-    add r10, GINUX_DEPENDENCY_BASE
-    add r11, GINUX_DEPENDENCY_BASE
-    add r14, GINUX_DEPENDENCY_BASE
-    add rbp, GINUX_DEPENDENCY_BASE
+    add r9, LINOX_DEPENDENCY_BASE
+    add r10, LINOX_DEPENDENCY_BASE
+    add r11, LINOX_DEPENDENCY_BASE
+    add r14, LINOX_DEPENDENCY_BASE
+    add rbp, LINOX_DEPENDENCY_BASE
 
     mov rcx, qword ptr [r11]
-    add rcx, GINUX_DEPENDENCY_BASE
-#ifdef GINUX_LINKED
+    add rcx, LINOX_DEPENDENCY_BASE
+#ifdef LINOX_LINKED
     mov rdx, qword ptr [rip + .Lprimary_init_array]
-    add rdx, GINUX_DEPENDENCY_BASE
+    add rdx, LINOX_DEPENDENCY_BASE
     cmp rcx, rdx
     jne .Linvalid_dynamic
 #endif
     mov rdx, qword ptr [r11 + 16]
-    add rdx, GINUX_DEPENDENCY_BASE
+    add rdx, LINOX_DEPENDENCY_BASE
     mov qword ptr [rcx], rdx
 
     mov rcx, qword ptr [r11 + 24]
-    add rcx, GINUX_DEPENDENCY_BASE
+    add rcx, LINOX_DEPENDENCY_BASE
     mov rdx, qword ptr [r11 + 32]
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp edx, 18
     jne .Linvalid_dynamic
     shr rdx, 32
@@ -485,7 +485,7 @@ ginux_linux_interpreter:
     mov qword ptr [rcx], -32
 
     mov rcx, qword ptr [r11 + 48]
-    add rcx, GINUX_DEPENDENCY_BASE
+    add rcx, LINOX_DEPENDENCY_BASE
     mov rdx, qword ptr [r11 + 56]
 #endif
     shr rdx, 32
@@ -494,8 +494,8 @@ ginux_linux_interpreter:
     lea rdx, [rdx + rdx * 2]
     shl rdx, 3
     mov r12, qword ptr [r9 + rdx + 8]
-    add r12, GINUX_DEPENDENCY_BASE
-#ifdef GINUX_LINKED
+    add r12, LINOX_DEPENDENCY_BASE
+#ifdef LINOX_LINKED
     add r12, qword ptr [r11 + 64]
 #else
     add r12, qword ptr [r11 + 40]
@@ -503,7 +503,7 @@ ginux_linux_interpreter:
     mov qword ptr [rcx], r12
 
     mov rcx, qword ptr [rbp]
-    add rcx, GINUX_DEPENDENCY_BASE
+    add rcx, LINOX_DEPENDENCY_BASE
     mov rdx, qword ptr [rbp + 8]
     shr rdx, 32
     cmp edx, dword ptr [r10 + 24]
@@ -511,14 +511,14 @@ ginux_linux_interpreter:
     add r12, qword ptr [rbp + 16]
     mov qword ptr [rcx], r12
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     push rax
     push rsi
     mov rcx, qword ptr [rip + .Lprimary_init_function]
-    add rcx, GINUX_DEPENDENCY_BASE
+    add rcx, LINOX_DEPENDENCY_BASE
     call .Lcall_initializer
     mov rcx, qword ptr [rip + .Lprimary_init_array]
-    add rcx, GINUX_DEPENDENCY_BASE
+    add rcx, LINOX_DEPENDENCY_BASE
     mov rcx, qword ptr [rcx]
     call .Lcall_initializer
     pop rsi
@@ -527,7 +527,7 @@ ginux_linux_interpreter:
 
     mov rcx, qword ptr [rax + 24]
     add rcx, r15
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov rdx, qword ptr [rip + .Lmain_init_array]
     add rdx, r15
     cmp rcx, rdx
@@ -541,7 +541,7 @@ ginux_linux_interpreter:
     add rcx, r15
     mov rdx, qword ptr [rax + 56]
     shr rdx, 32
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     cmp edx, dword ptr [r8 + 12]
 #else
     cmp edx, dword ptr [r8 + 8]
@@ -564,7 +564,7 @@ ginux_linux_interpreter:
     test r15b, r15b
     jne .Lcompare_symbol_name
     mov rdx, qword ptr [r9 + rdx + 8]
-    add rdx, GINUX_DEPENDENCY_BASE
+    add rdx, LINOX_DEPENDENCY_BASE
     add rdx, qword ptr [rax + 64]
     mov qword ptr [rcx], rdx
 
@@ -575,11 +575,11 @@ ginux_linux_interpreter:
     lea rdx, [rdx + rdx * 2]
     shl rdx, 3
     mov rdx, qword ptr [r9 + rdx + 8]
-    add rdx, GINUX_DEPENDENCY_BASE
+    add rdx, LINOX_DEPENDENCY_BASE
     add rdx, qword ptr [rbx + 16]
     mov qword ptr [rcx], rdx
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov rcx, qword ptr [rax + 72]
     add rcx, r15
     mov rdx, qword ptr [rax + 80]
@@ -611,7 +611,7 @@ ginux_linux_interpreter:
     test r12b, r12b
     jne .Lcompare_auxiliary_symbol_name
     mov rdx, qword ptr [r9 + rdx + 8]
-    add rdx, GINUX_AUXILIARY_BASE
+    add rdx, LINOX_AUXILIARY_BASE
     add rdx, qword ptr [rax + 88]
     mov qword ptr [rcx], rdx
 
@@ -625,7 +625,7 @@ ginux_linux_interpreter:
     mov qword ptr [rcx], rdx
 #endif
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     mov rcx, qword ptr [rip + .Lmain_init_function]
     add rcx, r15
     call .Lcall_initializer
@@ -639,7 +639,7 @@ ginux_linux_interpreter:
 #endif
     jmp rax
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
 .Lcall_initializer:
     mov rax, qword ptr [rip + .Linitial_stack]
     mov rdi, qword ptr [rax]
@@ -654,7 +654,7 @@ ginux_linux_interpreter:
 .Linvalid_dynamic:
     ud2
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
 .section .text.discovery,"ax",@progbits
 .Ldiscover_main_file:
     call .Linspect_measured_root
@@ -891,7 +891,7 @@ ginux_linux_interpreter:
     syscall
     cmp rax, 6
     jne .Linvalid_dynamic
-    cmp dword ptr [rsp], 0x756e6967
+    cmp dword ptr [rsp], 0x6f6e696c
     jne .Linvalid_dynamic
     cmp word ptr [rsp + 4], 0x0a78
     jne .Linvalid_dynamic
@@ -921,13 +921,13 @@ ginux_linux_interpreter:
     syscall
     cmp rax, 20
     jne .Linvalid_dynamic
-    movabs rax, 0x6e69473d454d414e
+    movabs rax, 0x6e694c3d454d414e
     cmp qword ptr [rsp], rax
     jne .Linvalid_dynamic
-    movabs rax, 0x69673d44490a7875
+    movabs rax, 0x696c3d44490a786f
     cmp qword ptr [rsp + 8], rax
     jne .Linvalid_dynamic
-    cmp dword ptr [rsp + 16], 0x0a78756e
+    cmp dword ptr [rsp + 16], 0x0a786f6e
     jne .Linvalid_dynamic
     mov edi, 3
     mov rsi, rsp
@@ -1032,7 +1032,7 @@ ginux_linux_interpreter:
     syscall
     cmp rax, 6
     jne .Linvalid_dynamic
-    cmp dword ptr [rsp], 0x756e6967
+    cmp dword ptr [rsp], 0x6f6e696c
     jne .Linvalid_dynamic
     cmp word ptr [rsp + 4], 0x0a78
     jne .Linvalid_dynamic
@@ -1258,27 +1258,27 @@ ginux_linux_interpreter:
     je .Linvalid_dynamic
     cmp qword ptr [rip + .Lauxiliary_init_array_size], 8
     jne .Linvalid_dynamic
-    add r9, GINUX_AUXILIARY_BASE
-    add r10, GINUX_AUXILIARY_BASE
-    add r11, GINUX_AUXILIARY_BASE
-    add r14, GINUX_AUXILIARY_BASE
-    add rbp, GINUX_AUXILIARY_BASE
+    add r9, LINOX_AUXILIARY_BASE
+    add r10, LINOX_AUXILIARY_BASE
+    add r11, LINOX_AUXILIARY_BASE
+    add r14, LINOX_AUXILIARY_BASE
+    add rbp, LINOX_AUXILIARY_BASE
     mov qword ptr [rip + .Lauxiliary_symbol_table], r9
     mov qword ptr [rip + .Lauxiliary_hash_table], r10
     mov qword ptr [rip + .Lauxiliary_string_table], r14
 
     mov rcx, qword ptr [r11]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     mov rdx, qword ptr [rip + .Lauxiliary_init_array]
-    add rdx, GINUX_AUXILIARY_BASE
+    add rdx, LINOX_AUXILIARY_BASE
     cmp rcx, rdx
     jne .Linvalid_dynamic
     mov rdx, qword ptr [r11 + 16]
-    add rdx, GINUX_AUXILIARY_BASE
+    add rdx, LINOX_AUXILIARY_BASE
     mov qword ptr [rcx], rdx
 
     mov rcx, qword ptr [r11 + 24]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     mov rdx, qword ptr [r11 + 32]
     cmp edx, 18
     jne .Linvalid_dynamic
@@ -1290,7 +1290,7 @@ ginux_linux_interpreter:
     mov qword ptr [rcx], -48
 
     mov rcx, qword ptr [r11 + 48]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     mov rdx, qword ptr [r11 + 56]
     shr rdx, 32
     cmp edx, dword ptr [r10 + 24]
@@ -1298,12 +1298,12 @@ ginux_linux_interpreter:
     lea rdx, [rdx + rdx * 2]
     shl rdx, 3
     mov r12, qword ptr [r9 + rdx + 8]
-    add r12, GINUX_AUXILIARY_BASE
+    add r12, LINOX_AUXILIARY_BASE
     add r12, qword ptr [r11 + 64]
     mov qword ptr [rcx], r12
 
     mov rcx, qword ptr [rbp]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     mov rdx, qword ptr [rbp + 8]
     shr rdx, 32
     cmp edx, dword ptr [r10 + 24]
@@ -1312,15 +1312,15 @@ ginux_linux_interpreter:
     mov qword ptr [rcx], r12
 
     mov rcx, qword ptr [rip + .Lauxiliary_init_function]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     call .Lcall_initializer
 
     mov rcx, qword ptr [rip + .Lauxiliary_init_array]
-    add rcx, GINUX_AUXILIARY_BASE
+    add rcx, LINOX_AUXILIARY_BASE
     mov rcx, qword ptr [rcx]
     call .Lcall_initializer
 
-    mov rax, GINUX_AUXILIARY_BASE
+    mov rax, LINOX_AUXILIARY_BASE
     add rax, 0x100
     call rax
     movabs rdx, 0x5952414958554147
@@ -1678,5 +1678,5 @@ ginux_linux_interpreter:
     .zero 8
 
 .section .data.rel.ro,"aw",@progbits
-    .quad ginux_linux_interpreter
+    .quad linox_linux_interpreter
 #endif

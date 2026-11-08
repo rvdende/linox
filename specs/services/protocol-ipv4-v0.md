@@ -3,7 +3,7 @@
 **Status:** A measured Rust protocol service validates a FIFO-delivered
 Ethernet/IPv4/ICMP frame in ring 3 under QEMU/TCG.
 
-The `ginux-protocol-state` `no_std` parser accepts an Ethernet II IPv4 frame
+The `linox-protocol-state` `no_std` parser accepts an Ethernet II IPv4 frame
 only after ARP state has established the exact peer MAC. This profile requires:
 
 - exact local destination and learned peer source MACs;

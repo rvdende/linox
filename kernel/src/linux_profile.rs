@@ -141,7 +141,7 @@ pub(crate) fn start() {
         SPAN_COUNTS[index].store(0, Ordering::Relaxed);
         SPAN_CYCLES[index].store(0, Ordering::Relaxed);
     }
-    crate::serial_write("ginux: sysrq: sampling the runtime CPU; timer ticks so far ");
+    crate::serial_write("linox: sysrq: sampling the runtime CPU; timer ticks so far ");
     crate::serial_write_u64(TICKS.load(Ordering::Relaxed));
     crate::serial_write("\r\n");
     REMAINING.store(SAMPLES, Ordering::Release);
@@ -245,7 +245,7 @@ pub(crate) fn sample(pid: u32, kernel: bool, instruction: u64) {
 }
 
 fn report() {
-    crate::serial_write("ginux: profile: count pid mode instruction\r\n");
+    crate::serial_write("linox: profile: count pid mode instruction\r\n");
     let mut printed = [usize::MAX; PRINTED];
     for rank in 0..PRINTED {
         let best = (0..ENTRIES)
@@ -257,7 +257,7 @@ fn report() {
         };
         printed[rank] = index;
         let key = KEYS[index].load(Ordering::Relaxed);
-        crate::serial_write("ginux: profile: ");
+        crate::serial_write("linox: profile: ");
         crate::serial_write_u64(u64::from(COUNTS[index].load(Ordering::Relaxed)));
         crate::serial_write(" ");
         crate::serial_write_u64((key & !(1 << 63)) >> 1);
@@ -265,7 +265,7 @@ fn report() {
         crate::serial_write_hex(INSTRUCTIONS[index].load(Ordering::Relaxed));
         crate::serial_write("\r\n");
     }
-    crate::serial_write("ginux: profile: unrecorded ");
+    crate::serial_write("linox: profile: unrecorded ");
     crate::serial_write_u64(u64::from(OVERFLOW.load(Ordering::Relaxed)));
     crate::serial_write(" over ");
     crate::serial_write_u64(TICKS.load(Ordering::Relaxed) - STARTED_AT.load(Ordering::Relaxed));
@@ -289,7 +289,7 @@ fn report() {
     let hz = crate::arch::x86_64::timer::monotonic_frequency()
         .unwrap_or(1)
         .max(1);
-    crate::serial_write("ginux: profile: system call time (number us):");
+    crate::serial_write("linox: profile: system call time (number us):");
     let mut shown = [usize::MAX; 12];
     for rank in 0..shown.len() {
         let Some(number) = (0..SYSCALLS)
@@ -305,7 +305,7 @@ fn report() {
         crate::serial_write(":");
         crate::serial_write_u64(SYSCALL_CYCLES[number].load(Ordering::Relaxed) * 1_000_000 / hz);
     }
-    crate::serial_write("\r\nginux: profile: locks (rank count):");
+    crate::serial_write("\r\nlinox: profile: locks (rank count):");
     let mut shown = [usize::MAX; 12];
     for rank in 0..shown.len() {
         let Some(lock) = (0..LOCKS.len())
@@ -326,7 +326,7 @@ fn report() {
     let hz = crate::arch::x86_64::timer::monotonic_frequency()
         .unwrap_or(1)
         .max(1);
-    crate::serial_write("ginux: profile: frame allocator calls:");
+    crate::serial_write("linox: profile: frame allocator calls:");
     for (index, name) in MEMORY_CALLS.iter().enumerate() {
         crate::serial_write(" ");
         crate::serial_write(name);
@@ -334,7 +334,7 @@ fn report() {
         crate::serial_write_u64(u64::from(MEMORY_COUNTS[index].load(Ordering::Relaxed)));
     }
     crate::serial_write("\r\n");
-    crate::serial_write("ginux: profile: spans (name count us):");
+    crate::serial_write("linox: profile: spans (name count us):");
     for (index, name) in SPANS.iter().enumerate() {
         crate::serial_write(" ");
         crate::serial_write(name);

@@ -180,7 +180,7 @@ pub(super) fn linux_time(output_address: u64) -> u64 {
 /// Setting the clock needs CAP_SYS_TIME (settimeofday02 drops it as root).
 fn linux_may_set_clock() -> bool {
     current_linux_credentials()
-        .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_TIME))
+        .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_TIME))
 }
 
 /// Sets the domain's wall clock to `seconds` and `nanoseconds`: the
@@ -342,7 +342,7 @@ pub(super) fn linux_uname_with_copy(address: u64, copy: impl FnOnce(u64, &[u8]) 
     let mut name = [0_u8; LINUX_UTSNAME_SIZE];
     // The Linux personality is "Linux", which rustup's installer, cmake,
     // autoconf's config.guess and Node check before anything runs; the
-    // release ("...-ginux...") and node name still say Ginux.
+    // release ("...-linox...") and node name still say Linox.
     name[..6].copy_from_slice(b"Linux\0");
     let mut host = [0_u8; LINUX_UTS_NAME_CAPACITY];
     let host_length = linux_uts_name(LINUX_UTS_HOST, &mut host);
@@ -351,9 +351,9 @@ pub(super) fn linux_uname_with_copy(address: u64, copy: impl FnOnce(u64, &[u8]) 
         & LINUX_PERSONALITY_UNAME26
         != 0
     {
-        b"2.6.52.0-ginux.0.1\0".as_slice()
+        b"2.6.52.0-linox.0.1\0".as_slice()
     } else {
-        b"6.12.0-ginux.0.1\0".as_slice()
+        b"6.12.0-linox.0.1\0".as_slice()
     };
     name[130..130 + release.len()].copy_from_slice(release);
     name[195..198].copy_from_slice(b"#1\0");

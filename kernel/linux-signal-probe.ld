@@ -1,4 +1,4 @@
-ENTRY(ginux_linux_exec_target)
+ENTRY(linox_linux_exec_target)
 
 PHDRS
 {

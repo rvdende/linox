@@ -3,7 +3,7 @@
 
 pub const ENTRY_LIMIT: usize = 32;
 pub const REFERENCE_CAPACITY: usize = 128;
-pub const LAYER_LIMIT: usize = ginux_oci::OCI_LAYER_LIMIT;
+pub const LAYER_LIMIT: usize = linox_oci::OCI_LAYER_LIMIT;
 pub const OBJECT_START_SECTOR: u64 = 256;
 
 const MAGIC: &[u8; 8] = b"GOCICAT2";

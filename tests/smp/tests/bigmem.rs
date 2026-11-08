@@ -2,14 +2,14 @@
 //! child that faults, or that runs the machine out of memory, dies alone and
 //! gives its memory back.
 //!
-//! Boots the ESP in `GINUX_ESP_DIR` (default `build/esp`) under QEMU with
-//! `GINUX_BIGMEM_QEMU` of RAM (default 26G), starts a domain on the built-in
-//! Rust image with `memory-mib=GINUX_BIGMEM_DOMAIN_MIB` (default 24000), and
-//! in its shell runs `ginux-memtest` (userland/memtest):
+//! Boots the ESP in `LINOX_ESP_DIR` (default `build/esp`) under QEMU with
+//! `LINOX_BIGMEM_QEMU` of RAM (default 26G), starts a domain on the built-in
+//! Rust image with `memory-mib=LINOX_BIGMEM_DOMAIN_MIB` (default 24000), and
+//! in its shell runs `linox-memtest` (userland/memtest):
 //!
 //! 1. `segv`: a write through a null pointer; the shell sees status 139
 //!    (SIGSEGV) and keeps running;
-//! 2. `touch MIB` (`GINUX_BIGMEM_MIB`, default 16384): one process maps that
+//! 2. `touch MIB` (`LINOX_BIGMEM_MIB`, default 16384): one process maps that
 //!    much anonymous memory and writes every page;
 //! 3. `touch MIB segv`: the same, then a fault while holding it (139);
 //! 4. `touch MIB fork` and `touch MIB spawn`: the big process forks a child
@@ -114,13 +114,13 @@ impl Shell {
 fn bigmem() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repo = repo.canonicalize().unwrap();
-    let qemu_memory = env_or("GINUX_BIGMEM_QEMU", "26G");
-    let domain_mib = env_or("GINUX_BIGMEM_DOMAIN_MIB", "24000");
-    let touch_mib: u64 = env_or("GINUX_BIGMEM_MIB", "16384").parse().unwrap();
+    let qemu_memory = env_or("LINOX_BIGMEM_QEMU", "26G");
+    let domain_mib = env_or("LINOX_BIGMEM_DOMAIN_MIB", "24000");
+    let touch_mib: u64 = env_or("LINOX_BIGMEM_MIB", "16384").parse().unwrap();
     let mut guest = Guest::boot(&repo, &repo.join("target/bigmem-test"), 2, &qemu_memory);
-    let mut at = guest.wait_for("ginux> ", 0, Duration::from_secs(90));
+    let mut at = guest.wait_for("linox> ", 0, Duration::from_secs(90));
     guest.send("domain new big");
-    at = guest.wait_for("ginux> ", at, Duration::from_secs(20));
+    at = guest.wait_for("linox> ", at, Duration::from_secs(20));
     guest.send(&format!(
         "domain set big image=builtin://rust init=/sbin/init memory-mib={domain_mib} cpu=1"
     ));
@@ -132,16 +132,16 @@ fn bigmem() {
     let mut shell = Shell { guest, at };
 
     let free = shell.free_mib("START");
-    shell.expect("SEGV", "ginux-memtest segv", 0, 139, None);
+    shell.expect("SEGV", "linox-memtest segv", 0, 139, None);
     shell.expect_free("AFTERSEGV", free);
 
     let gib = touch_mib / 1024;
     let ok = format!("MEMTEST OK {touch_mib}");
-    shell.expect("TOUCH", &format!("ginux-memtest touch {touch_mib}"), gib, 0, Some(&ok));
+    shell.expect("TOUCH", &format!("linox-memtest touch {touch_mib}"), gib, 0, Some(&ok));
     shell.expect_free("AFTERTOUCH", free);
     shell.expect(
         "BIGSEGV",
-        &format!("ginux-memtest touch {touch_mib} segv"),
+        &format!("linox-memtest touch {touch_mib} segv"),
         gib,
         139,
         Some(&ok),
@@ -150,7 +150,7 @@ fn bigmem() {
     // A big process starts others: fork (its pages shared copy-on-write)
     // and a vfork-and-exec spawn.
     for (tag, then, ok) in [("FORK", "fork", "FORK OK"), ("SPAWN", "spawn", "SPAWN OK")] {
-        let command = format!("ginux-memtest touch {touch_mib} {then}");
+        let command = format!("linox-memtest touch {touch_mib} {then}");
         shell.expect(tag, &command, gib, 0, Some(ok));
         shell.expect_free(&format!("AFTER{tag}"), free);
     }
@@ -158,13 +158,13 @@ fn bigmem() {
     // More than is free: Linux's OOM killer would SIGKILL the process.
     let free = shell.free_mib("BEFOREOOM");
     let too_much = free + 1024;
-    let (text, status) = shell.run("OOM", &format!("ginux-memtest touch {too_much}"), 0);
+    let (text, status) = shell.run("OOM", &format!("linox-memtest touch {too_much}"), 0);
     assert_eq!(
         status,
         128 + 9,
         "running out of memory: status; output {text:?}; see {}",
         shell.guest.log().display()
     );
-    eprintln!("bigmem: OOM: `ginux-memtest touch {too_much}` exited {status}");
+    eprintln!("bigmem: OOM: `linox-memtest touch {too_much}` exited {status}");
     shell.expect_free("AFTEROOM", free);
 }

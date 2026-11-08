@@ -7,7 +7,7 @@ The protocol service enters with `RBX` pointing to one read-only 56-byte record:
 
 | Offset | Width | Field |
 |---:|---:|---|
-| 0 | 8 | magic `GINUXPB0` |
+| 0 | 8 | magic `LINOXPB0` |
 | 8 | 2 | version `0` |
 | 10 | 2 | size `56` |
 | 12 | 4 | exact feature bits: packet consumer and Ethernet/ARP |
@@ -26,7 +26,7 @@ The capability is generation-local and conveys packet-object `READ` only. It
 is not a device handle, DMA address, MMIO mapping, or transferable authority.
 The expected sequence binds this invocation to exactly one FIFO head entry.
 
-The canonical Rust definition lives in `ginux-native-abi`; the independent C11
+The canonical Rust definition lives in `linox-native-abi`; the independent C11
 layout is `native-protocol-bootstrap-v0.h`. Both freeze the size, alignment, and
 field offsets. All multibyte scalar fields use native little-endian storage;
 MAC and IPv4 values represent network-order integers so conversion to wire

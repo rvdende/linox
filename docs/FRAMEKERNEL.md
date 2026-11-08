@@ -1,10 +1,10 @@
 # A small trusted core: the framekernel plan
 
-Ginux wants `unsafe` confined to a minimal, audited layer (page tables,
+Linox wants `unsafe` confined to a minimal, audited layer (page tables,
 context switch, MMIO, DMA, entry code, the allocators, per-CPU state and
 locks) with everything above it in safe Rust that the compiler checks. This
 is the "framekernel" architecture of Asterinas. This document measures where
-Ginux stands, proposes the boundary and the safe APIs the core must offer,
+Linox stands, proposes the boundary and the safe APIs the core must offer,
 and lays out an ordered migration with CI enforcement.
 
 Measured at `e321d83d` (2026-10-31). Every number below comes from
@@ -42,7 +42,7 @@ Measured at `e321d83d` (2026-10-31). Every number below comes from
   `docs/SCHEDULER.md` step 6 removes.
 
 **Proposed boundary.** A `trusted` module (later its own crate,
-`ginux-trusted`) holding: entry and context switch, CPU control, per-CPU
+`linox-trusted`) holding: entry and context switch, CPU control, per-CPU
 state, the frame allocator and heap, page tables behind an
 `AddressSpace`/`Cursor` API, user-memory copies behind `UserPtr<T: Pod>`,
 `IoMem`/`IoPort`/`DmaBuffer` (today's `drivers/device_memory.rs`), the I/O
@@ -92,7 +92,7 @@ so it costs nothing at run time. The paper's rules, in short:
   Theseus and RedLeaf. The authors test the framework under KernMiri, a
   Miri extended with simulated physical memory and paging.
 
-For Ginux this comes down to three rules:
+For Linox this comes down to three rules:
 
 1. **R1. Only the core contains `unsafe`,** and the compiler enforces it
    (`#![forbid(unsafe_code)]` everywhere else).
@@ -103,7 +103,7 @@ For Ginux this comes down to three rules:
 3. **R3. Memory that user space or a device can write is never behind a
    Rust reference,** only behind copy-in/copy-out or volatile accessors.
 
-Ginux differs from Asterinas in a way that helps: drivers and protocol
+Linox differs from Asterinas in a way that helps: drivers and protocol
 services are meant to run in ring-3 domains with IOMMU-confined DMA, so much
 of today's in-kernel driver code can leave the kernel instead of being made
 safe inside it.
@@ -113,7 +113,7 @@ safe inside it.
 ### 3.1 Method
 
 `tools/architecture/inventory-unsafe.sh` runs `cargo clippy` on
-`ginux-kernel` and `ginux-boot` with four extra lints raised to warnings,
+`linox-kernel` and `linox-boot` with four extra lints raised to warnings,
 in its own target directory (`target/unsafe-inventory`), and parses the JSON
 diagnostics:
 
@@ -246,7 +246,7 @@ What the categories look like in code:
   and needs four unsafe blocks in 640 lines.
 - **entry.** `extern "sysv64" fn syscall_handler(frame: *mut UserTrapFrame)`
   and 34 per-call helpers that start with `let Some(frame) = (unsafe { frame.as_ref() }) else { ... }`.
-- **user.** The fault-recovering `ginux_raw_copy_{from,to}_user` stubs and
+- **user.** The fault-recovering `linox_raw_copy_{from,to}_user` stubs and
   the `copy_*_current_user*` wrappers in `address_space.rs`, each with its
   own range check.
 
@@ -333,7 +333,7 @@ the legacy files on an allowlist) get `#![allow(unsafe_code)]`. Inside
 and `clippy::multiple_unsafe_ops_per_block` are denied, so every operation
 carries its own argument.
 
-Stage B moves `trusted` into its own crate, `crates/ginux-trusted`
+Stage B moves `trusted` into its own crate, `crates/linox-trusted`
 (`no_std`, built for `x86_64-unknown-uefi` like the kernel), and the kernel
 crate switches to `#![forbid(unsafe_code)]`. Only a crate boundary makes the
 rule absolute: `forbid` at a crate root cannot be overridden by any module,
@@ -404,7 +404,7 @@ kernel address can never pass the range check. Cross-process access
 target's `AddressSpace` and an owned frame instead of a direct-map
 pointer. Absorbs the 22 user sites, the plain-struct-as-bytes conversions in
 `cpu/linux_signal.rs`, and makes the six sound-by-design wrappers the only
-implementation. Exists: `ginux_raw_copy_{from,to}_user` with fix-ups and
+implementation. Exists: `linox_raw_copy_{from,to}_user` with fix-ups and
 `verify_user_copy_fault_fixups` in `cpu.rs`, `copy_from_current_user_partial`
 and friends in `address_space.rs`, and `check-user-access.sh`, which already
 confines `with_supervisor_user_access`.
@@ -427,7 +427,7 @@ allocator with per-owner accounting and generations (`memory.rs`),
 **D. Page tables.** `AddressSpace` owns its root and table frames; the
 kernel half is shared and immutable to safe code. A `Cursor` over a virtual
 range offers `query(va) -> Option<Mapping>` (a value: frame, permissions,
-the Ginux software bits), `map(va, UntypedFrame, Perms)`,
+the Linox software bits), `map(va, UntypedFrame, Perms)`,
 `unmap(va) -> Option<UntypedFrame>`, `protect(range, Perms)`, and the Linux
 operations built from them (copy-on-write marking, fork clone,
 `MADV_WIPEONFORK`/`DONTFORK` bits, sealing). `activate(&self)` returns a
@@ -481,7 +481,7 @@ CPU control becomes named operations (`cpu::enable_smap()`,
 `cpu::set_fs_base(u64)`, `cpu::halt_until_interrupt()`,
 `cpu::without_interrupts(|| ...)`). Absorbs the 105 entry and 28 CPU sites
 outside the core and the 36 trap-frame functions in the unsound list.
-Exists: `cpu/activation.rs` (stacks with guard pages, `ginux_call_on_stack`),
+Exists: `cpu/activation.rs` (stacks with guard pages, `linox_call_on_stack`),
 `cpu/architecture.rs` (per-CPU GDT/IDT/TSS, IST guard pages),
 `cpu/execution.rs` (xsave state), the entry invariants checked by
 `check-privilege-entry.sh`.
@@ -630,7 +630,7 @@ the context switch those steps introduce should be written into
     `kernel/src/trusted/`, deny `clippy::undocumented_unsafe_blocks` and
     `clippy::multiple_unsafe_ops_per_block` there, and reduce the legacy
     allowlist to empty.
-13. **Split the crate.** `crates/ginux-trusted`; the kernel crate becomes
+13. **Split the crate.** `crates/linox-trusted`; the kernel crate becomes
     `#![forbid(unsafe_code)]`; report the TCB share (lines of the trusted
     crate and its dependencies against the whole) in this document.
 14. **Test the core like a library.** Host-side unit tests for the logic
@@ -706,7 +706,7 @@ way. `make unsafe-report` can print the full summary for humans.
 - **Third-party code in the TCB.** By the Asterinas rule, dependencies of
   the trusted crate are in the TCB, and today everything the kernel links
   (`smoltcp`, `ed25519-dalek` and its curve crate, `miniz_oxide`,
-  `font8x8`, the nine Ginux crates) shares its address space. Keep the
+  `font8x8`, the nine Linox crates) shares its address space. Keep the
   trusted crate's dependencies to `core` and `alloc`; audit the others'
   unsafe with `cargo geiger` and pin versions (already done in
   `kernel/Cargo.toml`).

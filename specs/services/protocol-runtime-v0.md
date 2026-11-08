@@ -6,7 +6,7 @@ bounded resident wait-loop proof across two separately published packets.
 
 ## Boundary
 
-`ginux-protocol-service-runtime` is a `no_std`, `no_main` static PIE built for
+`linox-protocol-service-runtime` is a `no_std`, `no_main` static PIE built for
 `x86_64-unknown-none`. `make protocol-service` builds it directly; `make
 manifest`, `make check`, and `make gate` include it. Manifest generation stores
 the exact artifact at `native/protocol` in the signed deterministic initramfs.
@@ -60,7 +60,7 @@ live between arrivals, FIFO exhaustion to advance exactly twice, and all wait
 keys, capabilities, address-space frames, and producer frames to be retired.
 
 Ethernet/ARP parsing and one-entry neighbor state live in the reusable
-`ginux-protocol-state` `no_std` crate. The first reply learns the configured
+`linox-protocol-state` `no_std` crate. The first reply learns the configured
 peer's MAC, the second refreshes it, and a locally constructed conflicting
 mapping must be rejected without mutating the learned entry.
 

@@ -3,7 +3,7 @@
 ## Goal
 
 Provide enough native desktop, window management, text, and widget support to
-build real Ginux controller applications.
+build real Linox controller applications.
 
 ## Approved scope
 

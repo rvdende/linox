@@ -57,7 +57,7 @@ is unavailable.
 - Source inspection and targeted search -> no RTC-derived TLS seed remains and
   every provider construction handles entropy failure.
 - `make check` -> formatting, architecture, lint, and unit checks pass.
-- `make test` -> complete QEMU verification emits `GINUX_KERNEL_OK` and
+- `make test` -> complete QEMU verification emits `LINOX_KERNEL_OK` and
   `Boot test passed.`
 
 ## Evidence
@@ -68,7 +68,7 @@ is unavailable.
 - `cargo fmt --all -- --check` and targeted warning-denying network-service
   clippy -> passed.
 - `make check` -> passed all static, architecture, lint, and unit checks.
-- `make test` on QEMU 10.1.2/TCG -> emitted `GINUX_KERNEL_OK` and
+- `make test` on QEMU 10.1.2/TCG -> emitted `LINOX_KERNEL_OK` and
   `Boot test passed.`
 - Maintainer review found and removed the false `preserves_flags` declaration
   from the `RDRAND`/`setc` assembly; targeted clippy, fresh `make check`, and

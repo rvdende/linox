@@ -32,7 +32,7 @@ bypass=$(awk '
 }
 
 if [[ $# == 0 ]]; then
-    negative=$(mktemp "${TMPDIR:-/tmp}/ginux-x86-owner-negative.XXXXXX")
+    negative=$(mktemp "${TMPDIR:-/tmp}/linox-x86-owner-negative.XXXXXX")
     trap 'rm -f "$negative"' EXIT
     cp "$source_file" "$negative"
     printf '\nfn invalid_runtime_bypass() { let _ = &X86_RUNTIME_BACKING_LINUX_RUNTIME_MODE; }\n' >>"$negative"

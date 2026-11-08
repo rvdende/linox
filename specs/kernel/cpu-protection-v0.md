@@ -53,7 +53,7 @@ selector, stack discipline, and basic exception return path work together.
 The kernel breakpoint exception remains recoverable. Other exceptions from
 CPL0 enter a common fatal path with a normalized vector and error code. The
 fatal path reports both values and the instruction address, reports CR2 for
-page faults, emits `GINUX_KERNEL_PANIC`, and halts. Exceptions from CPL3 instead
+page faults, emits `LINOX_KERNEL_PANIC`, and halts. Exceptions from CPL3 instead
 enter the scheduler containment path. Its hardware proof deliberately executes
 an unmapped null-page write in one context, validates vector 14, the user-write
 error bits, `CR2`, and the measured faulting instruction address, destroys only

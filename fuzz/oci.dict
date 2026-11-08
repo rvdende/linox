@@ -1,4 +1,4 @@
-# libFuzzer dictionary for ginux-oci surfaces (v2.6-2).
+# libFuzzer dictionary for linox-oci surfaces (v2.6-2).
 # tar/ustar header fields, PAX record syntax, whiteouts, registry JSON keys,
 # media types, digest/bearer/reference tokens — the boundary fields that
 # mutation alone reaches slowly.

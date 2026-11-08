@@ -1,7 +1,7 @@
 //! NETLINK_ROUTE sockets: what `ip addr`, `ip link` and `ip route` ask.
 //!
 //! A request sent on a NETLINK_ROUTE socket is answered at once from the
-//! sender's network namespace, by `ginux_rtnetlink`, and the answers wait
+//! sender's network namespace, by `linox_rtnetlink`, and the answers wait
 //! on the socket for its reader. The namespace the domain starts in has the
 //! domain's loopback and eth0, with eth0's IPv4 address, its subnet and
 //! default route, and IPv6 loopback; a network namespace made inside it has
@@ -17,7 +17,7 @@
 
 use super::*;
 
-use ginux_rtnetlink as rtnetlink;
+use linox_rtnetlink as rtnetlink;
 
 /// NETLINK_ROUTE's protocol number.
 pub(super) const LINUX_NETLINK_ROUTE: u8 = 0;
@@ -267,7 +267,7 @@ impl Namespace<'_> {
 impl rtnetlink::Network for Namespace<'_> {
     fn administrator(&self) -> bool {
         current_linux_credentials()
-            .is_some_and(|credentials| credentials.has(ginux_credentials::capability::NET_ADMIN))
+            .is_some_and(|credentials| credentials.has(linox_credentials::capability::NET_ADMIN))
     }
 
     fn change_link(&mut self, change: rtnetlink::LinkChange) -> Result<(), i32> {

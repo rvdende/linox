@@ -50,7 +50,7 @@ kernel-entry path in an unbounded spin when the guest requests no timeout.
   deadline and the helper previously had no other exit when nothing was ready.
 - `make check` passed with the 1,032-block unsafe baseline and complete policy checks.
 - `make test` passed, emitted the synchronous poll budget marker, and ended with
-  `GINUX_KERNEL_OK` and `Boot test passed`.
+  `LINOX_KERNEL_OK` and `Boot test passed`.
 
 ## Decisions and limitations
 

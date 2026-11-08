@@ -1,10 +1,10 @@
 //! The key retention service of each domain (add_key, request_key, keyctl):
-//! `ginux_keyrings` keeps the keys and checks every rule; this holds one set
+//! `linox_keyrings` keeps the keys and checks every rule; this holds one set
 //! of keys per domain instance.
 
 use alloc::vec::Vec;
 
-pub(crate) use ginux_keyrings::{Caller, Error, Keyrings, Output};
+pub(crate) use linox_keyrings::{Caller, Error, Keyrings, Output};
 
 use crate::arch::x86_64::cpu;
 use crate::linux_process;

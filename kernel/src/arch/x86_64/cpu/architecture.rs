@@ -6,7 +6,7 @@ use core::{
 };
 
 use super::{
-    ginux_exception_entries, read_msr, write_msr, BOOT_CPU_INDEX, CPU_ENTRY_STATE_LIMIT,
+    linox_exception_entries, read_msr, write_msr, BOOT_CPU_INDEX, CPU_ENTRY_STATE_LIMIT,
     CPU_KERNEL_STACK_STORAGE_SIZE, CPU_KERNEL_STACK_TOP_OFFSET, DOUBLE_FAULT_IST,
     EXCEPTION_STACK_STORAGE_SIZE, EXCEPTION_STACK_TOP_OFFSET, GS_BASE_MSR, IST_STACK_STORAGE_SIZE,
     IST_STACK_TOP_OFFSET, KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, KERNEL_GS_BASE_MSR,
@@ -583,7 +583,7 @@ unsafe fn install_gdt_and_tss(cpu: usize) {
 }
 
 unsafe fn install_idt(cpu: usize) {
-    let entries = core::ptr::addr_of!(ginux_exception_entries).cast::<usize>();
+    let entries = core::ptr::addr_of!(linox_exception_entries).cast::<usize>();
     let idt = CPU_ARCHITECTURE
         .idt
         .get()

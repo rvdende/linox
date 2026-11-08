@@ -22,7 +22,7 @@ requires `READ` authority for console object 2; output requires `WRITE`.
 Successful input renews the bounded call epoch so the resident controller can
 remain interactive without acquiring new authority.
 
-The C1 resident controller is a measured static PIE embedded in `GINUX.EFI`.
+The C1 resident controller is a measured static PIE embedded in `LINOX.EFI`.
 It owns a read/write console capability and separate read-only measured-root
 and host-inspection capabilities. It parses `help`, `status`, `components`,
 `ls`, `ps`, and `shutdown` in ring 3, and exits cleanly to request firmware

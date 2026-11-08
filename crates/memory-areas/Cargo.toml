@@ -1,5 +1,5 @@
 [package]
-name = "ginux-memory-areas"
+name = "linox-memory-areas"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true

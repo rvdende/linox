@@ -17,7 +17,7 @@ if [ ! -f /opt/ltp/runtest/syscalls ]; then
     wget -q -O - "$base/ltp.tar.xz" | xzcat | tar -xf - -C /opt
     [ -f /opt/ltp/runtest/syscalls ] || fail "LTP tree download or extraction"
 fi
-# The module index a Linux kernel package installs: Ginux loads no modules,
+# The module index a Linux kernel package installs: Linox loads no modules,
 # and these are the parts LTP asks modprobe for that it has built in, so
 # "modprobe x509_key_parser" succeeds as on a kernel with them built in.
 modules=/lib/modules/$(uname -r)

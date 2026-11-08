@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
-pub const NATIVE_SERVICE_BOOT_MAGIC: u64 = 0x3042_5358_554e_4947;
+pub const NATIVE_SERVICE_BOOT_MAGIC: u64 = 0x3042_5358_4f4e_494c;
 pub const NATIVE_SERVICE_BOOT_VERSION: u16 = 0;
 pub const NATIVE_SERVICE_BOOT_SIZE: u16 = 64;
 pub const NATIVE_SERVICE_FEATURE_VIRTIO_BLOCK: u32 = 1 << 0;
-pub const NATIVE_NETWORK_BOOT_MAGIC: u64 = 0x3042_4e58_554e_4947;
+pub const NATIVE_NETWORK_BOOT_MAGIC: u64 = 0x3042_4e58_4f4e_494c;
 pub const NATIVE_NETWORK_BOOT_VERSION: u16 = 0;
 pub const NATIVE_NETWORK_BOOT_SIZE: u16 = 80;
 pub const NATIVE_NETWORK_FEATURE_VIRTIO_NETWORK: u32 = 1 << 0;
@@ -47,10 +47,10 @@ pub const NATIVE_SERVICE_EXIT_OPERATION: u64 = 2;
 pub const NATIVE_SERVICE_EXIT_COMPLETED: u8 = 0;
 pub const NATIVE_SERVICE_EXIT_REJECTED: u8 = 1;
 pub const NATIVE_SERVICE_EXIT_RESTART_REQUIRED: u8 = 2;
-// Linux _IOWR('G', 1, struct GinuxControlIoctlV0).
-pub const GINUX_CONTROL_IOCTL: u64 = 0xc020_4701;
-pub const GINUX_CONTROL_IOCTL_VERSION: u16 = 0;
-pub const GINUX_CONTROL_IOCTL_SIZE: u32 = 32;
+// Linux _IOWR('G', 1, struct LinoxControlIoctlV0).
+pub const LINOX_CONTROL_IOCTL: u64 = 0xc020_4701;
+pub const LINOX_CONTROL_IOCTL_VERSION: u16 = 0;
+pub const LINOX_CONTROL_IOCTL_SIZE: u32 = 32;
 pub const NATIVE_BLOCK_WAIT_OPERATION: u64 = 19;
 pub const NATIVE_BLOCK_WAIT_PREPARED: u64 = 1;
 pub const NATIVE_BLOCK_WAIT_NOTIFIED: u64 = 2;
@@ -105,7 +105,7 @@ pub const NATIVE_PACKET_DRAINED: u64 = u64::MAX - 6;
 pub const NATIVE_PACKET_WAIT_MAX_TIMEOUT_MS: u64 = 1_000;
 pub const NATIVE_PACKET_STALE: u64 = u64::MAX - 4;
 pub const NATIVE_CALL_FAILED: u64 = u64::MAX - 2;
-pub const NATIVE_PROTOCOL_BOOT_MAGIC: u64 = 0x3042_5058_554e_4947;
+pub const NATIVE_PROTOCOL_BOOT_MAGIC: u64 = 0x3042_5058_4f4e_494c;
 pub const NATIVE_PROTOCOL_BOOT_VERSION: u16 = 0;
 pub const NATIVE_PROTOCOL_BOOT_SIZE: u16 = 56;
 pub const NATIVE_PROTOCOL_FEATURE_PACKET_CONSUMER: u32 = 1 << 0;
@@ -389,14 +389,14 @@ impl NativeControlDescriptorV4 {
 const _: () = assert!(core::mem::size_of::<NativeControlDescriptorV4>() == 16);
 const _: () = assert!(core::mem::align_of::<NativeControlDescriptorV4>() == 4);
 
-/// Versioned payload for the Linux `/dev/ginuxctl` ioctl transport.
+/// Versioned payload for the Linux `/dev/linoxctl` ioctl transport.
 ///
 /// The operation payload remains pointer-free except where the selected
 /// operation explicitly names a userspace buffer. The ioctl return value is
 /// the operation result.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct GinuxControlIoctlV0 {
+pub struct LinoxControlIoctlV0 {
     pub size: u32,
     pub version: u16,
     pub reserved: u16,
@@ -405,11 +405,11 @@ pub struct GinuxControlIoctlV0 {
     pub second: u64,
 }
 
-impl GinuxControlIoctlV0 {
+impl LinoxControlIoctlV0 {
     pub const fn new(operation: u64, first: u64, second: u64) -> Self {
         Self {
-            size: GINUX_CONTROL_IOCTL_SIZE,
-            version: GINUX_CONTROL_IOCTL_VERSION,
+            size: LINOX_CONTROL_IOCTL_SIZE,
+            version: LINOX_CONTROL_IOCTL_VERSION,
             reserved: 0,
             operation,
             first,
@@ -418,7 +418,7 @@ impl GinuxControlIoctlV0 {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<GinuxControlIoctlV0>() == 32);
+const _: () = assert!(core::mem::size_of::<LinoxControlIoctlV0>() == 32);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -2004,7 +2004,7 @@ mod tests {
 
     #[test]
     fn layout_and_header_are_frozen() {
-        assert_eq!(NATIVE_SERVICE_BOOT_MAGIC.to_le_bytes(), *b"GINUXSB0");
+        assert_eq!(NATIVE_SERVICE_BOOT_MAGIC.to_le_bytes(), *b"LINOXSB0");
         assert_eq!(core::mem::size_of::<NativeServiceBootV0>(), 64);
         assert_eq!(core::mem::align_of::<NativeServiceBootV0>(), 8);
         assert_eq!(core::mem::offset_of!(NativeServiceBootV0, magic), 0);
@@ -2025,73 +2025,73 @@ mod tests {
     #[test]
     fn c_binding_tracks_the_canonical_contract() {
         let header = include_str!("../../../specs/abi/native-service-bootstrap-v0.h");
-        assert!(header.contains("UINT64_C(0x30425358554e4947)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_BOOT_VERSION UINT16_C(0)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_BOOT_SIZE UINT16_C(64)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_FEATURE_VIRTIO_BLOCK UINT32_C(1)"));
-        assert!(header.contains("sizeof(struct ginux_native_service_boot_v0) == 64"));
+        assert!(header.contains("UINT64_C(0x304253584f4e494c)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_BOOT_VERSION UINT16_C(0)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_BOOT_SIZE UINT16_C(64)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_FEATURE_VIRTIO_BLOCK UINT32_C(1)"));
+        assert!(header.contains("sizeof(struct linox_native_service_boot_v0) == 64"));
         let network_header = include_str!("../../../specs/abi/native-network-bootstrap-v0.h");
-        assert!(network_header.contains("UINT64_C(0x30424e58554e4947)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_BOOT_VERSION UINT16_C(0)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_BOOT_SIZE UINT16_C(80)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_VIRTIO_NETWORK UINT32_C(1)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EMPTY_QUEUES UINT32_C(2)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_TRANSMIT_PROBE UINT32_C(4)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_TX_INTERRUPT UINT32_C(8)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_ARP_PROBE UINT32_C(16)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_RX_REUSE UINT32_C(32)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_DHCP UINT32_C(131072)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_PACKET_HANDOFF UINT32_C(64)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_PACKET_FAULT UINT32_C(128)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_PACKET_BATCH UINT32_C(256)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_PACKET_EGRESS UINT32_C(512)"));
+        assert!(network_header.contains("UINT64_C(0x30424e584f4e494c)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_BOOT_VERSION UINT16_C(0)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_BOOT_SIZE UINT16_C(80)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_VIRTIO_NETWORK UINT32_C(1)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EMPTY_QUEUES UINT32_C(2)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_TRANSMIT_PROBE UINT32_C(4)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_TX_INTERRUPT UINT32_C(8)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_ARP_PROBE UINT32_C(16)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_RX_REUSE UINT32_C(32)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_DHCP UINT32_C(131072)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_PACKET_HANDOFF UINT32_C(64)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_PACKET_FAULT UINT32_C(128)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_PACKET_BATCH UINT32_C(256)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_PACKET_EGRESS UINT32_C(512)"));
         assert!(
-            network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_RELIABLE_EGRESS UINT32_C(1024)")
+            network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_RELIABLE_EGRESS UINT32_C(1024)")
         );
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EGRESS_FAULT UINT32_C(2048)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EGRESS_WAIT UINT32_C(4096)"));
-        assert!(network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EGRESS_REUSE UINT32_C(8192)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EGRESS_FAULT UINT32_C(2048)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EGRESS_WAIT UINT32_C(4096)"));
+        assert!(network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EGRESS_REUSE UINT32_C(8192)"));
         assert!(
-            network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EGRESS_BATCH UINT32_C(16384)")
-        );
-        assert!(
-            network_header.contains("GINUX_NATIVE_NETWORK_FEATURE_EGRESS_RESIDENT UINT32_C(32768)")
-        );
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_QUEUE_CAPACITY UINT32_C(4)"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_WAIT_OPERATION UINT64_C(23)"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_WAIT_TIMEOUT_OPERATION UINT64_C(24)"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_SPACE_WAIT_OPERATION UINT64_C(25)"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_EGRESS_WAIT_OPERATION UINT64_C(28)"));
-        assert!(
-            network_header.contains("GINUX_NATIVE_PACKET_EGRESS_SPACE_WAIT_OPERATION UINT64_C(29)")
+            network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EGRESS_BATCH UINT32_C(16384)")
         );
         assert!(
-            network_header.contains("GINUX_NATIVE_PACKET_EGRESS_DRAIN_WAIT_OPERATION UINT64_C(30)")
+            network_header.contains("LINOX_NATIVE_NETWORK_FEATURE_EGRESS_RESIDENT UINT32_C(32768)")
+        );
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_QUEUE_CAPACITY UINT32_C(4)"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_WAIT_OPERATION UINT64_C(23)"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_WAIT_TIMEOUT_OPERATION UINT64_C(24)"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_SPACE_WAIT_OPERATION UINT64_C(25)"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_EGRESS_WAIT_OPERATION UINT64_C(28)"));
+        assert!(
+            network_header.contains("LINOX_NATIVE_PACKET_EGRESS_SPACE_WAIT_OPERATION UINT64_C(29)")
+        );
+        assert!(
+            network_header.contains("LINOX_NATIVE_PACKET_EGRESS_DRAIN_WAIT_OPERATION UINT64_C(30)")
         );
         assert!(network_header
-            .contains("GINUX_NATIVE_PACKET_WAIT_TIMED_OUT (UINT64_MAX - UINT64_C(5))"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_DRAINED (UINT64_MAX - UINT64_C(6))"));
-        assert!(network_header.contains("GINUX_NATIVE_PACKET_WAIT_MAX_TIMEOUT_MS UINT64_C(1000)"));
-        assert!(network_header.contains("sizeof(struct ginux_native_network_boot_v1) == 88"));
-        assert!(network_header.contains("sizeof(struct ginux_native_network_boot_v2) == 96"));
-        assert!(network_header.contains("sizeof(struct ginux_native_network_boot_v3) == 96"));
-        assert!(network_header.contains("sizeof(struct ginux_native_network_boot_v4) == 96"));
-        assert!(network_header.contains("sizeof(struct ginux_native_packet_request_v0) == 32"));
-        assert!(network_header.contains("sizeof(struct ginux_native_network_boot_v0) == 80"));
+            .contains("LINOX_NATIVE_PACKET_WAIT_TIMED_OUT (UINT64_MAX - UINT64_C(5))"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_DRAINED (UINT64_MAX - UINT64_C(6))"));
+        assert!(network_header.contains("LINOX_NATIVE_PACKET_WAIT_MAX_TIMEOUT_MS UINT64_C(1000)"));
+        assert!(network_header.contains("sizeof(struct linox_native_network_boot_v1) == 88"));
+        assert!(network_header.contains("sizeof(struct linox_native_network_boot_v2) == 96"));
+        assert!(network_header.contains("sizeof(struct linox_native_network_boot_v3) == 96"));
+        assert!(network_header.contains("sizeof(struct linox_native_network_boot_v4) == 96"));
+        assert!(network_header.contains("sizeof(struct linox_native_packet_request_v0) == 32"));
+        assert!(network_header.contains("sizeof(struct linox_native_network_boot_v0) == 80"));
         let protocol_header = include_str!("../../../specs/abi/native-protocol-bootstrap-v0.h");
-        assert!(protocol_header.contains("UINT64_C(0x30425058554e4947)"));
-        assert!(protocol_header.contains("GINUX_NATIVE_PROTOCOL_BOOT_SIZE UINT16_C(56)"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v0) == 56"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v1) == 56"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v2) == 56"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v3) == 56"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v4) == 56"));
-        assert!(protocol_header.contains("sizeof(struct ginux_native_protocol_boot_v5) == 72"));
+        assert!(protocol_header.contains("UINT64_C(0x304250584f4e494c)"));
+        assert!(protocol_header.contains("LINOX_NATIVE_PROTOCOL_BOOT_SIZE UINT16_C(56)"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v0) == 56"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v1) == 56"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v2) == 56"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v3) == 56"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v4) == 56"));
+        assert!(protocol_header.contains("sizeof(struct linox_native_protocol_boot_v5) == 72"));
     }
 
     #[test]
     fn protocol_bootstrap_layout_and_validation_are_frozen() {
-        assert_eq!(NATIVE_PROTOCOL_BOOT_MAGIC.to_le_bytes(), *b"GINUXPB0");
+        assert_eq!(NATIVE_PROTOCOL_BOOT_MAGIC.to_le_bytes(), *b"LINOXPB0");
         assert_eq!(core::mem::size_of::<NativeProtocolBootV0>(), 56);
         assert_eq!(core::mem::align_of::<NativeProtocolBootV0>(), 8);
         assert_eq!(core::mem::offset_of!(NativeProtocolBootV0, magic), 0);
@@ -2196,37 +2196,37 @@ mod tests {
     #[test]
     fn lifecycle_binding_tracks_the_canonical_contract() {
         let header = include_str!("../../../specs/abi/native-service-lifecycle-v0.h");
-        assert!(header.contains("GINUX_NATIVE_SERVICE_EXIT_OPERATION UINT64_C(2)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_EXIT_COMPLETED UINT8_C(0)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_EXIT_REJECTED UINT8_C(1)"));
-        assert!(header.contains("GINUX_NATIVE_SERVICE_EXIT_RESTART_REQUIRED UINT8_C(2)"));
-        assert!(header.contains("GINUX_NATIVE_BLOCK_WAIT_OPERATION UINT64_C(19)"));
-        assert!(header.contains("GINUX_NATIVE_BLOCK_WAIT_PREPARED UINT64_C(1)"));
-        assert!(header.contains("GINUX_NATIVE_BLOCK_WAIT_NOTIFIED UINT64_C(2)"));
-        assert!(header.contains("GINUX_NATIVE_BLOCK_WAIT_CANCELLED (UINT64_MAX - UINT64_C(5))"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_OPERATION UINT64_C(16)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_PROBE UINT64_C(0)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_DHCP UINT64_C(15)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_QUERY_DHCP UINT64_C(16)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_SET_DNS UINT64_C(17)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_QUERY_DNS UINT64_C(18)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_QUERY_PING_TARGET UINT64_C(19)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_DEVICE_ACTIVATE_EMPTY_QUEUES UINT64_C(12)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_EXIT_OPERATION UINT64_C(2)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_EXIT_COMPLETED UINT8_C(0)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_EXIT_REJECTED UINT8_C(1)"));
+        assert!(header.contains("LINOX_NATIVE_SERVICE_EXIT_RESTART_REQUIRED UINT8_C(2)"));
+        assert!(header.contains("LINOX_NATIVE_BLOCK_WAIT_OPERATION UINT64_C(19)"));
+        assert!(header.contains("LINOX_NATIVE_BLOCK_WAIT_PREPARED UINT64_C(1)"));
+        assert!(header.contains("LINOX_NATIVE_BLOCK_WAIT_NOTIFIED UINT64_C(2)"));
+        assert!(header.contains("LINOX_NATIVE_BLOCK_WAIT_CANCELLED (UINT64_MAX - UINT64_C(5))"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_OPERATION UINT64_C(16)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_PROBE UINT64_C(0)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_DHCP UINT64_C(15)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_QUERY_DHCP UINT64_C(16)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_SET_DNS UINT64_C(17)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_QUERY_DNS UINT64_C(18)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_QUERY_PING_TARGET UINT64_C(19)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_DEVICE_ACTIVATE_EMPTY_QUEUES UINT64_C(12)"));
         assert!(header
-            .contains("GINUX_NATIVE_NETWORK_DEVICE_DESCRIPTOR_WORD UINT64_C(0x0000000105dc0009)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_WAIT_OPERATION UINT64_C(20)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_WAIT_TX_NOTIFIED UINT64_C(1)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_WAIT_RX_POSTED UINT64_C(2)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_WAIT_CANCELLED (UINT64_MAX - UINT64_C(5))"));
-        assert!(header.contains("GINUX_NATIVE_CONTROL_DISCOVERY_OPERATION UINT64_C(0)"));
-        assert!(header.contains("GINUX_NATIVE_CONTROL_ABI_VERSION UINT16_C(4)"));
-        assert!(header.contains("GINUX_NATIVE_CONTROL_REQUIRED_FEATURES UINT16_C(1041)"));
-        assert!(header.contains("GINUX_NATIVE_CONTROL_DESCRIPTOR_OPERATION UINT64_C(10)"));
-        assert!(header.contains("GINUX_NATIVE_CONTROL_FEATURE_PACKET_HANDOFF UINT16_C(2048)"));
-        assert!(header.contains("GINUX_NATIVE_LINUX_ABI_TEST_OPERATION UINT64_C(34)"));
-        assert!(header.contains("GINUX_NATIVE_LINUX_ABI_TEST_COUNT UINT32_C(23)"));
-        assert!(header.contains("GINUX_NATIVE_DOMAIN_REQUEST_VERSION UINT16_C(3)"));
-        assert!(header.contains("struct ginux_native_domain_request_v3"));
+            .contains("LINOX_NATIVE_NETWORK_DEVICE_DESCRIPTOR_WORD UINT64_C(0x0000000105dc0009)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_WAIT_OPERATION UINT64_C(20)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_WAIT_TX_NOTIFIED UINT64_C(1)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_WAIT_RX_POSTED UINT64_C(2)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_WAIT_CANCELLED (UINT64_MAX - UINT64_C(5))"));
+        assert!(header.contains("LINOX_NATIVE_CONTROL_DISCOVERY_OPERATION UINT64_C(0)"));
+        assert!(header.contains("LINOX_NATIVE_CONTROL_ABI_VERSION UINT16_C(4)"));
+        assert!(header.contains("LINOX_NATIVE_CONTROL_REQUIRED_FEATURES UINT16_C(1041)"));
+        assert!(header.contains("LINOX_NATIVE_CONTROL_DESCRIPTOR_OPERATION UINT64_C(10)"));
+        assert!(header.contains("LINOX_NATIVE_CONTROL_FEATURE_PACKET_HANDOFF UINT16_C(2048)"));
+        assert!(header.contains("LINOX_NATIVE_LINUX_ABI_TEST_OPERATION UINT64_C(34)"));
+        assert!(header.contains("LINOX_NATIVE_LINUX_ABI_TEST_COUNT UINT32_C(23)"));
+        assert!(header.contains("LINOX_NATIVE_DOMAIN_REQUEST_VERSION UINT16_C(3)"));
+        assert!(header.contains("struct linox_native_domain_request_v3"));
         assert_eq!(core::mem::offset_of!(NativeDomainRequestV3, cpu_count), 70);
         assert_eq!(
             core::mem::offset_of!(NativeDomainRequestV3, memory_mib),
@@ -2236,14 +2236,14 @@ mod tests {
             core::mem::offset_of!(NativeDomainRequestV3, personality),
             216
         );
-        assert!(header.contains("GINUX_NATIVE_NETWORK_INVENTORY_OPERATION UINT64_C(38)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_INVENTORY_SET_LINK UINT16_C(5)"));
-        assert!(header.contains("GINUX_NATIVE_NETWORK_FLAG_UP UINT16_C(0x0100)"));
-        assert!(header.contains("GINUX_NATIVE_TIMESTAMP_FREQUENCY_OPERATION UINT64_C(39)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_INVENTORY_OPERATION UINT64_C(38)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_INVENTORY_SET_LINK UINT16_C(5)"));
+        assert!(header.contains("LINOX_NATIVE_NETWORK_FLAG_UP UINT16_C(0x0100)"));
+        assert!(header.contains("LINOX_NATIVE_TIMESTAMP_FREQUENCY_OPERATION UINT64_C(39)"));
         assert!(header
-            .contains("GINUX_NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE (UINT64_MAX - UINT64_C(2))"));
-        assert!(header.contains("struct ginux_native_network_inventory_request_v0"));
-        assert!(header.contains("sizeof(struct ginux_native_control_descriptor_v4) == 16"));
+            .contains("LINOX_NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE (UINT64_MAX - UINT64_C(2))"));
+        assert!(header.contains("struct linox_native_network_inventory_request_v0"));
+        assert!(header.contains("sizeof(struct linox_native_control_descriptor_v4) == 16"));
     }
 
     #[test]
@@ -2272,7 +2272,7 @@ mod tests {
 
     #[test]
     fn network_bootstrap_layout_and_validation_are_frozen() {
-        assert_eq!(NATIVE_NETWORK_BOOT_MAGIC.to_le_bytes(), *b"GINUXNB0");
+        assert_eq!(NATIVE_NETWORK_BOOT_MAGIC.to_le_bytes(), *b"LINOXNB0");
         assert_eq!(core::mem::size_of::<NativeNetworkBootV0>(), 80);
         assert_eq!(core::mem::align_of::<NativeNetworkBootV0>(), 8);
         assert_eq!(core::mem::offset_of!(NativeNetworkBootV0, magic), 0);
@@ -2719,17 +2719,17 @@ mod tests {
 
     #[test]
     fn linux_control_ioctl_layout_is_frozen() {
-        let request = GinuxControlIoctlV0::new(17, 23, 42);
-        assert_eq!(GINUX_CONTROL_IOCTL, 0xc020_4701);
-        assert_eq!(core::mem::size_of::<GinuxControlIoctlV0>(), 32);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, size), 0);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, version), 4);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, reserved), 6);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, operation), 8);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, first), 16);
-        assert_eq!(core::mem::offset_of!(GinuxControlIoctlV0, second), 24);
-        assert_eq!(request.size, GINUX_CONTROL_IOCTL_SIZE);
-        assert_eq!(request.version, GINUX_CONTROL_IOCTL_VERSION);
+        let request = LinoxControlIoctlV0::new(17, 23, 42);
+        assert_eq!(LINOX_CONTROL_IOCTL, 0xc020_4701);
+        assert_eq!(core::mem::size_of::<LinoxControlIoctlV0>(), 32);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, size), 0);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, version), 4);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, reserved), 6);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, operation), 8);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, first), 16);
+        assert_eq!(core::mem::offset_of!(LinoxControlIoctlV0, second), 24);
+        assert_eq!(request.size, LINOX_CONTROL_IOCTL_SIZE);
+        assert_eq!(request.version, LINOX_CONTROL_IOCTL_VERSION);
         assert_eq!(request.reserved, 0);
     }
 }

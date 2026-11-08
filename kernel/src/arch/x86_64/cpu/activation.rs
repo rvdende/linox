@@ -158,12 +158,12 @@ static ACTIVATIONS: SpinLock<Vec<Box<Activation>>> =
 global_asm!(
     r#"
     .text
-    .global ginux_switch_stack
-// ginux_switch_stack(save: rdi, load: rsi) saves the callee-saved registers
+    .global linox_switch_stack
+// linox_switch_stack(save: rdi, load: rsi) saves the callee-saved registers
 // on the current stack, stores its stack pointer at [rdi], loads the stack
 // pointer in rsi, restores that context's callee-saved registers and
 // returns into wherever it switched away.
-ginux_switch_stack:
+linox_switch_stack:
     push rbp
     push rbx
     push r12
@@ -179,10 +179,10 @@ ginux_switch_stack:
     pop rbx
     pop rbp
     ret
-    .global ginux_context_start
+    .global linox_context_start
 // A new context's first switch returns here with its function in r12 and
 // the function's argument in r13. The function never returns.
-ginux_context_start:
+linox_context_start:
     mov rdi, r13
     call r12
     ud2
@@ -190,8 +190,8 @@ ginux_context_start:
 );
 
 extern "sysv64" {
-    fn ginux_switch_stack(save: *mut usize, load: usize);
-    fn ginux_context_start();
+    fn linox_switch_stack(save: *mut usize, load: usize);
+    fn linox_context_start();
 }
 
 /// What had become of an activation when control came back to the context
@@ -259,7 +259,7 @@ extern "sysv64" fn run_activation(argument: *mut c_void) -> ! {
             (*activation).rflags,
         );
         (*activation).state = State::Finished;
-        ginux_switch_stack(&raw mut (*activation).context, (*activation).caller);
+        linox_switch_stack(&raw mut (*activation).context, (*activation).caller);
     }
     unreachable!("a finished activation is never resumed")
 }
@@ -275,7 +275,7 @@ unsafe fn run(activation: *mut Activation) -> Outcome {
     let state = unsafe {
         (*activation).base_depth = crate::sync::kernel_entry_depth();
         crate::sync::kernel_entry_attach(core::mem::take(&mut (*activation).parked_depth));
-        ginux_switch_stack(&raw mut (*activation).caller, (*activation).context);
+        linox_switch_stack(&raw mut (*activation).caller, (*activation).context);
         (*activation).state
     };
     match state {
@@ -294,7 +294,7 @@ unsafe fn run(activation: *mut Activation) -> Outcome {
             }
             Outcome::Finished
         }
-        State::Running => crate::kernel_fail("ginux: activation switched away while running\r\n"),
+        State::Running => crate::kernel_fail("linox: activation switched away while running\r\n"),
     }
 }
 
@@ -304,7 +304,7 @@ unsafe fn run(activation: *mut Activation) -> Outcome {
 ///
 /// # Safety
 ///
-/// As for `ginux_process_user_enter`: the caller activated the process's
+/// As for `linox_process_user_enter`: the caller activated the process's
 /// address space and validated the complete user context in `general`
 /// (fifteen registers).
 pub(super) unsafe fn enter_on_own_stack(
@@ -319,9 +319,9 @@ pub(super) unsafe fn enter_on_own_stack(
     // the runtime owns its frames).
     if !SWITCHING_VERIFIED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         if !verify_stack_switching() {
-            crate::kernel_fail("ginux: kernel stack switching invalid\r\n");
+            crate::kernel_fail("linox: kernel stack switching invalid\r\n");
         }
-        crate::serial_write_raw(b"ginux: kernel stack switching validated\r\n");
+        crate::serial_write_raw(b"linox: kernel stack switching validated\r\n");
     }
     let kernel_stack = take_stack()?;
     let mut registers = [0_u64; 15];
@@ -389,7 +389,7 @@ pub(super) fn park(owner: u64) -> bool {
         let own = crate::sync::kernel_entry_depth().saturating_sub((*activation).base_depth);
         crate::sync::kernel_entry_detach(own);
         (*activation).parked_depth = own;
-        ginux_switch_stack(&raw mut (*activation).context, (*activation).caller);
+        linox_switch_stack(&raw mut (*activation).context, (*activation).caller);
         *super::current_entry_state() = (*activation).entry_state;
     }
     true
@@ -493,7 +493,7 @@ unsafe fn new_context(
     argument: *mut c_void,
 ) -> usize {
     // Six callee-saved registers and the return address, placed so that
-    // the stack is 16-byte aligned when ginux_context_start calls function.
+    // the stack is 16-byte aligned when linox_context_start calls function.
     let saved = top - 9 * size_of::<usize>();
     let frame = saved as *mut usize;
     let words = [
@@ -503,7 +503,7 @@ unsafe fn new_context(
         function as usize,                         // r12
         0,                                         // rbx
         0,                                         // rbp
-        ginux_context_start as *const () as usize, // return address
+        linox_context_start as *const () as usize, // return address
     ];
     for (index, word) in words.into_iter().enumerate() {
         // SAFETY: the caller hands over the stack below `top`, and these
@@ -527,7 +527,7 @@ extern "sysv64" fn ping_pong(argument: *mut c_void) -> ! {
         // touches it while this context is parked.
         unsafe {
             (*state).rounds += 1;
-            ginux_switch_stack(&raw mut (*state).context, (*state).boot);
+            linox_switch_stack(&raw mut (*state).context, (*state).boot);
         }
     }
 }
@@ -549,7 +549,7 @@ pub(super) fn verify_stack_switching() -> bool {
     unsafe {
         (*state_pointer).context = new_context(stack.top, ping_pong, state_pointer.cast());
         for round in 1..=3 {
-            ginux_switch_stack(&raw mut (*state_pointer).boot, (*state_pointer).context);
+            linox_switch_stack(&raw mut (*state_pointer).boot, (*state_pointer).context);
             let parked = (*state_pointer).context;
             if (*state_pointer).rounds != round
                 || !(stack.top - STACK_SIZE..stack.top).contains(&parked)
@@ -567,7 +567,7 @@ pub(super) fn verify_stack_switching() -> bool {
 /// inside a system call: it now runs twice, which the scheduler rework
 /// removes.
 fn report_reentry(owner: u64, activations: &[Box<Activation>]) {
-    crate::serial_write_raw(b"ginux: process re-entered during its own system call; pid ");
+    crate::serial_write_raw(b"linox: process re-entered during its own system call; pid ");
     crate::serial_write_u64(owner & u64::from(u32::MAX));
     crate::serial_write_raw(b" active");
     for activation in activations

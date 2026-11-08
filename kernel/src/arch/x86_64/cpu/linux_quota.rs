@@ -1,5 +1,5 @@
 //! quotactl(2) and quotactl_fd(2) for Linux processes: disk quotas of the
-//! ext2/ext3/ext4 volumes (`ginux_ext2` keeps them; `linux_blockfs`
+//! ext2/ext3/ext4 volumes (`linox_ext2` keeps them; `linux_blockfs`
 //! reaches the volume). The checks and their order are Linux's
 //! (fs/quota/quota.c, fs/quota/dquot.c, fs/ext4/super.c): the type, the
 //! device (or descriptor), the filesystem's quota types, the caller's
@@ -8,7 +8,7 @@
 use super::*;
 
 use crate::linux_blockfs::QuotaVolume;
-use ginux_ext2::{Dquot, DquotChange, QuotaKind};
+use linox_ext2::{Dquot, DquotChange, QuotaKind};
 
 const Q_SYNC: u32 = 0x80_0001;
 const Q_QUOTAON: u32 = 0x80_0002;
@@ -150,7 +150,7 @@ fn linux_quota_permitted(command: u32, kind: QuotaKind, id: u32) -> bool {
         }
         _ => {}
     }
-    linux_has_capability(ginux_credentials::capability::SYS_ADMIN)
+    linux_has_capability(linox_credentials::capability::SYS_ADMIN)
 }
 
 /// The command `command` (`Q_*`, without the type) of `kind` on `volume`.

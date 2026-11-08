@@ -1,4 +1,4 @@
-# Native Ginux display protocol
+# Native Linox display protocol
 
 ## Goal
 
@@ -62,7 +62,7 @@ buffers, damage, frames, and input events.
 
 ## Decisions and limitations
 
-- The first protocol is Ginux-native and deliberately smaller than Wayland.
+- The first protocol is Linox-native and deliberately smaller than Wayland.
 - V0 uses fixed-capacity tables and one composed surface tree per server; later
   gates attach compositor policy and actual shared page mappings to this
   already-enforced publication/release state machine.

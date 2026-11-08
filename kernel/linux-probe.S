@@ -4,26 +4,26 @@
     ud2
 991:
 .endm
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
-#define GINUX_PRIOR_SIGNAL_MASK 0x600
-#define GINUX_BLOCKED_SIGNAL_MASK 0x602
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
+#define LINOX_PRIOR_SIGNAL_MASK 0x600
+#define LINOX_BLOCKED_SIGNAL_MASK 0x602
 #else
-#define GINUX_PRIOR_SIGNAL_MASK 0
-#define GINUX_BLOCKED_SIGNAL_MASK 2
+#define LINOX_PRIOR_SIGNAL_MASK 0
+#define LINOX_BLOCKED_SIGNAL_MASK 2
 #endif
 .section .text
-.global ginux_linux_probe
-#ifdef GINUX_LINKED
-.type ginux_dependency_symbol,@function
-#ifdef GINUX_GRAPH
-.type ginux_auxiliary_symbol,@function
+.global linox_linux_probe
+#ifdef LINOX_LINKED
+.type linox_dependency_symbol,@function
+#ifdef LINOX_GRAPH
+.type linox_auxiliary_symbol,@function
 #endif
 #endif
-ginux_linux_probe:
-#ifdef GINUX_LINKED
-#ifdef GINUX_GRAPH
+linox_linux_probe:
+#ifdef LINOX_LINKED
+#ifdef LINOX_GRAPH
     movabs rax, 0x4e49414d54494e49
-    cmp qword ptr [rip + ginux_main_init_state], rax
+    cmp qword ptr [rip + linox_main_init_state], rax
     require_equal
     mov rcx, qword ptr [rsp]
     cmp rcx, 8
@@ -134,17 +134,17 @@ ginux_linux_probe:
     jmp .Ldynamic_exec_complete
 .Linitial_graph_entry:
 #else
-    mov rax, qword ptr [rip + ginux_dependency_symbol@GOTPCREL]
+    mov rax, qword ptr [rip + linox_dependency_symbol@GOTPCREL]
     test rax, rax
     jz failure
-    call ginux_dependency_symbol@PLT
+    call linox_dependency_symbol@PLT
     movabs rcx, 0x59434e45444e4947
     cmp rax, rcx
     require_equal
 
 #endif
 
-#ifndef GINUX_GRAPH
+#ifndef LINOX_GRAPH
     push -100
     pop rdi
     lea rsi, [rip + auxiliary_dependency_path]
@@ -173,7 +173,7 @@ ginux_linux_probe:
 #endif
     cmp qword ptr [rsp], 1
     require_equal
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
     mov r15, rsp
     push 39
     pop rax
@@ -195,7 +195,7 @@ ginux_linux_probe:
     jz static_relocation_state
     cmp rax, 0x600000
     require_equal
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
     cmp qword ptr [0x406100], 0x400100
     require_equal
     cmp qword ptr [0x406108], 0x610100
@@ -251,7 +251,7 @@ valid_interpreter_base:
     cmp qword ptr [rsp + 328], 33
     require_equal
 
-#if !defined(GINUX_LINKED) || !defined(GINUX_GRAPH)
+#if !defined(LINOX_LINKED) || !defined(LINOX_GRAPH)
     push r12
     lea r12, [rip + linux_ni_syscalls]
 .Llinux_ni_probe:
@@ -1357,10 +1357,10 @@ valid_interpreter_base:
     pop rax
     call syscall_expect_zero
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
     # The first child wakes a signal wait; the reused child retains the
     # existing futex exit-wake proof.
-    mov qword ptr [0x4050c0], GINUX_PRIOR_SIGNAL_MASK
+    mov qword ptr [0x4050c0], LINOX_PRIOR_SIGNAL_MASK
     xor edi, edi
     mov esi, 0x4050c0
     xor edx, edx
@@ -1945,7 +1945,7 @@ linux_child_joined:
     push 14
     pop rax
     call syscall_expect_zero
-    cmp qword ptr [0x4050e0], GINUX_PRIOR_SIGNAL_MASK
+    cmp qword ptr [0x4050e0], LINOX_PRIOR_SIGNAL_MASK
     require_equal
 
     xor edi, edi
@@ -1956,7 +1956,7 @@ linux_child_joined:
     push 14
     pop rax
     call syscall_expect_zero
-    cmp qword ptr [0x4050e0], GINUX_PRIOR_SIGNAL_MASK
+    cmp qword ptr [0x4050e0], LINOX_PRIOR_SIGNAL_MASK
     require_equal
 
     push 99
@@ -1968,7 +1968,7 @@ linux_child_joined:
     push 14
     pop rax
     call syscall_expect_zero
-    cmp qword ptr [0x4050e0], GINUX_BLOCKED_SIGNAL_MASK
+    cmp qword ptr [0x4050e0], LINOX_BLOCKED_SIGNAL_MASK
     require_equal
 
     mov qword ptr [0x4050c0], 8
@@ -1990,7 +1990,7 @@ linux_child_joined:
     push 14
     pop rax
     call syscall_expect_zero
-    cmp qword ptr [0x4050e0], GINUX_BLOCKED_SIGNAL_MASK
+    cmp qword ptr [0x4050e0], LINOX_BLOCKED_SIGNAL_MASK
     require_equal
 
     mov qword ptr [0x4050c0], 0
@@ -2025,7 +2025,7 @@ linux_child_joined:
     pop rax
     call syscall_expect_efault
 
-#if !defined(GINUX_LINKED) || !defined(GINUX_GRAPH)
+#if !defined(LINOX_LINKED) || !defined(LINOX_GRAPH)
     lea rax, [rip + linux_sigsegv_handler]
     mov qword ptr [0x405100], rax
     mov qword ptr [0x405108], 0xc000000
@@ -3403,7 +3403,7 @@ linux_child_joined:
     require_equal
     cmp dword ptr [0x405e84], 4
     require_equal
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
     push 4
     pop rdi
     mov esi, 0x404fff
@@ -3715,7 +3715,7 @@ linux_child_joined:
     pop rax
     call syscall_expect_zero
 
-#if !defined(GINUX_LINKED) || !defined(GINUX_GRAPH)
+#if !defined(LINOX_LINKED) || !defined(LINOX_GRAPH)
     mov edi, 0x405e80
     push 22
     pop rax
@@ -3977,7 +3977,7 @@ linux_child_joined:
     push 8
     pop rax
     call syscall_expect_zero
-#if !defined(GINUX_LINKED) || !defined(GINUX_GRAPH)
+#if !defined(LINOX_LINKED) || !defined(LINOX_GRAPH)
     mov esi, 0x405800
     mov edx, 152
     mov eax, 78
@@ -4004,7 +4004,7 @@ linux_child_joined:
 
     movabs rax, 0x6c2f343662696c2f
     mov qword ptr [0x405340], rax
-    movabs rax, 0x2e78756e69672d64
+    movabs rax, 0x2e786f6e696c2d64
     mov qword ptr [0x405348], rax
     mov dword ptr [0x405350], 0x00006f73
     mov edi, -100
@@ -4013,7 +4013,7 @@ linux_child_joined:
     mov eax, 257
     call syscall_expect_two
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     call linked_file_mmap_test
 #endif
 
@@ -4059,7 +4059,7 @@ linux_child_joined:
     cmp qword ptr [0x405730], 0
     je failure
 
-#if defined(GINUX_LINKED) && !defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && !defined(LINOX_GRAPH)
     # Create a demand-backed overlay destination and prove fallocate plus
     # copy_file_range move data from the immutable OCI layer without changing
     # either descriptor offset when explicit offsets are supplied.
@@ -4311,7 +4311,7 @@ linux_child_joined:
     mov eax, 157
     call syscall_expect_efault
 
-    movabs rax, 0x72702d78756e6967
+    movabs rax, 0x72702d786f6e696c
     mov qword ptr [0x4050c0], rax
     mov dword ptr [0x4050c8], 0x0065626f
     mov edi, 15
@@ -4328,7 +4328,7 @@ linux_child_joined:
     mov esi, 0x4050d0
     mov eax, 157
     call syscall_expect_zero
-    movabs rax, 0x72702d78756e6967
+    movabs rax, 0x72702d786f6e696c
     cmp qword ptr [0x4050d0], rax
     require_equal
     cmp dword ptr [0x4050d8], 0x0065626f
@@ -5193,7 +5193,7 @@ resolution_valid:
     cmp rax, 1
     require_equal
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
     mov edi, 0x13d0f00
     mov esi, 0x413000
     mov edx, 0x4061fc
@@ -5204,7 +5204,7 @@ resolution_valid:
     call syscall_expect_efault
 #endif
 
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
     sub rsp, 192
     lea rax, [rip + exec_path]
     mov qword ptr [rsp], rax
@@ -5407,7 +5407,7 @@ resolution_valid:
     mov eax, 322
     syscall
     jmp failure
-#elif defined(GINUX_GRAPH)
+#elif defined(LINOX_GRAPH)
     sub rsp, 64
     lea rax, [rip + .Ldynamic_exec_path]
     mov qword ptr [rsp], rax
@@ -5432,7 +5432,7 @@ resolution_valid:
     syscall
 #endif
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 .Ldynamic_exec_complete:
     sub rsp, 16
     lea rdi, [rip + proc_self_exe]
@@ -5481,7 +5481,7 @@ child_thread_probe:
     push 14
     pop rax
     call syscall_expect_zero
-    cmp qword ptr [0x4050e0], GINUX_PRIOR_SIGNAL_MASK
+    cmp qword ptr [0x4050e0], LINOX_PRIOR_SIGNAL_MASK
     require_equal
     push 1
     pop rdi
@@ -5654,7 +5654,7 @@ child_thread_exit:
 #endif
 
 linux_sigsegv_handler:
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
     cmp edi, 13
     je .Llinux_generated_signal_return
 #endif
@@ -5756,7 +5756,7 @@ syscall_expect_eagain:
     require_equal
     ret
 
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
 syscall_expect_enoent:
     syscall
     cmp rax, -2
@@ -5812,7 +5812,7 @@ syscall_expect_256:
     require_equal
     ret
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 linux_parent_eventfd_read:
     push 3
     pop rdi
@@ -5879,31 +5879,31 @@ nested_getpid:
     syscall
     ret
 
-#ifndef GINUX_LINKED
+#ifndef LINOX_LINKED
 exec_path:
-#ifdef GINUX_EXEC_SECOND
+#ifdef LINOX_EXEC_SECOND
     .asciz "/bin/exec-second"
-#elif defined(GINUX_SYSTEM_INIT_EXEC)
+#elif defined(LINOX_SYSTEM_INIT_EXEC)
     .asciz "/sbin/init"
     .space 7
-#elif defined(GINUX_CONFORMANCE_EXEC)
+#elif defined(LINOX_CONFORMANCE_EXEC)
     .asciz "/bin/linux-conformance"
 #else
     .asciz "/bin/signal-probe"
 #endif
 exec_mode:
-#ifdef GINUX_EXEC_SECOND
+#ifdef LINOX_EXEC_SECOND
     .asciz "exec-second"
-#elif defined(GINUX_SYSTEM_INIT_EXEC)
+#elif defined(LINOX_SYSTEM_INIT_EXEC)
     .asciz "system-init"
     .space 1
-#elif defined(GINUX_CONFORMANCE_EXEC)
+#elif defined(LINOX_CONFORMANCE_EXEC)
     .asciz "linux-conformance"
 #else
     .asciz "signal-probe"
 #endif
 exec_environment:
-    .asciz "GINUX_EXEC=1"
+    .asciz "LINOX_EXEC=1"
 missing_exec_path:
     .asciz "/bin/missing"
 missing_relative_exec_path:
@@ -5925,12 +5925,12 @@ pre_exec_name:
 long_exec_value:
     .ascii "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     .byte 0
-#ifdef GINUX_EXEC_SECOND
+#ifdef LINOX_EXEC_SECOND
     .space 2
 #endif
 #endif
 
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
 .section .text.file_mmap,"ax",@progbits
 linked_file_mmap_test:
     xor edi, edi
@@ -5967,7 +5967,7 @@ linked_file_mmap_test:
     pop rax
     call syscall_expect_zero
 
-#ifndef GINUX_GRAPH
+#ifndef LINOX_GRAPH
     xor edi, edi
     mov esi, 4096
     mov edx, 1
@@ -5979,7 +5979,7 @@ linked_file_mmap_test:
     call syscall_expect_einval
 #endif
     ret
-#ifdef GINUX_GRAPH
+#ifdef LINOX_GRAPH
 .type zero_descriptor_poll_sleep_test,@function
 zero_descriptor_poll_sleep_test:
     # Linux ignores the pollfd pointer when nfds is zero. Preserve the ppoll
@@ -6000,37 +6000,37 @@ zero_descriptor_poll_sleep_test:
 .section .text
 #endif
 
-#ifdef GINUX_GRAPH
+#ifdef LINOX_GRAPH
 .section .text.file_mmap,"ax",@progbits
-.global ginux_linux_init
-.hidden ginux_linux_init
-.type ginux_linux_init,@function
-ginux_linux_init:
+.global linox_linux_init
+.hidden linox_linux_init
+.type linox_linux_init,@function
+linox_linux_init:
     jmp .Linitialize_main_tls
 
-.type ginux_linux_initialize,@function
-ginux_linux_initialize:
-    cmp qword ptr [rip + ginux_main_init_state], 2
+.type linox_linux_initialize,@function
+linox_linux_initialize:
+    cmp qword ptr [rip + linox_main_init_state], 2
     jne .Lmain_initialize_done
     call .Lvalidate_main_startup
     test eax, eax
     jz .Lmain_initialize_done
-    mov rax, qword ptr [rip + ginux_dependency_symbol@GOTPCREL]
+    mov rax, qword ptr [rip + linox_dependency_symbol@GOTPCREL]
     test rax, rax
     jz .Lmain_initialize_done
-    call ginux_dependency_symbol@PLT
+    call linox_dependency_symbol@PLT
     movabs rcx, 0x59434e45444e4947
     cmp rax, rcx
     jne .Lmain_initialize_done
-    mov rax, qword ptr [rip + ginux_auxiliary_symbol@GOTPCREL]
+    mov rax, qword ptr [rip + linox_auxiliary_symbol@GOTPCREL]
     test rax, rax
     jz .Lmain_initialize_done
-    call ginux_auxiliary_symbol@PLT
+    call linox_auxiliary_symbol@PLT
     movabs rcx, 0x5952414958554147
     cmp rax, rcx
     jne .Lmain_initialize_done
     movabs rax, 0x4e49414d54494e49
-    mov qword ptr [rip + ginux_main_init_state], rax
+    mov qword ptr [rip + linox_main_init_state], rax
 .Lmain_initialize_done:
     ret
 .section .text
@@ -6042,11 +6042,11 @@ ginux_linux_initialize:
     cmp qword ptr [rax], rax
     jne .Lmain_init_done
     movabs rcx, 0x0a214b4f5f534c54
-    cmp qword ptr fs:[ginux_main_tls_template@TPOFF], rcx
+    cmp qword ptr fs:[linox_main_tls_template@TPOFF], rcx
     jne .Lmain_init_done
-    cmp qword ptr fs:[ginux_main_tls_zero@TPOFF], 0
+    cmp qword ptr fs:[linox_main_tls_zero@TPOFF], 0
     jne .Lmain_init_done
-    inc qword ptr [rip + ginux_main_init_state]
+    inc qword ptr [rip + linox_main_init_state]
 .Lmain_init_done:
     ret
 
@@ -6069,11 +6069,11 @@ ginux_linux_initialize:
     cmp byte ptr [r8 + 12], 0
     jne .Lvalidate_main_startup_done
     mov r8, qword ptr [rdx]
-    movabs r9, 0x00313d58554e4947
+    movabs r9, 0x00313d584f4e494c
     cmp qword ptr [r8], r9
     jne .Lvalidate_main_startup_done
     mov r8, qword ptr [rdx + 8]
-    movabs r9, 0x4f4d5f58554e4947
+    movabs r9, 0x4f4d5f584f4e494c
     cmp qword ptr [r8], r9
     jne .Lvalidate_main_startup_done
     movabs r9, 0x00636578653d4544
@@ -6092,7 +6092,7 @@ ginux_linux_initialize:
     cmp word ptr [r8 + 4], 0x74
     jne .Lvalidate_main_startup_done
     mov r8, qword ptr [rdx]
-    movabs r9, 0x00313d58554e4947
+    movabs r9, 0x00313d584f4e494c
     cmp qword ptr [r8], r9
     jne .Lvalidate_main_startup_done
     push 1
@@ -6105,26 +6105,26 @@ readable_payload:
     .ascii "PROBE!!\n"
 proc_self_exe:
     .asciz "/proc/self/exe"
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
 auxiliary_dependency_path:
-    .asciz "/lib64/libginux-aux.so"
-#ifndef GINUX_GRAPH
+    .asciz "/lib64/liblinox-aux.so"
+#ifndef LINOX_GRAPH
 copy_range_path:
-    .asciz "/tmp/ginux-copy-range"
+    .asciz "/tmp/linox-copy-range"
 #endif
 #endif
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 .Ldynamic_exec_path:
     .asciz "/init"
 .Ldynamic_exec_argument:
     .asciz "dynamic-exec"
 .Ldynamic_exec_environment:
-    .asciz "GINUX=1"
+    .asciz "LINOX=1"
 .Ldynamic_exec_environment_second:
-    .asciz "GINUX_MODE=exec"
+    .asciz "LINOX_MODE=exec"
 #endif
 
-#if !defined(GINUX_LINKED) || !defined(GINUX_GRAPH)
+#if !defined(LINOX_LINKED) || !defined(LINOX_GRAPH)
 .balign 4
 linux_ni_syscalls:
     .short 134, 156, 174, 177, 178, 180, 181, 182, 183
@@ -6133,14 +6133,14 @@ linux_ni_syscalls:
 
 .section .data
 .balign 8
-.global ginux_linux_probe_data
-ginux_linux_probe_data:
+.global linox_linux_probe_data
+linox_linux_probe_data:
     .ascii "PROBE!!\n"
-#ifdef GINUX_GRAPH
-.global ginux_main_init_state
-ginux_main_init_state:
+#ifdef LINOX_GRAPH
+.global linox_main_init_state
+linox_main_init_state:
     .quad 0
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 blocked_pipe_readv:
     .quad 0x405eb0
     .quad 1
@@ -6152,42 +6152,42 @@ blocked_pipe_writev:
 #endif
 #endif
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 .section .tdata,"awT",@progbits
 .balign 8
-.global ginux_main_tls_template
-.hidden ginux_main_tls_template
-ginux_main_tls_template:
+.global linox_main_tls_template
+.hidden linox_main_tls_template
+linox_main_tls_template:
     .ascii "TLS_OK!\n"
 
 .section .tbss,"awT",@nobits
 .balign 8
-.global ginux_main_tls_zero
-.hidden ginux_main_tls_zero
-ginux_main_tls_zero:
+.global linox_main_tls_zero
+.hidden linox_main_tls_zero
+linox_main_tls_zero:
     .space 8
 #endif
 
 .section .bss
 .balign 8
-#ifdef GINUX_GRAPH
+#ifdef LINOX_GRAPH
     .space 4016
 #else
     .space 4088
 #endif
 
-#if defined(GINUX_LINKED) && defined(GINUX_GRAPH)
+#if defined(LINOX_LINKED) && defined(LINOX_GRAPH)
 .section .data.rel.ro.head,"aw",@progbits
 .balign 8
     .space 256
 
 .section .preinit_array,"aw",@preinit_array
 .balign 8
-    .quad ginux_linux_init
+    .quad linox_linux_init
 
 .section .init_array,"aw",@init_array
 .balign 8
-    .quad ginux_linux_initialize
+    .quad linox_linux_initialize
 
 .section .data.rel.ro.tail,"aw",@progbits
 .balign 8
@@ -6195,20 +6195,20 @@ ginux_main_tls_zero:
 #else
 .section .data.rel.ro,"aw",@progbits
 .balign 8
-#ifdef GINUX_LINKED
+#ifdef LINOX_LINKED
     .space 256
-    .quad ginux_linux_probe
+    .quad linox_linux_probe
     .space 248
 #else
     .space 256
-.global ginux_main_relative_slot
-ginux_main_relative_slot:
+.global linox_main_relative_slot
+linox_main_relative_slot:
     .quad 0
-.global ginux_main_glob_dat_slot
-ginux_main_glob_dat_slot:
+.global linox_main_glob_dat_slot
+linox_main_glob_dat_slot:
     .quad 0
-.global ginux_main_jump_slot
-ginux_main_jump_slot:
+.global linox_main_jump_slot
+linox_main_jump_slot:
     .quad 0
     .space 232
 #endif

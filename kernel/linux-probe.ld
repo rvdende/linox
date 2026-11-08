@@ -1,4 +1,4 @@
-ENTRY(ginux_linux_probe)
+ENTRY(linox_linux_probe)
 
 PHDRS
 {

@@ -1,5 +1,5 @@
 //! Kernel TLS on TCP sockets (TCP_ULP "tls", SOL_TLS), as Linux's net/tls
-//! software path gives it: the record layer is `ginux_ktls`; this wires it
+//! software path gives it: the record layer is `linox_ktls`; this wires it
 //! between a socket's callers and its connection (a local loopback pair or
 //! smoltcp).
 //!
@@ -32,8 +32,8 @@ const ENOTCONN: i32 = 107;
 /// A TCP socket's TLS upper layer.
 #[derive(Default)]
 pub(super) struct Tls {
-    tx: Option<ginux_ktls::Sealer>,
-    rx: Option<ginux_ktls::Opener>,
+    tx: Option<linox_ktls::Sealer>,
+    rx: Option<linox_ktls::Opener>,
     /// Sealed bytes the connection has not taken yet.
     pending: Vec<u8>,
     /// The type of the next record sent (TLS_SET_RECORD_TYPE), once.
@@ -138,11 +138,11 @@ impl Sockets {
         } {
             return Err(EBUSY);
         }
-        let info = ginux_ktls::CryptoInfo::parse(bytes)?;
+        let info = linox_ktls::CryptoInfo::parse(bytes)?;
         if receive {
-            tls.rx = Some(ginux_ktls::Opener::new(info));
+            tls.rx = Some(linox_ktls::Opener::new(info));
         } else {
-            tls.tx = Some(ginux_ktls::Sealer::new(info));
+            tls.tx = Some(linox_ktls::Sealer::new(info));
         }
         Ok(())
     }
@@ -152,9 +152,9 @@ impl Sockets {
     pub(super) fn tls_crypto(&self, id: SlotId, receive: bool) -> Result<Vec<u8>, i32> {
         let tls = self.tls_state(id).ok_or(ENOPROTOOPT)?;
         let info = if receive {
-            tls.rx.as_ref().map(ginux_ktls::Opener::crypto_info)
+            tls.rx.as_ref().map(linox_ktls::Opener::crypto_info)
         } else {
-            tls.tx.as_ref().map(ginux_ktls::Sealer::crypto_info)
+            tls.tx.as_ref().map(linox_ktls::Sealer::crypto_info)
         };
         info.ok_or(EBUSY)
     }
@@ -218,7 +218,7 @@ impl Sockets {
         let kind = tls
             .record_type
             .take()
-            .unwrap_or(ginux_ktls::APPLICATION_DATA);
+            .unwrap_or(linox_ktls::APPLICATION_DATA);
         let mut sealed = core::mem::take(&mut tls.pending);
         if sealed.try_reserve(input.len() + 64).is_err() {
             tls.pending = sealed;
@@ -270,7 +270,7 @@ impl Sockets {
             let ready = self
                 .tls_state(id)
                 .and_then(|tls| tls.rx.as_ref())
-                .is_none_or(ginux_ktls::Opener::ready);
+                .is_none_or(linox_ktls::Opener::ready);
             if ready {
                 return Ok(());
             }
@@ -303,7 +303,7 @@ impl Sockets {
             if let Some((kind, ..)) = tls.plain {
                 return Ok(Some(kind));
             }
-            if !tls.rx.as_ref().is_some_and(ginux_ktls::Opener::ready) {
+            if !tls.rx.as_ref().is_some_and(linox_ktls::Opener::ready) {
                 self.tls_fill(id)?;
             }
             let tls = self.tls_state_mut(id).ok_or(Error::Invalid)?;
@@ -314,7 +314,7 @@ impl Sockets {
             match opened {
                 Ok(Some((kind, data))) => {
                     // An empty application data record has nothing to read.
-                    if !(data.is_empty() && kind == ginux_ktls::APPLICATION_DATA) {
+                    if !(data.is_empty() && kind == linox_ktls::APPLICATION_DATA) {
                         tls.plain = Some((kind, data, 0));
                     }
                 }
@@ -351,7 +351,7 @@ impl Sockets {
             if returned.is_some_and(|returned| returned != kind) {
                 break;
             }
-            if kind != ginux_ktls::APPLICATION_DATA && !control {
+            if kind != linox_ktls::APPLICATION_DATA && !control {
                 if copied == 0 {
                     return Err(Error::Errno(EIO));
                 }
@@ -372,7 +372,7 @@ impl Sockets {
             if *offset == data.len() {
                 tls.plain = None;
             }
-            if kind != ginux_ktls::APPLICATION_DATA || copied == output.len() {
+            if kind != linox_ktls::APPLICATION_DATA || copied == output.len() {
                 break;
             }
         }

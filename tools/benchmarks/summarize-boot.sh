@@ -6,10 +6,10 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 linux_summary="$benchmark_dir/rocky-linux-summary.tsv"
-ginux_summary="$benchmark_dir/ginux-boot-summary.tsv"
+linox_summary="$benchmark_dir/linox-boot-summary.tsv"
 output="$benchmark_dir/boot-comparison.tsv"
 
-for input in "$linux_summary" "$ginux_summary"; do
+for input in "$linux_summary" "$linox_summary"; do
     [[ -s "$input" ]] || {
         echo "benchmark: missing boot results: $input" >&2
         exit 1
@@ -38,6 +38,6 @@ summarize() {
 
 printf 'system\truns\tmedian_ms\tmin_ms\tmax_ms\tmean_ms\n' >"$output"
 summarize Linux "$linux_summary" >>"$output"
-summarize Ginux "$ginux_summary" >>"$output"
+summarize Linox "$linox_summary" >>"$output"
 
 cat "$output"

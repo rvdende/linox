@@ -15,10 +15,10 @@
 //! "dying" memory cgroup in Linux's terms), so a frame never names a slot
 //! that has been reused. Linux's `mm/memcontrol.c` and
 //! `Documentation/admin-guide/cgroup-v2.rst` are the specification; the
-//! rules themselves are in the host-tested `ginux-cgroup` crate.
+//! rules themselves are in the host-tested `linox-cgroup` crate.
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use ginux_cgroup::{Controllers, MemoryEvents, MemoryStat, UNLIMITED};
+use linox_cgroup::{Controllers, MemoryEvents, MemoryStat, UNLIMITED};
 
 /// Memory cgroups across all domains, each domain's root included.
 pub(crate) const SLOT_LIMIT: usize = 1024;
@@ -388,7 +388,7 @@ pub(crate) fn try_charge(slot: Slot, pages: u64) -> Result<(), Slot> {
         let Some(memcg) = memcg(here) else {
             break;
         };
-        if ginux_cgroup::exceeds(
+        if linox_cgroup::exceeds(
             memcg.usage.load(Ordering::Acquire),
             pages,
             memcg.max.load(Ordering::Acquire),
@@ -446,7 +446,7 @@ pub(crate) fn try_charge_swap(slot: Slot, pages: u64) -> bool {
         return true;
     }
     for memcg in lineage(slot) {
-        if ginux_cgroup::exceeds(
+        if linox_cgroup::exceeds(
             memcg.swap_usage.load(Ordering::Acquire),
             pages,
             memcg.swap_max.load(Ordering::Acquire),

@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 //! GUID partition table parsing, and the only route to writing a disk.
 //!
-//! A [`WritableExtent`] names the blocks of one partition of the Ginux volume
+//! A [`WritableExtent`] names the blocks of one partition of the Linox volume
 //! type, and drivers write only inside one. It can be made only from a table
 //! whose header and entry array both pass their CRCs, for a partition that
-//! lies in the disk's usable area and overlaps no other, so Ginux cannot
+//! lies in the disk's usable area and overlaps no other, so Linox cannot
 //! write to another operating system's data on a shared disk.
 
 use core::fmt;
@@ -61,9 +61,9 @@ impl fmt::Display for Guid {
     }
 }
 
-/// Partition type reserved for a Ginux persistent volume. Ginux will only
+/// Partition type reserved for a Linox persistent volume. Linox will only
 /// ever write to partitions of this type.
-pub(crate) const GINUX_VOLUME: Guid = Guid::new(
+pub(crate) const LINOX_VOLUME: Guid = Guid::new(
     0x8076_9f29,
     0x5413,
     0x45a3,
@@ -71,7 +71,7 @@ pub(crate) const GINUX_VOLUME: Guid = Guid::new(
 );
 
 const KNOWN_TYPES: [(Guid, &str); 8] = [
-    (GINUX_VOLUME, "Ginux volume"),
+    (LINOX_VOLUME, "Linox volume"),
     (
         Guid::new(
             0xc12a_7328,
@@ -247,8 +247,8 @@ fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
     crc
 }
 
-/// The blocks of one partition of the Ginux volume type: the only blocks a
-/// Ginux driver writes.
+/// The blocks of one partition of the Linox volume type: the only blocks a
+/// Linox driver writes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WritableExtent {
     disk: Guid,
@@ -281,12 +281,12 @@ impl WritableExtent {
     }
 }
 
-/// Ginux volume partitions found on one disk.
+/// Linox volume partitions found on one disk.
 pub(crate) const MAX_WRITABLE_EXTENTS: usize = 4;
 /// Partition entries examined; tables with more are not trusted for writes.
 const MAX_WRITE_CHECKED_ENTRIES: usize = 256;
 
-/// Finds the Ginux volume partitions on `disk`. Nothing is returned unless
+/// Finds the Linox volume partitions on `disk`. Nothing is returned unless
 /// the header and the whole entry array pass their CRCs; a partition counts
 /// only if it lies inside the usable area and overlaps no other partition.
 pub(crate) fn writable_extents(
@@ -336,7 +336,7 @@ pub(crate) fn writable_extents(
             .all(|(other, &(_, other_first, other_last))| {
                 other == index || last < other_first || first > other_last
             });
-        if kind == GINUX_VOLUME
+        if kind == LINOX_VOLUME
             && first <= last
             && first >= header.first_usable_lba
             && last <= header.last_usable_lba

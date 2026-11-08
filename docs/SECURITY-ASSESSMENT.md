@@ -1,4 +1,4 @@
-# Ginux Security Review Status
+# Linox Security Review Status
 
 An exploit-oriented security audit was attempted but could not continue because
 OpenAI required Trusted Access authorization for the request. No security audit

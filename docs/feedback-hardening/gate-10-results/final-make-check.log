@@ -1,13 +1,13 @@
     Finished `release` profile [optimized] target(s) in 0.02s
 Built build/linux-probe.elf and build/linux-dynamic
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-controller-runtime
+Built target/x86_64-unknown-none/release/linox-controller-runtime
     Finished `release` profile [optimized] target(s) in 0.03s
-Built target/x86_64-unknown-none/release/ginux-network-service-runtime
+Built target/x86_64-unknown-none/release/linox-network-service-runtime
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-protocol-service-runtime
+Built target/x86_64-unknown-none/release/linox-protocol-service-runtime
     Finished `release` profile [optimized] target(s) in 0.01s
-Built target/x86_64-unknown-none/release/ginux-volume-service-runtime
+Built target/x86_64-unknown-none/release/linox-volume-service-runtime
 Generated boot/efi/src/generated_boot.rs from control-plane/bootstrap.hex signed by the development-only RFC test key
 Privilege-entry architecture check passed
 User-access architecture check passed
@@ -17,12 +17,12 @@ Synchronization architecture check passed
 Architecture consistency check passed
 Linux compatibility matrix check passed (82 complete, 245 partial, 48 policy-denied, 0 missing)
 Native service ABI C conformance passed
-   Compiling ginux-kernel v0.1.0 (/Users/gmk/git/ginux/kernel)
-    Checking ginux-boot v0.1.0 (/Users/gmk/git/ginux/boot/efi)
+   Compiling linox-kernel v0.1.0 (/Users/gmk/git/linox/kernel)
+    Checking linox-boot v0.1.0 (/Users/gmk/git/linox/boot/efi)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.03s
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_native_abi-7baf5929bbffafed)
+     Running unittests src/lib.rs (target/debug/deps/linox_native_abi-7baf5929bbffafed)
 
 running 9 tests
 test tests::control_descriptor_v4_layout_and_validation_are_frozen ... ok
@@ -37,7 +37,7 @@ test tests::lifecycle_binding_tracks_the_canonical_contract ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_native_abi
+   Doc-tests linox_native_abi
 
 running 0 tests
 
@@ -45,7 +45,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_command-e2ceeb479a3259f7)
+     Running unittests src/lib.rs (target/debug/deps/linox_command-e2ceeb479a3259f7)
 
 running 6 tests
 test tests::completes_root_and_nested_command_names ... ok
@@ -57,7 +57,7 @@ test tests::resolves_root_and_nested_help ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_command
+   Doc-tests linox_command
 
 running 0 tests
 
@@ -65,7 +65,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_oci-1c744ffbf9a7a334)
+     Running unittests src/lib.rs (target/debug/deps/linox_oci-1c744ffbf9a7a334)
 
 running 8 tests
 test tests::accepts_sha256_selectors_and_rejects_ambiguous_references ... ok
@@ -79,7 +79,7 @@ test tests::indexes_regular_file_symlink_and_hardlink ... ok
 
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_oci
+   Doc-tests linox_oci
 
 running 0 tests
 
@@ -87,7 +87,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_oci_cache-3deab880b44c1160)
+     Running unittests src/lib.rs (target/debug/deps/linox_oci_cache-3deab880b44c1160)
 
 running 2 tests
 test tests::corruption_is_rejected ... ok
@@ -95,7 +95,7 @@ test tests::round_trip_preserves_multiple_images_and_shared_layers ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_oci_cache
+   Doc-tests linox_oci_cache
 
 running 0 tests
 
@@ -103,7 +103,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_image_store-3eb0cb30cb8a7657)
+     Running unittests src/lib.rs (target/debug/deps/linox_image_store-3eb0cb30cb8a7657)
 
 running 5 tests
 test tests::quota_and_stale_handles_are_enforced ... ok
@@ -114,7 +114,7 @@ test tests::staging_handles_round_trip_without_ambient_authority ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_image_store
+   Doc-tests linox_image_store
 
 running 0 tests
 
@@ -122,7 +122,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
-     Running unittests src/lib.rs (target/debug/deps/ginux_runtime_memory-a5ac01e03424ae89)
+     Running unittests src/lib.rs (target/debug/deps/linox_runtime_memory-a5ac01e03424ae89)
 
 running 3 tests
 test tests::allocation_failure_does_not_publish_a_partial_link ... ok
@@ -131,7 +131,7 @@ test tests::grows_metadata_without_a_fixed_mapping_limit ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_runtime_memory
+   Doc-tests linox_runtime_memory
 
 running 0 tests
 
@@ -140,7 +140,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
-     Running unittests src/lib.rs (target/debug/deps/ginux_protocol_state-3591a94e17c272cc)
+     Running unittests src/lib.rs (target/debug/deps/linox_protocol_state-3591a94e17c272cc)
 
 running 9 tests
 test tests::does_not_mutate_rejected_echo_request ... ok
@@ -155,7 +155,7 @@ test tests::validates_exact_unfragmented_ipv4_icmp_header ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_protocol_state
+   Doc-tests linox_protocol_state
 
 running 0 tests
 
@@ -163,7 +163,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_volume_format-1794ea63ad6ae4cd)
+     Running unittests src/lib.rs (target/debug/deps/linox_volume_format-1794ea63ad6ae4cd)
 
 running 4 tests
 test tests::host_volume_header_rejects_small_mismatched_and_trailing_layouts ... ok
@@ -173,7 +173,7 @@ test tests::prepared_is_not_committed_and_committed_round_trips ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_volume_format
+   Doc-tests linox_volume_format
 
 running 0 tests
 
@@ -181,7 +181,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
-     Running unittests src/lib.rs (target/debug/deps/ginux_volume_service-5bb83b6ccae5b09d)
+     Running unittests src/lib.rs (target/debug/deps/linox_volume_service-5bb83b6ccae5b09d)
 
 running 7 tests
 test tests::foreign_nonzero_media_fails_closed ... ok
@@ -194,7 +194,7 @@ test tests::local_config_commits_large_payloads_and_recovers_newest_generation .
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests ginux_volume_service
+   Doc-tests linox_volume_service
 
 running 0 tests
 

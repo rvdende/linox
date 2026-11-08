@@ -5,7 +5,7 @@
 //! Each ring is an instance of its domain named by the open file
 //! description its descriptor refers to. The process maps the submission
 //! ring, the completion ring and the submission entries as three areas
-//! (Ginux does not offer IORING_FEAT_SINGLE_MMAP), and the kernel keeps
+//! (Linox does not offer IORING_FEAT_SINGLE_MMAP), and the kernel keeps
 //! where each was mapped: io_uring_enter reads the entries the process
 //! queued there and runs them at once, in order, posting each one's
 //! completion before it reads the next, so nothing is ever in flight.

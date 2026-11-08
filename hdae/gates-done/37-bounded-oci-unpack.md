@@ -67,7 +67,7 @@ zeroing, while preserving valid OCI layer semantics and supported images.
 - `make check` -> passed, including architecture, compatibility, clippy, and
   all host-side crate tests.
 - `make test` -> passed the complete multi-boot QEMU sequence and emitted
-  `ginux: bounded OCI rootfs unpack policy verified`.
+  `linox: bounded OCI rootfs unpack policy verified`.
 - PR #52: <https://github.com/gmkurtzer/ginux/pull/52>.
 - Issue summary: <https://github.com/gmkurtzer/ginux/issues/20#issuecomment-6569098566>.
 

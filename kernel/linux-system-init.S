@@ -1,9 +1,9 @@
 .intel_syntax noprefix
 
 .section .text
-.global ginux_linux_system_init
-.type ginux_linux_system_init, @function
-ginux_linux_system_init:
+.global linox_linux_system_init
+.type linox_linux_system_init, @function
+linox_linux_system_init:
     # This freestanding probe does not inspect argc/argv; reserve one mapped
     # word above its initial stack pointer for compact assertion subroutines.
     add rsp, 8
@@ -2061,7 +2061,7 @@ ginux_linux_system_init:
     syscall
     cmp rax, 80
     jne .Lfailure
-    cmp dword ptr [rip + .Lstatus + 67], 0x756e6967
+    cmp dword ptr [rip + .Lstatus + 67], 0x6f6e696c
     jne .Lfailure
     cmp dword ptr [rip + .Lstatus + 71], 0x65722d78
     jne .Lfailure
@@ -3566,7 +3566,7 @@ ginux_linux_system_init:
 .Lclock:
     .space 16
 .Lready:
-    .ascii "GINUX_SYSTEM_INIT_V0\n"
+    .ascii "LINOX_SYSTEM_INIT_V0\n"
 .Lready_end:
 .Lconsole:
     .asciz "/dev/console"
@@ -3599,7 +3599,7 @@ ginux_linux_system_init:
 .Ltmp_path:
     .asciz "/tmp"
 .Ltmp_file_path:
-    .asciz "/tmp/ginux-ready"
+    .asciz "/tmp/linox-ready"
 .Ltmp_payload:
     .ascii "ready\n"
 .Lfsize_limit:
@@ -3609,7 +3609,7 @@ ginux_linux_system_init:
 .Ltmp_marker:
     .ascii "TMPFS_READY\n"
 .Lmemfd_name:
-    .asciz "ginux-test"
+    .asciz "linox-test"
 .Lmemfd_payload:
     .ascii "memfd"
 .Ltmpfs_name:

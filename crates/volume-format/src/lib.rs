@@ -5,12 +5,12 @@ use sha2::{Digest, Sha256};
 
 pub const SECTOR_SIZE: usize = 512;
 pub const SLOT_COUNT: usize = 2;
-pub const MAGIC: &[u8; 8] = b"GINUXPV0";
+pub const MAGIC: &[u8; 8] = b"LINOXPV0";
 pub const VERSION: u32 = 1;
 pub const HEADER_SIZE: usize = 72;
 pub const PAYLOAD_CAPACITY: usize = SECTOR_SIZE - HEADER_SIZE;
 pub const COMMIT_MARKER: u64 = 0x3144_4554_5449_4d43;
-pub const HOST_VOLUME_MAGIC: &[u8; 8] = b"GINUXHV1";
+pub const HOST_VOLUME_MAGIC: &[u8; 8] = b"LINOXHV1";
 pub const HOST_VOLUME_VERSION: u32 = 1;
 pub const HOST_VOLUME_HEADER_SIZE: usize = 48;
 pub const HOST_VOLUME_DATA_START_SECTOR: u64 = 8;

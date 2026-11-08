@@ -2,7 +2,7 @@
 //! for the paths it is shown: getcwd, /proc/self/fd and /proc/self/cwd,
 //! and the start of a walk relative to a directory.
 //!
-//! Linux keeps a (mount, dentry) pair for each. Ginux's descriptors and
+//! Linux keeps a (mount, dentry) pair for each. Linox's descriptors and
 //! working directory keep the file only (an image handle or an overlay
 //! node), whose own path is its storage path: through a bind mount of
 //! /etc on /mnt/x, /mnt/x/hosts opens the image's etc/hosts, whose path is

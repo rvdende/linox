@@ -850,10 +850,10 @@ impl IcmpPacket {
 }
 
 /// `address` as the UDP-Lite crate takes it.
-fn udplite_ip(address: IpAddress) -> ginux_udplite::Ip {
+fn udplite_ip(address: IpAddress) -> linox_udplite::Ip {
     match address {
-        IpAddress::Ipv4(address) => ginux_udplite::Ip::V4(address.octets()),
-        IpAddress::Ipv6(address) => ginux_udplite::Ip::V6(address.octets()),
+        IpAddress::Ipv4(address) => linox_udplite::Ip::V4(address.octets()),
+        IpAddress::Ipv6(address) => linox_udplite::Ip::V6(address.octets()),
     }
 }
 
@@ -863,14 +863,14 @@ fn udplite_ip(address: IpAddress) -> ginux_udplite::Ip {
 struct UdpLiteDatagram {
     source: IpEndpoint,
     destination: IpEndpoint,
-    header: ginux_udplite::Header,
+    header: linox_udplite::Header,
     ttl: u8,
     payload: core::ops::Range<usize>,
 }
 
 impl UdpLiteDatagram {
     /// The datagram `packet` (an IPv4 or IPv6 packet) carries, or None for
-    /// one to drop (`ginux_udplite::parse` says which).
+    /// one to drop (`linox_udplite::parse` says which).
     fn parse(packet: &[u8]) -> Option<Self> {
         let (header, total, source, destination, ttl) = match packet.first()? >> 4 {
             4 => {
@@ -907,13 +907,13 @@ impl UdpLiteDatagram {
             _ => return None,
         };
         let datagram = packet.get(header..total)?;
-        let parsed = ginux_udplite::parse(udplite_ip(source), udplite_ip(destination), datagram)?;
+        let parsed = linox_udplite::parse(udplite_ip(source), udplite_ip(destination), datagram)?;
         Some(Self {
             source: IpEndpoint::new(source, parsed.source_port),
             destination: IpEndpoint::new(destination, parsed.destination_port),
             header: parsed,
             ttl,
-            payload: header + ginux_udplite::HEADER..total,
+            payload: header + linox_udplite::HEADER..total,
         })
     }
 }
@@ -1370,7 +1370,7 @@ impl Sockets {
                     continue;
                 };
                 let payload = &packet[datagram.payload.clone()];
-                if !ginux_udplite::coverage_suffices(
+                if !linox_udplite::coverage_suffices(
                     &datagram.header,
                     state.udplite_receive_coverage,
                 ) || state.read_shutdown
@@ -2339,7 +2339,7 @@ impl Sockets {
                 .slot_mut(peer)
                 .filter(|slot| slot.kind == kind && !slot.listening)
             else {
-                crate::serial_write("ginux: local socket peer unavailable slot/peer ");
+                crate::serial_write("linox: local socket peer unavailable slot/peer ");
                 crate::serial_write_u64(u64::from(id));
                 crate::serial_write(" ");
                 crate::serial_write_u64(u64::from(peer));
@@ -2602,7 +2602,7 @@ impl Sockets {
             port => port,
         };
         slot_in_mut(slots, id).ok_or(Error::Invalid)?.local_port = port;
-        let datagram = ginux_udplite::encode(
+        let datagram = linox_udplite::encode(
             udplite_ip(source),
             udplite_ip(destination),
             port,
@@ -3616,7 +3616,7 @@ pub(crate) fn open_unix(socket_type: u8) -> Result<SlotId, Error> {
 /// A network interface as the socket ioctls (SIOCGIF*) describe it.
 #[derive(Clone)]
 pub(crate) struct InterfaceInfo {
-    pub(crate) name: ginux_tun::Name,
+    pub(crate) name: linox_tun::Name,
     pub(crate) index: i32,
     /// IPv4 address and prefix length (0 for none), and a TUN or TAP
     /// device's others.
@@ -3632,8 +3632,8 @@ pub(crate) struct InterfaceInfo {
 }
 
 /// An interface name the kernel gives (lo, eth0).
-fn interface_name(name: &[u8]) -> ginux_tun::Name {
-    ginux_tun::Name::new(name).unwrap_or_else(|| unreachable!("a built-in interface name"))
+fn interface_name(name: &[u8]) -> linox_tun::Name {
+    linox_tun::Name::new(name).unwrap_or_else(|| unreachable!("a built-in interface name"))
 }
 
 /// The domain's interfaces: the loopback, eth0 once the network is
@@ -3717,7 +3717,7 @@ fn with_tun<R>(call: impl FnOnce(&mut Sockets) -> Result<R, i32>) -> Result<R, i
 const TUN_ENODEV: i32 = 19;
 
 impl Sockets {
-    fn tun(&self) -> Result<core::cell::RefMut<'_, ginux_tun::Tun>, i32> {
+    fn tun(&self) -> Result<core::cell::RefMut<'_, linox_tun::Tun>, i32> {
         self.runtime
             .as_ref()
             .map(|runtime| runtime.device.tun.borrow_mut())
@@ -3733,7 +3733,7 @@ impl Sockets {
     /// Adds or removes TUN device addresses among the interface's own, so
     /// the stack takes their traffic (EADDRNOTAVAIL-like ENOSPC when the
     /// interface holds no more).
-    fn tun_interface_address(&mut self, address: ginux_tun::Address, add: bool) -> Result<(), i32> {
+    fn tun_interface_address(&mut self, address: linox_tun::Address, add: bool) -> Result<(), i32> {
         const ENOSPC: i32 = 28;
         let runtime = self.runtime.as_mut().ok_or(TUN_ENODEV)?;
         let cidr = IpCidr::new(
@@ -3769,21 +3769,21 @@ pub(crate) fn tun_close(id: u64) {
         Ok(mut tun) => tun.close(id),
         Err(_) => return,
     };
-    if let ginux_tun::Closed::Removed { addresses, .. } = closed {
+    if let linox_tun::Closed::Removed { addresses, .. } = closed {
         for address in addresses {
             let _ = sockets.tun_interface_address(address, false);
         }
     }
 }
 
-/// TUNSETIFF on file `id` (see `ginux_tun::Tun::set_iff`): a new device
+/// TUNSETIFF on file `id` (see `linox_tun::Tun::set_iff`): a new device
 /// gets the lowest interface index from 3 that no device has.
 pub(crate) fn tun_set_iff(
     id: u64,
     name: &[u8],
     flags: u16,
-    caller: &ginux_tun::Caller,
-) -> Result<(ginux_tun::Name, u16), i32> {
+    caller: &linox_tun::Caller,
+) -> Result<(linox_tun::Name, u16), i32> {
     with_tun(|sockets| {
         let mut tun = sockets.tun()?;
         let index = (3..)
@@ -3798,13 +3798,13 @@ pub(crate) fn tun_set_iff(
             flags,
             caller,
             &taken,
-            ginux_tun::Identity { index, mac },
+            linox_tun::Identity { index, mac },
         )
     })
 }
 
 /// TUNGETIFF.
-pub(crate) fn tun_get_iff(id: u64) -> Result<(ginux_tun::Name, u16), i32> {
+pub(crate) fn tun_get_iff(id: u64) -> Result<(linox_tun::Name, u16), i32> {
     with_tun(|sockets| sockets.tun()?.get_iff(id))
 }
 
@@ -3813,7 +3813,7 @@ pub(crate) enum TunSetting<'a> {
     Persist(bool),
     Owner(u32),
     Group(u32),
-    Queue(u16, &'a ginux_tun::Caller<'a>),
+    Queue(u16, &'a linox_tun::Caller<'a>),
 }
 
 pub(crate) fn tun_set(id: u64, setting: TunSetting) -> Result<(), i32> {
@@ -3874,7 +3874,7 @@ pub(crate) fn tun_change_address(
     add: bool,
 ) -> Result<(), i32> {
     with_tun(|sockets| {
-        let address = ginux_tun::Address { address, prefix };
+        let address = linox_tun::Address { address, prefix };
         if add {
             sockets.tun()?.add_address(index, address)?;
             if let Err(error) = sockets.tun_interface_address(address, true) {
@@ -4094,7 +4094,7 @@ pub(crate) fn set_udplite_coverage(id: SlotId, option: Coverage, value: i32) -> 
         .slot_mut(id)
         .filter(|state| state.kind == Kind::UdpLite)
         .ok_or(Error::Invalid)?;
-    let value = ginux_udplite::coverage_option(value);
+    let value = linox_udplite::coverage_option(value);
     match option {
         Coverage::Send => state.udplite_send_coverage = Some(value),
         Coverage::Receive => state.udplite_receive_coverage = Some(value),
@@ -4818,7 +4818,7 @@ fn report_timeout(operation: &str) {
         return;
     };
     let [rx_avail, rx_used, tx_avail, tx_used] = runtime.device.queue_positions();
-    crate::serial_write("ginux: socket ");
+    crate::serial_write("linox: socket ");
     crate::serial_write(operation);
     crate::serial_write(" timeout rx/tx available/used: ");
     crate::serial_write_u64(u64::from(rx_avail));

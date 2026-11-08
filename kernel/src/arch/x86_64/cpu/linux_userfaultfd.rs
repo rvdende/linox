@@ -72,7 +72,7 @@ pub(super) fn linux_userfaultfd_create(flags: u64, device: bool) -> u64 {
     if flags & UFFD_USER_MODE_ONLY == 0
         && !device
         && !current_linux_credentials()
-            .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_PTRACE))
+            .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_PTRACE))
     {
         return LINUX_EPERM;
     }
@@ -380,7 +380,7 @@ fn linux_userfaultfd_api(id: u64, argument: u64) -> u64 {
     }
     if features & FEATURE_EVENT_FORK != 0
         && !current_linux_credentials()
-            .is_some_and(|credentials| credentials.has(ginux_credentials::capability::SYS_PTRACE))
+            .is_some_and(|credentials| credentials.has(linox_credentials::capability::SYS_PTRACE))
     {
         return refuse(LINUX_EPERM);
     }

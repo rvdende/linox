@@ -2,7 +2,7 @@
 
 ## Goal
 
-Run Ginux correctly on fixed 1-, 2-, and 4-vCPU x86-64 systems and continuously
+Run Linox correctly on fixed 1-, 2-, and 4-vCPU x86-64 systems and continuously
 exercise SMP by making two vCPUs the ordinary QEMU test default.
 
 ## Approved scope
@@ -22,7 +22,7 @@ exercise SMP by making two vCPUs the ordinary QEMU test default.
 
 - [x] Preserve the bounded enabled-processor APIC-ID set from MADT local-APIC
   and x2APIC entries, rejecting duplicates and unsupported topology sizes.
-- [x] Add an explicit `GINUX_CPUS=1|2|4` QEMU control while retaining one CPU
+- [x] Add an explicit `LINOX_CPUS=1|2|4` QEMU control while retaining one CPU
   as the default until SMP qualification passes.
 - [x] Replace singleton GDT, TSS, IDT, privilege stack, and NMI, double-fault,
   and machine-check IST stacks with four guarded per-CPU instances; publish
@@ -61,7 +61,7 @@ None.
 
 ## Acceptance criteria
 
-- Ginux boots reliably with one, two, and four vCPUs.
+- Linox boots reliably with one, two, and four vCPUs.
 - Linux userspace reports and uses the configured CPU count.
 - Processes and threads execute concurrently on different CPUs.
 - Cross-CPU signals, futexes, pipes, sockets, process exit, and mapping changes
@@ -79,7 +79,7 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
 
 - `cargo fmt --all`, `make architecture-check`, and `make check` pass after
   preserving processor identities and adding bounded QEMU topology selection.
-- `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` reports
+- `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` reports
   `enabled processors: 2`, `processor APIC IDs: 0 1`, completes the complete
   deterministic kernel and Linux-runtime suite, and ends with
   `Boot test passed`. At this increment only the BSP executes; AP startup is
@@ -96,16 +96,16 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
   Correcting those architectural transitions advanced the AP into the Rust
   entry point without weakening W^X.
 - `cargo fmt --all`, `make architecture-check`, `make check`, and
-  `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` pass after
+  `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` pass after
   removing the temporary diagnostics. The transcript reports
-  `ginux: online processors: 2`, completes the Linux runtime matrix, and ends
+  `linox: online processors: 2`, completes the Linux runtime matrix, and ends
   with `Boot test passed` across the initial, reboot, and corruption phases.
 - The first live-IPI regression failed the Linux child lifecycle precondition
   with diagnostic bitmap 63. The user interrupt-surface verifier had treated
   the new DPL0 IPI vector as an unexpected user gate. It now accepts present
   kernel-only DPL0 gates while retaining `INT 0x80` as the sole DPL3 gate.
 - `cargo fmt --all`, `make architecture-check`, `make check`, and a fresh
-  `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` pass after
+  `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` pass after
   removing diagnostics. The transcript reports cross-CPU interrupts,
   invalidation, and concurrent execution verified, completes all three boot
   phases, and ends with `Boot test passed`.
@@ -113,7 +113,7 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
   the AP's idle continuation and TSS privilege-entry stack shared storage.
   Separating those guarded stacks removed the overwrite rather than masking
   the fault.
-- A fresh two-vCPU `make build-verification && GINUX_CPUS=2
+- A fresh two-vCPU `make build-verification && LINOX_CPUS=2
   bash tests/qemu/boot.sh` executes the lifecycle child in ring 3 on CPU 1,
   validates its complete register and FS context and exit status, completes
   all boot phases, and ends with `Boot test passed`.
@@ -124,7 +124,7 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
   original mapping before teardown, and fails closed if either participant is
   absent.
 - Fresh `cargo fmt --all`, `make architecture-check`, `make check`, and
-  `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` pass after
+  `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` pass after
   temporary diagnostics are removed. The transcript reports `concurrent Linux
   processes executed across processors`, validates lifecycle cleanup, and ends
   with `Boot test passed`.
@@ -134,14 +134,14 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
   a fixed topology; the kernel verifier also restores the process mask after
   its mutation tests.
 - Fresh `cargo fmt --all`, `make architecture-check`, `make check`, and
-  `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` pass with
+  `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` pass with
   inherited process affinity and domain/online CPU-mask enforcement. The full
   three-phase transcript ends with `Boot test passed`.
 - The first dynamic `/proc/stat` self-test found that its internal file node
   collided with `/etc/resolv.conf`; the old static path had hidden the alias.
   Assigning a distinct node made file identity and exact generated size agree.
 - Fresh `cargo fmt --all`, `make architecture-check`, `make check`, and
-  `make build-verification && GINUX_CPUS=2 bash tests/qemu/boot.sh` pass with
+  `make build-verification && LINOX_CPUS=2 bash tests/qemu/boot.sh` pass with
   on-demand topology generation, partial and vectored reads, and internal
   content/size assertions. The full three-phase transcript ends with `Boot
   test passed`.
@@ -159,7 +159,7 @@ multi-domain policy results, QEMU harness diffs, and repeated stress runs.
   and four vCPUs followed by two additional two-vCPU stress passes. Every run
   reports `Boot test passed`, and the harness reports `SMP topology and stress
   matrix passed`.
-- `make test` passes without `GINUX_CPUS` set and reports two enabled and two
+- `make test` passes without `LINOX_CPUS` set and reports two enabled and two
   online processors, proving the ordinary QEMU default is now two vCPUs.
 
 ## Decisions and limitations

@@ -35,7 +35,7 @@ After restart it sends value 3 to the replacement, must receive acknowledgement
 4, sends GET command 5, and must receive the retained value 3 before exiting
 normally. Completion additionally requires an empty IPC queue, rejection
 of the stale service domain/handle pair, one contained service fault, and no
-`GINUX_KERNEL_PANIC` marker.
+`LINOX_KERNEL_PANIC` marker.
 
 Before a normal exit or contained fault removes a domain's running context, it
 wakes receivers already blocked on the opposite side of IPC object 3 with the

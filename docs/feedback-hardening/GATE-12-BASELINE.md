@@ -3,9 +3,9 @@
 Gate 12 began from merged `main` commit `a2a1eace`. The matched matrix used
 the pinned x86-64 sysbench binary, Q35 under TCG, 2 GiB memory, nine samples
 per workload cell, and identical vCPU/thread topology for Rocky-on-Linux and
-Rocky-on-Ginux.
+Rocky-on-Linox.
 
-The table reports the favorable-direction Ginux/Linux ratio. Values below the
+The table reports the favorable-direction Linox/Linux ratio. Values below the
 gate floor of `0.96x` are marked **fail**.
 
 | Mode | vCPUs | Threads | CPU | Memory | Thread yield | Mutex |

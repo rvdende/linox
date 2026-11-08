@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ginux_ext2::{
+use linox_ext2::{
     BlockDevice, Change, Damage, DquotChange, Error, ErrorPolicy, Failure, Filesystem, FsType,
     Kind, Options, QuotaKind, QuotaOptions, RenameMode, Result, Timestamp, XattrMode, ROOT_INODE,
 };
@@ -79,7 +79,7 @@ impl Image {
         let mke2fs = tool("mke2fs")?;
         tool("e2fsck")?;
         tool("debugfs")?;
-        let directory = std::env::temp_dir().join(format!("ginux-ext2-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("linox-ext2-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("{name}-{}.img", format.name()));
         let file = std::fs::File::create(&path).unwrap();
@@ -547,7 +547,7 @@ fn a_full_disk_writes_short_then_fails(format: Format) {
 
 fn files_mke2fs_made_read_back(format: Format) {
     let directory = std::env::temp_dir().join(format!(
-        "ginux-ext2-src-{}-{}",
+        "linox-ext2-src-{}-{}",
         std::process::id(),
         format.name()
     ));
@@ -858,7 +858,7 @@ fn ranges_punch_zero_collapse_and_insert() {
 
 #[test]
 fn indexed_directories_change_as_linear_ones() {
-    let directory = std::env::temp_dir().join(format!("ginux-ext4-index-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("linox-ext4-index-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("big")).unwrap();
     for index in 0..400 {
         std::fs::write(

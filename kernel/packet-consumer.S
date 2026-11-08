@@ -1,9 +1,9 @@
 .text
 .balign 16
-.global ginux_packet_consumer_start
-.global ginux_packet_consumer_end
+.global linox_packet_consumer_start
+.global linox_packet_consumer_end
 
-ginux_packet_consumer_start:
+linox_packet_consumer_start:
     mov r12, rbx
     mov r14, rcx
     mov r15, r8
@@ -87,4 +87,4 @@ ginux_packet_consumer_start:
     .byte 0x52, 0x54, 0x00, 0x12, 0x34, 0x56
     .byte 10, 0, 2, 15
 
-ginux_packet_consumer_end:
+linox_packet_consumer_end:
