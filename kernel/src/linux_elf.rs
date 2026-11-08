@@ -3082,22 +3082,38 @@ fn validate_sysv_hash_pair(
     address: u64,
     names: [&[u8]; 2],
 ) -> Option<bool> {
-    let table = virtual_file_bytes(loads, address, 32)?;
-    if read_u32(table, 0)? != 3 || read_u32(table, 4)? != 3 {
+    const BUCKETS: usize = 3;
+    // The null symbol and the two named ones.
+    const SYMBOLS: usize = 3;
+    let table = virtual_file_bytes(loads, address, 8 + (BUCKETS + SYMBOLS) * 4)?;
+    if read_u32(table, 0)? != BUCKETS as u32 || read_u32(table, 4)? != SYMBOLS as u32 {
         return Some(false);
     }
-    let mut expected_buckets = [0_u32; 3];
-    for (offset, name) in names.into_iter().enumerate() {
-        let bucket = usize::try_from(elf_hash(name)).ok()? % expected_buckets.len();
-        if expected_buckets[bucket] != 0 {
-            return Some(false);
-        }
-        expected_buckets[bucket] = u32::try_from(offset + 1).ok()?;
+    let bucket = |index: usize| read_u32(table, 8 + index * 4);
+    let chain = |index: usize| read_u32(table, 8 + (BUCKETS + index) * 4);
+    // Every entry names a symbol of the table, and the null symbol ends
+    // its chain.
+    let entries_valid = (0..BUCKETS).all(|index| bucket(index).is_some_and(|i| i < SYMBOLS as u32))
+        && (0..SYMBOLS).all(|index| chain(index).is_some_and(|i| i < SYMBOLS as u32))
+        && chain(0) == Some(0);
+    if !entries_valid {
+        return Some(false);
     }
-    Some(
-        (0..3).all(|index| read_u32(table, 8 + index * 4) == Some(expected_buckets[index]))
-            && (0..3).all(|index| read_u32(table, 20 + index * 4) == Some(0)),
-    )
+    // Each name is found as the dynamic loader finds it: from its hash's
+    // bucket along the chain (names may share a bucket), within as many
+    // steps as there are symbols, so a cycle cannot hide it.
+    let found = |name: &[u8], symbol: u32| {
+        let mut index = bucket(elf_hash(name) as usize % BUCKETS);
+        for _ in 0..SYMBOLS {
+            match index {
+                Some(0) | None => return false,
+                Some(current) if current == symbol => return true,
+                Some(current) => index = chain(current as usize),
+            }
+        }
+        false
+    };
+    Some(found(names[0], 1) && found(names[1], 2))
 }
 
 fn validate_gnu_hash(
