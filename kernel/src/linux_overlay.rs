@@ -16,7 +16,6 @@ pub(crate) const PATH_CAPACITY: usize = 4096;
 /// NAME_MAX: the longest name a directory entry can have.
 pub(crate) const NAME_MAX: usize = 255;
 const NODE_COUNT: usize = 9;
-const MAPPING_COUNT: usize = 100;
 const DATA_CAPACITY: usize = PAGE_SIZE - core::mem::size_of::<FrameLease>();
 const FRAME_INDEX_CAPACITY: usize = PAGE_SIZE / core::mem::size_of::<FrameLease>() - 1;
 const XATTR_NAME_CAPACITY: usize = 255;
@@ -124,14 +123,11 @@ struct FrameIndexPage {
     frames: [FrameLease; FRAME_INDEX_CAPACITY],
 }
 
-#[repr(C)]
-struct XattrPage {
-    previous: FrameLease,
-    value_first: FrameLease,
-    value_size: u32,
-    name_length: u16,
-    removed: bool,
-    name: [u8; XATTR_NAME_CAPACITY],
+/// An extended attribute of a file: its name and value, on the kernel
+/// heap.
+struct Xattr {
+    name: Vec<u8>,
+    value: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -154,12 +150,6 @@ impl SharedMapping {
         },
         offset: 0,
     };
-}
-
-#[repr(C)]
-struct MappingPage {
-    next: FrameLease,
-    mappings: [SharedMapping; MAPPING_COUNT],
 }
 
 /// How a file holds its data.
@@ -235,7 +225,8 @@ struct Node {
     page_count: usize,
     cached_page: FrameLease,
     cached_page_index: usize,
-    xattr_first: FrameLease,
+    /// Extended attributes, the most recently set last.
+    xattrs: Vec<Xattr>,
     atime: (i64, i64),
     mtime: (i64, i64),
     ctime: (i64, i64),
@@ -279,7 +270,7 @@ impl Node {
         page_count: 0,
         cached_page: FrameLease::EMPTY,
         cached_page_index: 0,
-        xattr_first: FrameLease::EMPTY,
+        xattrs: Vec::new(),
         atime: (0, 0),
         mtime: (0, 0),
         ctime: (0, 0),
@@ -333,14 +324,13 @@ struct NodePage {
 
 const _: () = assert!(core::mem::size_of::<DataPage>() == PAGE_SIZE);
 const _: () = assert!(core::mem::size_of::<FrameIndexPage>() <= PAGE_SIZE);
-const _: () = assert!(core::mem::size_of::<XattrPage>() <= PAGE_SIZE);
 const _: () = assert!(core::mem::size_of::<NodePage>() <= PAGE_SIZE);
-const _: () = assert!(core::mem::size_of::<MappingPage>() <= PAGE_SIZE);
 
-#[derive(Clone, Copy)]
 struct Overlay {
     first_node_page: FrameLease,
-    first_mapping_page: FrameLease,
+    /// The shared mappings processes registered; a removed one leaves its
+    /// slot for the next.
+    mappings: Vec<SharedMapping>,
     next_generation: u32,
     next_inode: u64,
     /// Linked symlinks, so path walks skip looking for them when there are
@@ -354,7 +344,7 @@ struct Overlay {
 impl Overlay {
     const EMPTY: Self = Self {
         first_node_page: FrameLease::EMPTY,
-        first_mapping_page: FrameLease::EMPTY,
+        mappings: Vec::new(),
         next_generation: 0x8000_0000,
         next_inode: 0x10_000,
         symlinks: 0,
@@ -378,93 +368,50 @@ pub(crate) fn register_shared_mapping(
     if pid == 0 || !address.is_multiple_of(PAGE_SIZE as u64) || metadata(handle).is_none() {
         return false;
     }
-    let overlay = live_mut();
-    let mut page = overlay.first_mapping_page;
-    let mut last = FrameLease::EMPTY;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page_mut(page) else {
-            return false;
-        };
-        if mappings
-            .mappings
-            .iter()
-            .any(|mapping| mapping.active && mapping.pid == pid && mapping.address == address)
-        {
-            return false;
-        }
-        if let Some(mapping) = mappings.mappings.iter_mut().find(|mapping| !mapping.active) {
-            *mapping = SharedMapping {
-                active: true,
-                pid,
-                address,
-                handle,
-                offset,
-            };
-            return true;
-        }
-        last = page;
-        page = mappings.next;
-    }
-    let Some(page) = allocate_mapping_page() else {
+    let mappings = &mut live_mut().mappings;
+    if mappings
+        .iter()
+        .any(|mapping| mapping.active && mapping.pid == pid && mapping.address == address)
+    {
         return false;
-    };
-    if last == FrameLease::EMPTY {
-        overlay.first_mapping_page = page;
-    } else {
-        let Some(previous) = mapping_page_mut(last) else {
-            let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
-            return false;
-        };
-        previous.next = page;
     }
-    let Some(mapping) = mapping_page_mut(page).and_then(|page| page.mappings.first_mut()) else {
-        return false;
-    };
-    *mapping = SharedMapping {
+    let registered = SharedMapping {
         active: true,
         pid,
         address,
         handle,
         offset,
     };
+    if let Some(mapping) = mappings.iter_mut().find(|mapping| !mapping.active) {
+        *mapping = registered;
+        return true;
+    }
+    if mappings.try_reserve(1).is_err() {
+        return false;
+    }
+    mappings.push(registered);
     true
 }
 
+/// `pid`'s registered shared mappings.
+fn process_mappings(overlay: &Overlay, pid: u32) -> impl Iterator<Item = &SharedMapping> {
+    overlay
+        .mappings
+        .iter()
+        .filter(move |mapping| mapping.active && mapping.pid == pid)
+}
+
 pub(crate) fn shared_mapping(pid: u32, address: u64) -> Option<(Handle, usize)> {
-    let overlay = live()?;
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let mappings = mapping_page(page)?;
-        if let Some(mapping) = mappings
-            .mappings
-            .iter()
-            .find(|mapping| mapping.active && mapping.pid == pid && mapping.address == address)
-        {
-            return Some((mapping.handle, mapping.offset));
-        }
-        page = mappings.next;
-    }
-    None
+    process_mappings(live()?, pid)
+        .find(|mapping| mapping.address == address)
+        .map(|mapping| (mapping.handle, mapping.offset))
 }
 
 pub(crate) fn next_shared_mapping(pid: u32, after: Option<u64>) -> Option<(u64, Handle, usize)> {
-    let overlay = live()?;
-    let mut selected: Option<(u64, Handle, usize)> = None;
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let mappings = mapping_page(page)?;
-        for mapping in &mappings.mappings {
-            if mapping.active
-                && mapping.pid == pid
-                && after.is_none_or(|after| mapping.address > after)
-                && selected.is_none_or(|selected| mapping.address < selected.0)
-            {
-                selected = Some((mapping.address, mapping.handle, mapping.offset));
-            }
-        }
-        page = mappings.next;
-    }
-    selected
+    process_mappings(live()?, pid)
+        .filter(|mapping| after.is_none_or(|after| mapping.address > after))
+        .min_by_key(|mapping| mapping.address)
+        .map(|mapping| (mapping.address, mapping.handle, mapping.offset))
 }
 
 /// Drops the shared mappings `pid` has registered from `start` up to
@@ -489,91 +436,43 @@ fn collect_shared_mappings(
     remove: bool,
 ) -> Vec<(u64, Handle, usize)> {
     let mut taken = Vec::new();
-    let overlay = live_mut();
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page_mut(page) else {
+    for mapping in live_mut().mappings.iter_mut().filter(|mapping| {
+        mapping.active && mapping.pid == pid && (start..end).contains(&mapping.address)
+    }) {
+        if taken.try_reserve(1).is_err() {
             break;
-        };
-        for mapping in mappings.mappings.iter_mut().filter(|mapping| {
-            mapping.active && mapping.pid == pid && (start..end).contains(&mapping.address)
-        }) {
-            if taken.try_reserve(1).is_err() {
-                return taken;
-            }
-            taken.push((mapping.address, mapping.handle, mapping.offset));
-            if remove {
-                *mapping = SharedMapping::EMPTY;
-            }
         }
-        page = mappings.next;
+        taken.push((mapping.address, mapping.handle, mapping.offset));
+        if remove {
+            *mapping = SharedMapping::EMPTY;
+        }
     }
     taken.sort_unstable_by_key(|(address, _, _)| *address);
     taken
 }
 
 pub(crate) fn remove_shared_mapping(pid: u32, address: u64) -> bool {
-    let overlay = live_mut();
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page_mut(page) else {
-            return false;
-        };
-        if let Some(mapping) = mappings
-            .mappings
-            .iter_mut()
-            .find(|mapping| mapping.active && mapping.pid == pid && mapping.address == address)
-        {
-            *mapping = SharedMapping::EMPTY;
-            return true;
-        }
-        page = mappings.next;
-    }
-    false
+    live_mut()
+        .mappings
+        .iter_mut()
+        .find(|mapping| mapping.active && mapping.pid == pid && mapping.address == address)
+        .map(|mapping| *mapping = SharedMapping::EMPTY)
+        .is_some()
 }
 
 pub(crate) fn clone_shared_mappings(parent: u32, child: u32) -> bool {
-    let mut count = 0;
     let Some(overlay) = live() else {
         return false;
     };
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page(page) else {
-            return false;
-        };
-        count += mappings
-            .mappings
-            .iter()
-            .filter(|mapping| mapping.active && mapping.pid == parent)
-            .count();
-        page = mappings.next;
+    let mut inherited = Vec::new();
+    if inherited
+        .try_reserve_exact(process_mappings(overlay, parent).count())
+        .is_err()
+    {
+        return false;
     }
-    for wanted in 0..count {
-        let mut found = 0;
-        let mut selected = None;
-        let Some(overlay) = live() else {
-            return false;
-        };
-        let mut page = overlay.first_mapping_page;
-        while page != FrameLease::EMPTY && selected.is_none() {
-            let Some(mappings) = mapping_page(page) else {
-                return false;
-            };
-            for mapping in &mappings.mappings {
-                if mapping.active && mapping.pid == parent {
-                    if found == wanted {
-                        selected = Some(*mapping);
-                        break;
-                    }
-                    found += 1;
-                }
-            }
-            page = mappings.next;
-        }
-        let Some(mapping) = selected else {
-            return false;
-        };
+    inherited.extend(process_mappings(overlay, parent).copied());
+    for mapping in inherited {
         if !register_shared_mapping(child, mapping.address, mapping.handle, mapping.offset) {
             remove_process_shared_mappings(child);
             return false;
@@ -583,18 +482,12 @@ pub(crate) fn clone_shared_mappings(parent: u32, child: u32) -> bool {
 }
 
 pub(crate) fn remove_process_shared_mappings(pid: u32) {
-    let overlay = live_mut();
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page_mut(page) else {
-            return;
-        };
-        for mapping in &mut mappings.mappings {
-            if mapping.active && mapping.pid == pid {
-                *mapping = SharedMapping::EMPTY;
-            }
-        }
-        page = mappings.next;
+    for mapping in live_mut()
+        .mappings
+        .iter_mut()
+        .filter(|mapping| mapping.active && mapping.pid == pid)
+    {
+        *mapping = SharedMapping::EMPTY;
     }
 }
 
@@ -958,25 +851,18 @@ pub(crate) fn sole_shared_mapping(handle: Handle, offset: usize, pid: u32, addre
     let Some(overlay) = live() else {
         return false;
     };
-    let mut page = overlay.first_mapping_page;
     let mut found = false;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page(page) else {
-            return false;
-        };
-        for mapping in &mappings.mappings {
-            if !mapping.active
-                || mapping.handle != handle
-                || mapping.offset / PAGE_SIZE != offset / PAGE_SIZE
-            {
-                continue;
-            }
-            if mapping.pid != pid || mapping.address != address {
-                return false;
-            }
-            found = true;
+    for mapping in &overlay.mappings {
+        if !mapping.active
+            || mapping.handle != handle
+            || mapping.offset / PAGE_SIZE != offset / PAGE_SIZE
+        {
+            continue;
         }
-        page = mappings.next;
+        if mapping.pid != pid || mapping.address != address {
+            return false;
+        }
+        found = true;
     }
     found
 }
@@ -1044,21 +930,10 @@ pub(crate) fn release_unmapped_shmem() {
 
 /// Whether a process has a shared mapping of `handle` registered.
 fn handle_mapped(overlay: &Overlay, handle: Handle) -> bool {
-    let mut page = overlay.first_mapping_page;
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page(page) else {
-            return true;
-        };
-        if mappings
-            .mappings
-            .iter()
-            .any(|mapping| mapping.active && mapping.handle == handle)
-        {
-            return true;
-        }
-        page = mappings.next;
-    }
-    false
+    overlay
+        .mappings
+        .iter()
+        .any(|mapping| mapping.active && mapping.handle == handle)
 }
 
 /// Moves a file's data into whole frames, so every process that maps it
@@ -1359,7 +1234,7 @@ fn create(path: &[u8], kind: NodeKind, mode: u32, initial: &[u8]) -> Option<Hand
         page_count: 0,
         cached_page: FrameLease::EMPTY,
         cached_page_index: 0,
-        xattr_first: FrameLease::EMPTY,
+        xattrs: Vec::new(),
         atime: created,
         mtime: created,
         ctime: created,
@@ -1388,14 +1263,14 @@ pub(crate) fn whiteout_stored(path: &[u8]) -> bool {
         let Some(node) = node_by_path_mut(overlay, path) else {
             return false;
         };
-        if !release_data_pages(node.first_page) || !release_xattr_pages(node.xattr_first) {
+        if !release_data_pages(node.first_page) {
             return false;
         }
         node.first_page = FrameLease::EMPTY;
         node.last_page = FrameLease::EMPTY;
         node.page_count = 0;
         node.cached_page = FrameLease::EMPTY;
-        node.xattr_first = FrameLease::EMPTY;
+        node.xattrs = Vec::new();
         node.size = 0;
         node.linked = true;
         node.whiteout = true;
@@ -1442,7 +1317,7 @@ pub(crate) fn whiteout_stored(path: &[u8]) -> bool {
         page_count: 0,
         cached_page: FrameLease::EMPTY,
         cached_page_index: 0,
-        xattr_first: FrameLease::EMPTY,
+        xattrs: Vec::new(),
         atime: (0, 0),
         mtime: (0, 0),
         ctime: (0, 0),
@@ -1805,20 +1680,19 @@ where
     {
         return false;
     }
-    let exists = xattr_metadata(handle, name).is_some_and(|(_, removed)| !removed);
+    let exists = node(handle).is_some_and(|node| node.xattr(name).is_some());
     if create_only && exists || replace_only && !exists {
         return false;
     }
-    let mut offset = 0;
-    let value_first = match allocate_data_pages_with(value_size, |bytes| {
-        let accepted = fill(offset, bytes);
-        offset += bytes.len();
-        accepted
-    }) {
-        Some(first) => first,
-        None => return false,
-    };
-    append_xattr_pages(handle, name, value_first, value_size, false)
+    let mut value = Vec::new();
+    if value.try_reserve_exact(value_size).is_err() {
+        return false;
+    }
+    value.resize(value_size, 0);
+    if value_size != 0 && !fill(0, &mut value) {
+        return false;
+    }
+    set_xattr(handle, name, value)
 }
 
 pub(crate) fn get_xattr_chunk(
@@ -1833,33 +1707,13 @@ pub(crate) fn get_xattr_chunk(
     if blockfs::owns(handle) {
         return blockfs::get_xattr_chunk(handle, name, offset, output).flatten();
     }
-    let (page, removed) = xattr_metadata(handle, name)?;
-    if removed {
-        return None;
-    }
-    let record = xattr_page(page)?;
-    let size = record.value_size as usize;
+    let value = &node(handle)?.xattr(name)?.value;
+    let size = value.len();
     if offset >= size || output.is_empty() {
         return Some((size, 0));
     }
-    let mut value_page = record.value_first;
-    let mut page_index = offset / DATA_CAPACITY;
-    while page_index != 0 {
-        value_page = data_page(value_page)?.next;
-        page_index -= 1;
-    }
-    let mut within_page = offset % DATA_CAPACITY;
-    let mut copied = 0;
-    let wanted = output.len().min(size - offset);
-    while copied < wanted {
-        let data = data_page(value_page)?;
-        let length = (wanted - copied).min(DATA_CAPACITY - within_page);
-        output[copied..copied + length]
-            .copy_from_slice(&data.bytes[within_page..within_page + length]);
-        copied += length;
-        within_page = 0;
-        value_page = data.next;
-    }
+    let copied = output.len().min(size - offset);
+    output[..copied].copy_from_slice(&value[offset..offset + copied]);
     Some((size, copied))
 }
 
@@ -1875,29 +1729,21 @@ pub(crate) fn list_xattrs_chunk(
         return blockfs::list_xattrs_chunk(handle, offset, output).flatten();
     }
     let node = node(handle)?;
-    let mut current = node.xattr_first;
     let mut used: usize = 0;
     let mut copied: usize = 0;
-    while current != FrameLease::EMPTY {
-        let record = xattr_page(current)?;
-        if !record.removed && !xattr_superseded(node.xattr_first, current, record.name())? {
-            let length = usize::from(record.name_length).checked_add(1)?;
-            let end = used.checked_add(length)?;
-            let copy_start = offset.max(used);
-            let copy_end = end.min(offset.saturating_add(output.len()));
-            if copy_start < copy_end {
-                for source_index in copy_start - used..copy_end - used {
-                    output[copied] = if source_index < record.name().len() {
-                        record.name()[source_index]
-                    } else {
-                        0
-                    };
-                    copied += 1;
-                }
+    // Most recently set first, each name NUL-terminated.
+    for record in node.xattrs.iter().rev() {
+        let length = record.name.len().checked_add(1)?;
+        let end = used.checked_add(length)?;
+        let copy_start = offset.max(used);
+        let copy_end = end.min(offset.saturating_add(output.len()));
+        if copy_start < copy_end {
+            for source_index in copy_start - used..copy_end - used {
+                output[copied] = record.name.get(source_index).copied().unwrap_or(0);
+                copied += 1;
             }
-            used = end;
         }
-        current = record.previous;
+        used = end;
     }
     Some((used, copied))
 }
@@ -1909,10 +1755,10 @@ pub(crate) fn remove_xattr(handle: Handle, name: &[u8]) -> bool {
     if blockfs::owns(handle) {
         return blockfs::remove_xattr(handle, name).unwrap_or(false);
     }
-    if !xattr_metadata(handle, name).is_some_and(|(_, removed)| !removed) {
-        return false;
-    }
-    append_xattr(handle, name, &[], true)
+    node_mut(handle).is_some_and(|node| {
+        let index = node.xattrs.iter().position(|record| record.name == name);
+        index.map(|index| node.xattrs.remove(index)).is_some()
+    })
 }
 
 pub(crate) fn rename_stored(handle: Handle, path: &[u8]) -> bool {
@@ -2741,7 +2587,7 @@ pub(crate) fn reclaim_unlinked(in_use: impl Fn(Handle) -> bool) {
         let Some(node) = node_mut(handle) else {
             continue;
         };
-        if release_node_data(node) && release_xattr_pages(node.xattr_first) {
+        if release_node_data(node) {
             tmpfs_quota::release(
                 cpu::current_linux_execution_instance(),
                 node.path(),
@@ -2779,7 +2625,7 @@ pub(crate) fn teardown() -> bool {
         };
         let next = nodes.next;
         for node in &mut nodes.nodes {
-            if node.active && (!release_node_data(node) || !release_xattr_pages(node.xattr_first)) {
+            if node.active && !release_node_data(node) {
                 return false;
             }
             *node = Node::EMPTY;
@@ -2789,17 +2635,7 @@ pub(crate) fn teardown() -> bool {
         }
         page = next;
     }
-    let mut page = core::mem::replace(&mut overlay.first_mapping_page, FrameLease::EMPTY);
-    while page != FrameLease::EMPTY {
-        let Some(mappings) = mapping_page(page) else {
-            return false;
-        };
-        let next = mappings.next;
-        if !memory::scrub_and_release_frames(FrameOwner::KERNEL, core::slice::from_ref(&page)) {
-            return false;
-        }
-        page = next;
-    }
+    overlay.mappings = Vec::new();
     overlay.next_generation = 0x8000_0000;
     overlay.next_inode = 0x10_000;
     true
@@ -2878,22 +2714,6 @@ fn allocate_node_page() -> Option<FrameLease> {
             NodePage {
                 next: FrameLease::EMPTY,
                 nodes: [Node::EMPTY; NODE_COUNT],
-            },
-        );
-    }
-    Some(page)
-}
-
-fn allocate_mapping_page() -> Option<FrameLease> {
-    let [page] = memory::allocate_frames::<1>(FrameOwner::KERNEL)?;
-    let address = page.direct_map_address()?;
-    unsafe {
-        core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
-        core::ptr::write(
-            address as *mut MappingPage,
-            MappingPage {
-                next: FrameLease::EMPTY,
-                mappings: [SharedMapping::EMPTY; MAPPING_COUNT],
             },
         );
     }
@@ -3066,151 +2886,33 @@ fn allocate_data_page() -> Option<FrameLease> {
     Some(page)
 }
 
-impl XattrPage {
-    fn name(&self) -> &[u8] {
-        &self.name[..usize::from(self.name_length)]
+impl Node {
+    /// The extended attribute `name`, if set.
+    fn xattr(&self, name: &[u8]) -> Option<&Xattr> {
+        self.xattrs.iter().find(|record| record.name == name)
     }
 }
 
-fn append_xattr(handle: Handle, name: &[u8], value: &[u8], removed: bool) -> bool {
-    let value_first = if value.is_empty() {
-        FrameLease::EMPTY
-    } else {
-        let Some(first) = allocate_data_pages(value) else {
-            return false;
-        };
-        first
-    };
-    append_xattr_pages(handle, name, value_first, value.len(), removed)
-}
-
-fn append_xattr_pages(
-    handle: Handle,
-    name: &[u8],
-    value_first: FrameLease,
-    value_size: usize,
-    removed: bool,
-) -> bool {
-    let Some([page]) = memory::allocate_frames::<1>(FrameOwner::KERNEL) else {
-        let _ = release_data_pages(value_first);
+/// Sets extended attribute `name` of `handle` to `value`, as the most
+/// recently set one.
+fn set_xattr(handle: Handle, name: &[u8], value: Vec<u8>) -> bool {
+    let mut stored_name = Vec::new();
+    if stored_name.try_reserve_exact(name.len()).is_err() {
         return false;
-    };
-    let Some(address) = page.direct_map_address() else {
-        let _ = release_data_pages(value_first);
-        let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
-        return false;
-    };
+    }
+    stored_name.extend_from_slice(name);
     let Some(node) = node_mut(handle) else {
-        let _ = release_data_pages(value_first);
-        let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
         return false;
     };
-    let mut stored_name = [0_u8; XATTR_NAME_CAPACITY];
-    stored_name[..name.len()].copy_from_slice(name);
-    unsafe {
-        core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
-        core::ptr::write(
-            address as *mut XattrPage,
-            XattrPage {
-                previous: node.xattr_first,
-                value_first,
-                value_size: value_size as u32,
-                name_length: name.len() as u16,
-                removed,
-                name: stored_name,
-            },
-        );
+    if let Some(index) = node.xattrs.iter().position(|record| record.name == name) {
+        node.xattrs.remove(index);
+    } else if node.xattrs.try_reserve(1).is_err() {
+        return false;
     }
-    node.xattr_first = page;
-    true
-}
-
-fn allocate_data_pages(input: &[u8]) -> Option<FrameLease> {
-    let mut offset = 0;
-    allocate_data_pages_with(input.len(), |output| {
-        output.copy_from_slice(&input[offset..offset + output.len()]);
-        offset += output.len();
-        true
-    })
-}
-
-fn allocate_data_pages_with<F>(size: usize, mut fill: F) -> Option<FrameLease>
-where
-    F: FnMut(&mut [u8]) -> bool,
-{
-    let mut first = FrameLease::EMPTY;
-    let mut last = FrameLease::EMPTY;
-    let mut remaining = size;
-    while remaining != 0 {
-        let Some(page) = allocate_data_page() else {
-            let _ = release_data_pages(first);
-            return None;
-        };
-        let Some(data) = data_page_mut(page) else {
-            let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
-            let _ = release_data_pages(first);
-            return None;
-        };
-        let length = remaining.min(DATA_CAPACITY);
-        if !fill(&mut data.bytes[..length]) {
-            let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
-            let _ = release_data_pages(first);
-            return None;
-        }
-        if first == FrameLease::EMPTY {
-            first = page;
-        } else {
-            let Some(tail) = data_page_mut(last) else {
-                let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page]);
-                let _ = release_data_pages(first);
-                return None;
-            };
-            tail.next = page;
-        }
-        last = page;
-        remaining -= length;
-    }
-    Some(first)
-}
-
-fn xattr_metadata(handle: Handle, name: &[u8]) -> Option<(FrameLease, bool)> {
-    let node = node(handle)?;
-    let mut page = node.xattr_first;
-    while page != FrameLease::EMPTY {
-        let record = xattr_page(page)?;
-        if record.name() == name {
-            return Some((page, record.removed));
-        }
-        page = record.previous;
-    }
-    None
-}
-
-fn xattr_superseded(first: FrameLease, target: FrameLease, name: &[u8]) -> Option<bool> {
-    let mut page = first;
-    while page != target {
-        let record = xattr_page(page)?;
-        if record.name() == name {
-            return Some(true);
-        }
-        page = record.previous;
-    }
-    Some(false)
-}
-
-fn release_xattr_pages(mut page: FrameLease) -> bool {
-    while page != FrameLease::EMPTY {
-        let Some(record) = xattr_page(page) else {
-            return false;
-        };
-        let previous = record.previous;
-        if !release_data_pages(record.value_first)
-            || !memory::scrub_and_release_frames(FrameOwner::KERNEL, &[page])
-        {
-            return false;
-        }
-        page = previous;
-    }
+    node.xattrs.push(Xattr {
+        name: stored_name,
+        value,
+    });
     true
 }
 
@@ -3385,18 +3087,6 @@ fn node_page_mut(page: FrameLease) -> Option<&'static mut NodePage> {
     Some(unsafe { &mut *(address as *mut NodePage) })
 }
 
-fn mapping_page(page: FrameLease) -> Option<&'static MappingPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &*(address as *const MappingPage) })
-}
-
-fn mapping_page_mut(page: FrameLease) -> Option<&'static mut MappingPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &mut *(address as *mut MappingPage) })
-}
-
 fn data_page(page: FrameLease) -> Option<&'static DataPage> {
     (page != FrameLease::EMPTY).then_some(())?;
     let address = page.direct_map_address()?;
@@ -3407,12 +3097,6 @@ fn data_page_mut(page: FrameLease) -> Option<&'static mut DataPage> {
     (page != FrameLease::EMPTY).then_some(())?;
     let address = page.direct_map_address()?;
     Some(unsafe { &mut *(address as *mut DataPage) })
-}
-
-fn xattr_page(page: FrameLease) -> Option<&'static XattrPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &*(address as *const XattrPage) })
 }
 
 fn live() -> Option<&'static Overlay> {
