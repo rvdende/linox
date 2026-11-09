@@ -7,8 +7,14 @@ is the "framekernel" architecture of Asterinas. This document measures where
 Linox stands, proposes the boundary and the safe APIs the core must offer,
 and lays out an ordered migration with CI enforcement.
 
-Measured at `e321d83d` (2026-10-31). Every number below comes from
-`tools/architecture/inventory-unsafe.sh`; rerun it to refresh them.
+Measured at `e321d83d` (2026-10-31). Every number in §1-§3 and in the
+second half of Appendix A comes from `tools/architecture/inventory-unsafe.sh`
+at that commit; rerun it to refresh them. Where things stand now
+(2026-11-10): there is no `unsafe` outside `kernel/src/trusted/`, which
+holds 128 `unsafe` blocks (155 sites with its `unsafe fn`s, impls and
+extern fn), each with a SAFETY comment; `lib.rs` allows unsafe code in
+`trusted` alone. See "No unsafe outside trusted/" in §5 and the current
+inventory at the head of Appendix A.
 
 ## 1. Summary
 
@@ -835,7 +841,8 @@ the `Sync` impl of the owner that holds those records.
   (174), and `lib.rs` allows unsafe code in 4 modules (`arch`,
   `image_store`, `scheduler`, `trusted`).
 
-Still to do here, and why:
+Still to do here, and why (all three done 2026-11-10; see "No unsafe
+outside trusted/" below):
 - The process records (`linux_process_state.rs`, 8 sites, and the `Sync`
   impl in `cpu.rs`): `linux_process_record` and the runtime-state
   accessors return `&'static mut` into frame-allocated records, about 90
@@ -896,7 +903,8 @@ frames looked up under the lock and used after it), which splitting it
 round (`check-kernel-unsafe.sh`, from main at b65ee6eb, after the
 overlay's leaf lock): `unsafe` blocks 353 -> 228, blocks without a SAFETY
 comment 115 -> 49, modules allowed unsafe code in `lib.rs` 7 -> 5.
-What is still open in this round's files, and why:
+What is still open in this round's files, and why (both done since; see
+"No unsafe outside trusted/" below):
 - `image_store.rs`'s `retire` (1 site): the published root filesystem's
   bytes reach `cpu/` as `'static` slices (`Entry<'static>`'s data, link
   and name, `process_plan`'s segments, `LaunchArguments`,
@@ -912,6 +920,75 @@ What is still open in this round's files, and why:
   `cpu/linux_user_memory.rs` (1) takes the user-fault frame pointer
   `cpu.rs`'s stub passes; both go with the entry and signal-state work in
   those files.
+
+**Done so far (2026-11-10): no unsafe outside trusted/.** Every `unsafe`
+block, `unsafe impl`, `unsafe fn` and `unsafe extern` fn of the kernel is
+in `kernel/src/trusted/`, and `lib.rs` allows unsafe code in `trusted`
+alone (it allowed `arch`, `image_store`, `scheduler` and `trusted`).
+`arch.rs`, `arch/x86_64.rs`, `cpu.rs`, `cpu/linux_process_state.rs`,
+`scheduler.rs`, `image_store.rs` and `pci_config.rs` carry
+`#![forbid(unsafe_code)]`; `arch/` as a whole forbids it.
+- **Process records.** Each domain instance's Linux process records are a
+  `LinuxProcessRecordTable` (cpu.rs) behind an `IrqSpinLock` at the new
+  leaf rank `PROCESS_RECORDS` (199). They are reached only through
+  closures that hold it for one copy in or out
+  (`with_linux_process_record`, `with_linux_process_runtime_state`,
+  `with_valid_linux_process_runtime_state`, `with_linux_process_threads`,
+  `with_linux_process_record_pair` for fork's parent and child and a
+  shared table's sharers, `for_each_allocated_linux_process_record`), so
+  none of the ~90 call sites holds a record across a call any more. The
+  closures only copy (bank stores and loads, XSAVE/XRSTOR, compares); what
+  locks is done around them: the mount namespace switch before a restore,
+  descriptor releases on a copy taken out, the descriptor table above the
+  fixed one looked at after the closure returns its id, the sharers
+  looked up before the copies. Records are heap objects now (three boxed
+  parts built in place with `heap::try_boxed_array`), allocated with the
+  lock released; the frame-allocated records and their raw pointers are
+  gone, and with them cpu.rs's `unsafe impl Sync`.
+  docs/feedback-hardening/SYNCHRONIZATION.md, "Process records".
+- **Scheduler.** The native runtime is an `IrqSpinLock` at the new rank
+  `NATIVE_SCHEDULER` (108), reached through `with_runtime`. A Linux
+  domain instance's run queue is part of its process table
+  (`ProcessTable::run_queue`, under PROCESS_TABLE, where every use of it
+  already ran); the per-instance `OwnedState` workspaces are gone, and so
+  are `OwnedState::get_mut_ptr` and `reset`.
+- **Published images.** A root filesystem image is reference-counted
+  (`published_rootfs::PublishedImage`, an `Arc`): the image store's
+  backing, each slot's publication, every entry and every exec program
+  (`published_rootfs::Program`, which replaces `process_plan` and
+  `launch_arguments`) hold it, and the slices they hand out borrow from
+  them. `retire` is an ordinary drop after the ROOTFS_IMAGES lock is
+  released, and `PublishedImage` left `trusted/`.
+- **The signal frame's `Pod` impls** are listed in `trusted/pod.rs`
+  (its `pod!` macro is local to it), so no module outside the core expands
+  an `unsafe impl`.
+- **Trusted audit.** One CR3 load path: a validated process root is a
+  `Root` (`Root::from(&ValidatedUserRootFrames)`) loaded by
+  `root::activate`, and `load_user_root` is gone. `trusted::take_once` is
+  gone (its one user, kernel_main's OCI catalog buffer, is on the heap).
+  `pci_config` had no unsafe and is `crate::pci_config` now, on
+  `trusted::port::pci`, which the check script keeps to it.
+- **The check** (`check-kernel-unsafe.sh`) replaced the "blocks minus
+  SAFETY comments" ratchet, negative since more comments than blocks
+  existed, with a check of each site: every block, impl and extern fn
+  needs a `// SAFETY:` comment directly above it, every `unsafe fn` and
+  `unsafe trait` that or a `# Safety` doc section (with a negative test).
+  Every trusted file has a per-file limit at its real count, no file has
+  two, and none both forbids unsafe and has one.
+- Counts, from 3d8fd096: unsafe blocks 144 -> 128; sites outside
+  `trusted/` 12 -> 0 (`linux_process_state.rs` 7, `scheduler.rs` 3,
+  `image_store.rs` 1, `cpu.rs` 1); sites in `trusted/` 163 -> 155
+  (`image.rs` 9 -> 5, `owned_state.rs` 4 -> 3, `root.rs` 5 -> 4,
+  `take_once.rs` 2 -> gone); modules allowed unsafe code in `lib.rs` 4 -> 1.
+
+What this does not finish: the kernel-entry lock still serializes system
+calls, and several things lean on it beyond the owners made sound above:
+the per-CPU banks of process state (`X86_RUNTIME`, atomics, but a process's
+state spread over many of them is consistent only under the lock), the
+windows `linux_process.rs` leaves between table holds (§ above), and a
+record's state relative to its process's bank while the process runs on
+another CPU. Those are SCHEDULER.md step 6's (M3's) to close, now with no
+`&'static mut` owner left in the way.
 
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
@@ -1074,6 +1151,21 @@ If that is too slow for `make check`, a lexical count of `unsafe` tokens
 ratchet; the compiler's `deny(unsafe_code)` remains the actual guard either
 way. `make unsafe-report` can print the full summary for humans.
 
+**What `tools/architecture/check-kernel-unsafe.sh` enforces today** (run by
+`make check`; the manifest-based check above was not built, the per-file
+limits stand in for it): no `static mut`; a cap on the number of `unsafe`
+blocks (the real count); a `// SAFETY:` comment directly above every
+`unsafe` block, impl and extern fn, and that or a `# Safety` doc section
+on every `unsafe fn` and `unsafe trait` (with a negative test); a
+per-file limit at the real count for every file of `trusted/` but
+`mod.rs`, one per file; `#![forbid(unsafe_code)]` in the files moved out
+(no file both forbids and has a limit); `lib.rs` denies unsafe code and
+allows it on one module declaration, `trusted`; and the confinements of
+the core's constructors from bare addresses (`Frame`, `PageTable` and
+`Root::from_physical`, the frame tables, firmware views, `Mmio::firmware`,
+`PixelBuffer::firmware`, the PCI configuration ports) to the modules that
+may use them.
+
 ## 7. Risks, and what cannot be made safe
 
 - **Removing the big kernel lock before the owner cells.** The single
@@ -1133,6 +1225,49 @@ way. `make unsafe-report` can print the full summary for humans.
   and the per-file ratchet are exact.
 
 ## Appendix A: per-file and per-category tables
+
+### What remains in trusted/ (2026-11-10)
+
+Sites are `rg -c 'unsafe \{|unsafe fn|unsafe impl|unsafe extern'` per file
+(the check script's per-file limits). Nothing outside `trusted/` has any.
+
+| module | sites | what it is, and why it needs `unsafe` |
+|---|---:|---|
+| `ap_start.rs` | 1 | the application processors' start-up trampoline: copies real-mode code to its low page and starts the CPUs on it |
+| `boot.rs` | 9 | the kernel's entry from the loader, its stack, the boot information and memory map read from raw loader pointers, the firmware's reset service |
+| `claim.rs` | 3 | `ClaimCell`, a rankless try-lock for contexts that must never spin (console, scanout): an `UnsafeCell` handed to one claim |
+| `control.rs` | 12 | CR0/CR2/CR3/CR4, the task register, RSP and CS read by `asm!`, CR0.WP and CR4's protection features, `ud2`/`int3` |
+| `cpu_tables.rs` | 16 | each CPU's GDT, TSS, IDT, entry-state record and stacks: `lgdt`/`lidt`/`ltr`, GS base, volatile access to records the entry stubs share |
+| `crash.rs` | 5 | the bring-up exception table, and the reads a crash report makes of the live page tables and kernel stack |
+| `dma.rs` | 4 | memory a device reaches by DMA: volatile access to static pages, pools and leased frames, cache-line flushes |
+| `entry.rs` | 4 | every entry stub (`global_asm!`), the Linux syscall frame read and written through its handle, entering user mode |
+| `firmware.rs` | 2 | ACPI tables viewed in place through the identity or direct map |
+| `frame.rs` | 9 | a physical frame read and written through the direct map (bounds-checked copies) |
+| `frame_tables.rs` | 2 | the frame allocator's per-frame tables carved out of RAM at boot |
+| `heap.rs` | 7 | the `GlobalAlloc`: slabs and frame runs handed out as raw memory |
+| `image.rs` | 5 | the loader's boot images (identity-mapped, immutable) and the boot archive's private frame copy, as byte slices |
+| `interrupts.rs` | 8 | `cli`, `sti`, `hlt` and RFLAGS |
+| `lock.rs` | 3 | the ticket spin locks: an `UnsafeCell` handed to one guard |
+| `mmio.rs` | 2 | volatile access to a device's register window |
+| `msr.rs` | 4 | FS base, EFER.NXE and the `syscall` MSRs |
+| `owned_state.rs` | 3 | set-once owners: a value written once by its claim, then shared |
+| `page_table.rs` | 2 | a page-table frame's 512 entries as atomics through the direct map, `invlpg` |
+| `pixels.rs` | 3 | the framebuffer surfaces, written and read through raw pointers |
+| `pod.rs` | 10 | the `Pod` trait, its impls (the integers, arrays, the signal frame's structs through the local `pod!`) and the byte views of a `Pod` value |
+| `port.rs` | 8 | the I/O ports the kernel uses (COM1, PIT channel 2 and its gate, the ACPI PM timer, the PCI configuration pair), each a typed handle |
+| `programs.rs` | 1 | the ring-3 test programs assembled into the image (`global_asm!`), as byte slices |
+| `random.rs` | 1 | RDRAND |
+| `root.rs` | 4 | CR3: read, reload, and the one load of a `Root` (plus the kernel root's boot install) |
+| `switch.rs` | 12 | kernel stacks of their own and the context switch between activations (`global_asm!`, raw activation records) |
+| `tsc.rs` | 3 | RDTSC, RDTSCP and RDPID |
+| `user_copy.rs` | 8 | copies to and from user pages with fault fixup (the copy loops in `global_asm!`) |
+| `xstate.rs` | 4 | XCR0, CR4.OSXSAVE, XSAVE and XRSTOR |
+| **total** | **155** | 128 `unsafe` blocks; 6.7k lines with `mod.rs` |
+
+### Inventory at `e321d83d` (2026-10-31)
+
+The tables below are the baseline the plan started from, kept for the
+record; they no longer describe the code.
 
 Generated by `tools/architecture/inventory-unsafe.sh` at `e321d83d`. `k/` is
 `kernel/src/`.

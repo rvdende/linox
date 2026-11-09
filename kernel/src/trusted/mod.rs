@@ -26,8 +26,8 @@
 //! - [`mmio`]: a window of one device's memory-mapped registers.
 //! - [`msr`]: the model-specific registers the kernel uses outside the CPU
 //!   core.
-//! - [`image`]: the boot loader's handoff images and published root
-//!   filesystem images, read in place as `'static` byte slices.
+//! - [`image`]: the boot loader's handoff images and the boot archive's
+//!   private frame copy, read in place as byte slices.
 //! - [`interrupts`]: this CPU's interrupt flag, and halting.
 //! - [`entry`]: every entry stub (system calls, exceptions, NMI, device,
 //!   timer and inter-processor interrupts), the stubs that enter user

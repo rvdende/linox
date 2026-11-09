@@ -209,8 +209,8 @@ lock for the closure only.
   vectors (the heap, 190); frame ownership checks and the release of
   page-table frames (the frame allocator, 200); user-namespace lookups
   (`linux_user`, 194, and the domain manager, 450); the scheduler's run
-  queue (its workspace has no lock yet; the preempted-context leaf is
-  400); and the fork scratch leaf below. Nothing under it parks, copies to
+  queue (`ProcessTable::run_queue`, part of the table and so under its
+  lock; the preempted-context leaf is 400); and the fork scratch leaf below. Nothing under it parks, copies to
   or from user memory, or calls back into `linux_process`.
 - What it is taken under: whatever a system call holds while it looks a
   process up, including a copy-on-write fault taken during a copy to user
