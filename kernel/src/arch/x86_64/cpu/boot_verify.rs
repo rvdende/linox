@@ -8,7 +8,7 @@ pub(crate) fn verify_cross_cpu_linux_runtime_mechanisms() -> bool {
     let cpu = 1;
     let instance = linux_process::current_ipc_instance();
     let signal_slot = linux_process::PROCESS_LIMIT - 1;
-    if crate::linux_signal::clear(instance, crate::linux_signal::Scope::Process, signal_slot)
+    if crate::linux_signal::clear(instance, crate::linux_signal::Target::Process(signal_slot))
         .is_err()
         || !crate::arch::x86_64::smp::execute_runtime_operation(cpu, CROSS_CPU_RUNTIME_SIGNAL)
     {
@@ -16,8 +16,7 @@ pub(crate) fn verify_cross_cpu_linux_runtime_mechanisms() -> bool {
     }
     let signal = crate::linux_signal::dequeue(
         instance,
-        crate::linux_signal::Scope::Process,
-        signal_slot,
+        crate::linux_signal::Target::Process(signal_slot),
         1 << 9,
     );
     if !signal.is_ok_and(|pending| {

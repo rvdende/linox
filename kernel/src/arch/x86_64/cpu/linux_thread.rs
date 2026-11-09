@@ -525,8 +525,7 @@ fn clear_linux_thread_slot(slot: usize) {
     if let Some(process) = linux_process::live_process_slot(current_linux_process_pid()) {
         let _ = crate::linux_signal::clear(
             linux_signal_instance(),
-            crate::linux_signal::Scope::Thread,
-            linux_thread_signal_queue_slot(process, slot),
+            linux_thread_signal_queue(process, slot),
         );
     }
     let stack_base = X86_RUNTIME.LINUX_THREAD_STACK_BASES[slot].load(Ordering::SeqCst);

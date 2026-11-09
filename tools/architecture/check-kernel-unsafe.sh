@@ -9,16 +9,16 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 153 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 153 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 146 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 146 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > -27 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -27 to ${undocumented}" >&2
+if (( undocumented > -30 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -30 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -129,6 +129,7 @@ forbidding_files=(
     "linux_input.rs"
     "linux_mount.rs"
     "linux_process.rs"
+    "linux_signal.rs"
     "linux_socket/virtio_net.rs"
     "linux_sysv_ipc.rs"
     "linux_tmpfs.rs"
@@ -156,8 +157,8 @@ if ! rg -q '^#!\[deny\(unsafe_code\)\]$' "${kernel_source}/lib.rs"; then
     exit 1
 fi
 allowed_modules="$(rg -c -U '#\[allow\(unsafe_code\)\]\n(pub(\([^)]*\))? )?mod ' "${kernel_source}/lib.rs" || true)"
-if (( ${allowed_modules:-0} > 5 )); then
-    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 5" >&2
+if (( ${allowed_modules:-0} > 4 )); then
+    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 4" >&2
     exit 1
 fi
 if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${allowed_modules:-0} )); then

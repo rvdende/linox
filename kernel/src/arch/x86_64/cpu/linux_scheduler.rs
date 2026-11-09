@@ -1686,8 +1686,7 @@ pub(crate) fn execute_cross_cpu_runtime_operation(operation: u64) -> bool {
     match operation & 0xff {
         CROSS_CPU_RUNTIME_SIGNAL => crate::linux_signal::enqueue(
             linux_process::current_ipc_instance(),
-            crate::linux_signal::Scope::Process,
-            linux_process::PROCESS_LIMIT - 1,
+            crate::linux_signal::Target::Process(linux_process::PROCESS_LIMIT - 1),
             crate::linux_signal::Pending {
                 signal: 10,
                 code: -1,

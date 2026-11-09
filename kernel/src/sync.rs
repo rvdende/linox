@@ -233,6 +233,17 @@ impl LockRank {
     /// (`address_space::take_scratch`): a leaf held only to take a list out
     /// or put it back; the lists are freed with it released.
     pub(crate) const ADDRESS_SPACE_SCRATCH: Self = Self(199);
+    /// Each domain's signal queues (`linux_signal`): an interrupt-safe
+    /// leaf that allocates and frees nothing while held (storage is
+    /// reserved before it is taken and freed after). Signals are sent
+    /// under whatever lock a system call holds: a memory cgroup's OOM kill
+    /// sends SIGKILL from the user page allocation of a fault taken during
+    /// a copy to user memory, under the volumes or the tmpfs limits (189).
+    /// So it ranks above every lock below the heap, and above the other
+    /// leaves (none sends a signal), below the frame allocator. It shares
+    /// 199 with ADDRESS_SPACE_SCRATCH: both are leaves that take nothing
+    /// while held, so neither is ever taken under the other.
+    pub(crate) const SIGNAL_QUEUES: Self = Self(199);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);

@@ -667,9 +667,10 @@ undocumented 266 -> 218.
 Still to do in steps 6 and 7: the published root filesystem's entries
 are `Entry<'static>` borrowed by callers in `cpu/`; giving them a
 lifetime tied to the publication would let `PublishedImage::retire`
-become safe. And the signal queues
-(`linux_signal`: senders hold locks up to the heap's rank, so its lock
-needs a rank audit first).
+become safe. (The signal queues are done:
+`linux_signal` keeps them in heap tables under one `IrqSpinLock` per
+domain, ranked by an audit of its callers, SYNCHRONIZATION.md
+"Signal queues".)
 
 **Done so far (2026-11-09, continued): boot, entry stubs, locks, paging
 and virtio into the core.** `trusted/` now also holds:

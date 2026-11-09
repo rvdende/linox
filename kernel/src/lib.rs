@@ -70,7 +70,6 @@ mod linux_profile;
 mod linux_pty;
 mod linux_ramdisk;
 mod linux_record_lock;
-#[allow(unsafe_code)]
 mod linux_signal;
 mod linux_socket;
 mod linux_strace;

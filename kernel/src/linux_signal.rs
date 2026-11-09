@@ -1,28 +1,61 @@
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-};
+//! The Linux signal queues: each domain's queued signals, one queue per
+//! process slot and one per thread slot of each process.
+//!
+//! Standard signals (`realtime` false) coalesce: a second one of a number
+//! already queued is dropped. Real-time signals queue every instance. A
+//! dequeue takes the lowest-numbered requested signal, and among queued
+//! signals of the same number the oldest. The counts of queued signals are
+//! atomics, so `pending_count` and `any_pending` take no lock.
+//!
+//! The tables grow as slots are first used: process queues by process
+//! slot, and thread queues by process slot and then thread slot, so a
+//! process that uses only its first threads has queues for those alone.
+//!
+//! Each domain instance's queues are under one leaf lock
+//! (`LockRank::SIGNAL_QUEUES`, above the heap: a memory cgroup's OOM kill
+//! sends SIGKILL from a page fault taken under whatever lock a system call
+//! holds; docs/feedback-hardening/SYNCHRONIZATION.md, "Signal queues"). So
+//! nothing is allocated or freed while it is held: an operation that has
+//! to grow a table gets storage reserved with the lock released (`Spare`)
+//! and tries again, and storage a table lets go of leaves the critical
+//! section with the operation's result and is freed after the lock is.
+#![forbid(unsafe_code)]
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::vec::Vec;
 
-use crate::{control_abi, linux_process, memory};
+use crate::sync::{IrqSpinLock, LockRank};
+use crate::{control_abi, linux_process};
 
-pub(crate) const THREAD_LIMIT: usize = 16;
+/// Thread slots a process has: `LINUX_THREAD_LIMIT` (cpu.rs, whose signal
+/// code checks they agree).
+pub(crate) const THREAD_LIMIT: usize = 128;
 const INSTANCE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 1;
-const THREAD_QUEUE_LIMIT: usize = linux_process::PROCESS_LIMIT * THREAD_LIMIT;
-const PAGE_SIZE: usize = 4096;
-const ENTRY_ALIGNMENT: usize = core::mem::align_of::<Entry>();
-const ENTRIES_OFFSET: usize =
-    (core::mem::size_of::<PageHeader>() + ENTRY_ALIGNMENT - 1) & !(ENTRY_ALIGNMENT - 1);
-const HEADER_PADDING: usize = ENTRIES_OFFSET - core::mem::size_of::<PageHeader>();
-const ENTRIES_PER_PAGE: usize = (PAGE_SIZE - ENTRIES_OFFSET) / core::mem::size_of::<Entry>();
-const PAGE_PADDING: usize =
-    PAGE_SIZE - ENTRIES_OFFSET - ENTRIES_PER_PAGE * core::mem::size_of::<Entry>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Scope {
     Process,
     Thread,
+}
+
+/// The queue a signal is sent to: its process's, or one thread's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Target {
+    Process(usize),
+    Thread { process: usize, thread: usize },
+}
+
+impl Target {
+    fn check(self) -> Result<(), Error> {
+        let within = match self {
+            Self::Process(process) => process < linux_process::PROCESS_LIMIT,
+            Self::Thread { process, thread } => {
+                process < linux_process::PROCESS_LIMIT && thread < THREAD_LIMIT
+            }
+        };
+        within.then_some(()).ok_or(Error::Invalid)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,294 +73,249 @@ pub(crate) struct Pending {
     pub(crate) sender_uid: u32,
 }
 
+/// One queue: its signals in the order they were queued, so the first of
+/// a number is the oldest of that number. An empty queue holds no storage.
+type Queue = Vec<Pending>;
+
+/// The room an operation found missing under the lock: the table and the
+/// capacity to reserve for it.
 #[derive(Clone, Copy)]
-struct Queue {
-    head: memory::FrameLease,
-    pages: u64,
-    pending: u64,
-    next_sequence: u64,
+enum Need {
+    Processes(usize),
+    Threads(usize),
+    Row(usize),
+    Queue(usize),
 }
 
-impl Queue {
-    const EMPTY: Self = Self {
-        head: memory::FrameLease::EMPTY,
-        pages: 0,
-        pending: 0,
-        // Sequence numbers only order entries among themselves; starting at
-        // 0 keeps the queue tables all-zero, out of the image's data.
-        next_sequence: 0,
-    };
+/// Storage reserved with the lock released for the tables an operation
+/// may have to grow, one empty `Vec` each. Under the lock a table that is
+/// too small moves its entries into the spare and the two are swapped, so
+/// the spare then holds the old, empty storage, which is freed when the
+/// spare drops, after the lock is released.
+#[derive(Default)]
+struct Spare {
+    processes: Vec<Queue>,
+    threads: Vec<Vec<Queue>>,
+    row: Vec<Queue>,
+    queue: Queue,
 }
 
-#[repr(C)]
-struct PageHeader {
-    next: memory::FrameLease,
+impl Spare {
+    /// Reserves `need`, the lock released; what the spare held before is
+    /// freed here.
+    fn reserve(&mut self, need: Need) -> Result<(), Error> {
+        fn empty<T>(capacity: usize) -> Result<Vec<T>, Error> {
+            let mut storage = Vec::new();
+            storage
+                .try_reserve_exact(capacity)
+                .map_err(|_| Error::NoMemory)?;
+            Ok(storage)
+        }
+        match need {
+            Need::Processes(capacity) => self.processes = empty(capacity)?,
+            Need::Threads(capacity) => self.threads = empty(capacity)?,
+            Need::Row(capacity) => self.row = empty(capacity)?,
+            Need::Queue(capacity) => self.queue = empty(capacity)?,
+        }
+        Ok(())
+    }
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct Entry {
-    sequence: u64,
-    value: u64,
-    code: i32,
-    sender_pid: u32,
-    sender_uid: u32,
-    signal: u8,
-    occupied: u8,
-    reserved: [u8; 2],
+/// Makes `table` able to hold `needed` entries without allocating, from
+/// `spare` if it must grow; Err with the room to reserve when the spare is
+/// too small. Tables grow by doubling, up to `limit` entries.
+fn ensure<T>(
+    table: &mut Vec<T>,
+    needed: usize,
+    spare: &mut Vec<T>,
+    limit: usize,
+    need: fn(usize) -> Need,
+) -> Result<(), Need> {
+    if table.capacity() >= needed {
+        return Ok(());
+    }
+    if spare.capacity() < needed || !spare.is_empty() {
+        let doubled = table.capacity().saturating_mul(2).max(4).min(limit);
+        return Err(need(needed.max(doubled)));
+    }
+    // Neither allocates: the spare has room for every entry.
+    spare.append(table);
+    core::mem::swap(table, spare);
+    Ok(())
 }
 
-impl Entry {
-    const EMPTY: Self = Self {
-        sequence: 0,
-        value: 0,
-        code: 0,
-        sender_pid: 0,
-        sender_uid: 0,
-        signal: 0,
-        occupied: 0,
-        reserved: [0; 2],
-    };
+/// The entry of `slot` in `table`, the table grown to it first.
+fn grown<'a, T: Default>(
+    table: &'a mut Vec<T>,
+    slot: usize,
+    spare: &mut Vec<T>,
+    limit: usize,
+    need: fn(usize) -> Need,
+) -> Result<&'a mut T, Need> {
+    ensure(table, slot + 1, spare, limit, need)?;
+    if table.len() <= slot {
+        // Within the capacity, and an empty `Vec` holds no storage.
+        table.resize_with(slot + 1, T::default);
+    }
+    Ok(&mut table[slot])
 }
 
-#[repr(C)]
-struct Page {
-    header: PageHeader,
-    header_padding: [u8; HEADER_PADDING],
-    entries: [Entry; ENTRIES_PER_PAGE],
-    padding: [u8; PAGE_PADDING],
+/// Drops the empty entries at the end of `table` that hold no storage,
+/// which frees nothing.
+fn trim<T>(table: &mut Vec<Vec<T>>) {
+    while table
+        .last()
+        .is_some_and(|entry| entry.is_empty() && entry.capacity() == 0)
+    {
+        table.pop();
+    }
 }
 
-const _: [(); PAGE_SIZE] = [(); core::mem::size_of::<Page>()];
+/// One instance's queues. Nothing here allocates or frees: the critical
+/// sections are only the methods below and reads of their results.
+struct Tables {
+    /// Process queues by process slot: as long as the highest slot used
+    /// so far.
+    processes: Vec<Queue>,
+    /// Thread queues by process slot, then thread slot (a row per process):
+    /// each as long as the highest slot used so far.
+    threads: Vec<Vec<Queue>>,
+}
+
+impl Tables {
+    const fn new() -> Self {
+        Self {
+            processes: Vec::new(),
+            threads: Vec::new(),
+        }
+    }
+
+    /// The queue of `target` (checked), the tables grown to reach it from
+    /// `spare`.
+    fn queue(&mut self, target: Target, spare: &mut Spare) -> Result<&mut Queue, Need> {
+        match target {
+            Target::Process(process) => grown(
+                &mut self.processes,
+                process,
+                &mut spare.processes,
+                linux_process::PROCESS_LIMIT,
+                Need::Processes,
+            ),
+            Target::Thread { process, thread } => {
+                let row = grown(
+                    &mut self.threads,
+                    process,
+                    &mut spare.threads,
+                    linux_process::PROCESS_LIMIT,
+                    Need::Threads,
+                )?;
+                grown(row, thread, &mut spare.row, THREAD_LIMIT, Need::Row)
+            }
+        }
+    }
+
+    /// The queue of `target` if the tables reach it, without growing them:
+    /// a slot past the end has an empty queue.
+    fn existing(&mut self, target: Target) -> Result<Option<&mut Queue>, Error> {
+        target.check()?;
+        Ok(match target {
+            Target::Process(process) => self.processes.get_mut(process),
+            Target::Thread { process, thread } => self
+                .threads
+                .get_mut(process)
+                .and_then(|row| row.get_mut(thread)),
+        })
+    }
+
+    /// Queues `pending` on `target`: Ok(false) when a standard signal of
+    /// its number is already queued there.
+    fn enqueue(
+        &mut self,
+        target: Target,
+        pending: Pending,
+        realtime: bool,
+        spare: &mut Spare,
+    ) -> Result<bool, Need> {
+        let queue = self.queue(target, spare)?;
+        if !realtime && queue.iter().any(|queued| queued.signal == pending.signal) {
+            return Ok(false);
+        }
+        let needed = queue.len() + 1;
+        ensure(queue, needed, &mut spare.queue, usize::MAX, Need::Queue)?;
+        queue.push(pending);
+        Ok(true)
+    }
+
+    /// Gives up the empty queues at the ends of the tables `target` is in.
+    fn trim(&mut self, target: Target) {
+        match target {
+            Target::Process(_) => trim(&mut self.processes),
+            Target::Thread { process, .. } => {
+                if let Some(row) = self.threads.get_mut(process) {
+                    trim(row);
+                }
+                trim(&mut self.threads);
+            }
+        }
+    }
+}
 
 struct SignalRuntimeOwner {
-    locks: [AtomicBool; INSTANCE_LIMIT],
+    /// Signals queued in each instance, for RLIMIT_SIGPENDING and the
+    /// lock-free `any_pending`; changed only with the instance's lock held.
     pending_counts: [AtomicU64; INSTANCE_LIMIT],
-    /// Each instance's process queues and thread queues, by slot: as long
-    /// as the highest slot used so far, grown as slots are first used.
-    queues: UnsafeCell<[[Vec<Queue>; 2]; INSTANCE_LIMIT]>,
+    instances: [IrqSpinLock<Tables>; INSTANCE_LIMIT],
 }
-
-unsafe impl Sync for SignalRuntimeOwner {}
 
 static SIGNAL_RUNTIME: SignalRuntimeOwner = SignalRuntimeOwner {
-    locks: [const { AtomicBool::new(false) }; INSTANCE_LIMIT],
     pending_counts: [const { AtomicU64::new(0) }; INSTANCE_LIMIT],
-    queues: UnsafeCell::new([const { [Vec::new(), Vec::new()] }; INSTANCE_LIMIT]),
+    instances: [const { IrqSpinLock::new(LockRank::SIGNAL_QUEUES, Tables::new()) }; INSTANCE_LIMIT],
 };
 
-struct Guard {
-    instance: usize,
+fn tables(instance: usize) -> Result<&'static IrqSpinLock<Tables>, Error> {
+    SIGNAL_RUNTIME.instances.get(instance).ok_or(Error::Invalid)
 }
 
-impl Guard {
-    fn acquire(instance: usize) -> Result<Self, Error> {
-        let lock = SIGNAL_RUNTIME.locks.get(instance).ok_or(Error::Invalid)?;
-        while lock
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        Ok(Self { instance })
-    }
-
-    /// The queue of `slot`, the table grown to it first; None past the
-    /// limit or without memory. The caller holds no other queue of this
-    /// guard's while it uses the one returned, which a growth would move.
-    fn queue(&self, scope: Scope, slot: usize) -> Option<&'static mut Queue> {
-        let (index, limit) = match scope {
-            Scope::Process => (0, linux_process::PROCESS_LIMIT),
-            Scope::Thread => (1, THREAD_QUEUE_LIMIT),
-        };
-        if slot >= limit {
-            return None;
-        }
-        // SAFETY: the guard holds the instance's lock, which serializes
-        // every access to its tables.
-        let queues = unsafe { &mut (*SIGNAL_RUNTIME.queues.get())[self.instance][index] };
-        if queues.len() <= slot {
-            queues.try_reserve(slot + 1 - queues.len()).ok()?;
-            queues.resize(slot + 1, Queue::EMPTY);
-        }
-        queues.get_mut(slot)
-    }
-
-    /// The queue of `slot` if the table reaches it, without growing it: a
-    /// slot past the end has an empty queue. Err past the limit. Readers
-    /// and clears use this, so they neither grow the table nor (through a
-    /// clear's trim) shrink it back on every call: a fork clearing its
-    /// child's 17 queues did both, half a megabyte each time, at slot 1000.
-    fn existing(&self, scope: Scope, slot: usize) -> Result<Option<&'static mut Queue>, Error> {
-        let (index, limit) = match scope {
-            Scope::Process => (0, linux_process::PROCESS_LIMIT),
-            Scope::Thread => (1, THREAD_QUEUE_LIMIT),
-        };
-        if slot >= limit {
-            return Err(Error::Invalid);
-        }
-        // SAFETY: as in `queue`.
-        let queues = unsafe { &mut (*SIGNAL_RUNTIME.queues.get())[self.instance][index] };
-        Ok(queues.get_mut(slot))
-    }
-
-    /// Gives back the empty queues at the end of a table.
-    fn trim(&self, scope: Scope) {
-        let index = usize::from(scope == Scope::Thread);
-        // SAFETY: as in `queue`; no queue of the guard is in use.
-        let queues = unsafe { &mut (*SIGNAL_RUNTIME.queues.get())[self.instance][index] };
-        while queues
-            .last()
-            .is_some_and(|queue| queue.pages == 0 && queue.pending == 0)
-        {
-            queues.pop();
-        }
-        if queues.capacity() > queues.len().saturating_mul(2).max(64) {
-            queues.shrink_to_fit();
-        }
-    }
+fn signal_bit(signal: u8) -> u64 {
+    1_u64 << (signal - 1)
 }
 
-impl Drop for Guard {
-    fn drop(&mut self) {
-        SIGNAL_RUNTIME.locks[self.instance].store(false, Ordering::Release);
-    }
-}
-
-fn page(frame: memory::FrameLease) -> Option<&'static Page> {
-    Some(unsafe { &*(frame.direct_map_address()? as *const Page) })
-}
-
-fn page_mut(frame: memory::FrameLease) -> Option<&'static mut Page> {
-    Some(unsafe { &mut *(frame.direct_map_address()? as *mut Page) })
-}
-
-fn allocate_page(next: memory::FrameLease) -> Result<memory::FrameLease, Error> {
-    let [frame] =
-        memory::allocate_frames::<1>(memory::FrameOwner::KERNEL).ok_or(Error::NoMemory)?;
-    let Some(address) = frame.direct_map_address() else {
-        let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[frame]);
-        return Err(Error::NoMemory);
-    };
-    unsafe {
-        core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
-        core::ptr::write(
-            address as *mut Page,
-            Page {
-                header: PageHeader { next },
-                header_padding: [0; HEADER_PADDING],
-                entries: [Entry::EMPTY; ENTRIES_PER_PAGE],
-                padding: [0; PAGE_PADDING],
-            },
-        );
-    }
-    Ok(frame)
-}
-
-fn walk(queue: &Queue, mut visit: impl FnMut(memory::FrameLease, &Page) -> bool) -> bool {
-    let mut current = queue.head;
-    for _ in 0..queue.pages {
-        let Some(item) = page(current) else {
-            return false;
-        };
-        if !visit(current, item) {
-            return true;
-        }
-        current = item.header.next;
-    }
-    current == memory::FrameLease::EMPTY
-}
-
-fn release_empty_pages(queue: &mut Queue) -> bool {
-    let mut current = queue.head;
-    let mut previous = memory::FrameLease::EMPTY;
-    let original_pages = queue.pages;
-    for _ in 0..original_pages {
-        let Some(item) = page(current) else {
-            return false;
-        };
-        let next = item.header.next;
-        if item.entries.iter().all(|entry| entry.occupied == 0) {
-            if !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[current]) {
-                return false;
-            }
-            if previous == memory::FrameLease::EMPTY {
-                queue.head = next;
-            } else {
-                let Some(previous_page) = page_mut(previous) else {
-                    return false;
-                };
-                previous_page.header.next = next;
-            }
-            queue.pages -= 1;
-        } else {
-            previous = current;
-        }
-        current = next;
-    }
-    current == memory::FrameLease::EMPTY
+/// The index in `queue` of the signal a dequeue of `requested` takes: the
+/// lowest-numbered, the oldest of that number.
+fn select(queue: &Queue, requested: u64) -> Option<usize> {
+    queue
+        .iter()
+        .enumerate()
+        .filter(|(_, pending)| requested & signal_bit(pending.signal) != 0)
+        .min_by_key(|(index, pending)| (pending.signal, *index))
+        .map(|(index, _)| index)
 }
 
 pub(crate) fn enqueue(
     instance: usize,
-    scope: Scope,
-    slot: usize,
+    target: Target,
     pending: Pending,
     realtime: bool,
 ) -> Result<bool, Error> {
     if !(1..=64).contains(&pending.signal) {
         return Err(Error::Invalid);
     }
-    let guard = Guard::acquire(instance)?;
-    let queue = guard.queue(scope, slot).ok_or(Error::Invalid)?;
-    if !realtime {
-        let mut exists = false;
-        if !walk(queue, |_, item| {
-            exists = item
-                .entries
-                .iter()
-                .any(|entry| entry.occupied != 0 && entry.signal == pending.signal);
-            !exists
-        }) {
-            return Err(Error::Invalid);
-        }
-        if exists {
-            return Ok(false);
-        }
+    target.check()?;
+    let lock = tables(instance)?;
+    // Dropped after the lock is released, with any storage it took over.
+    let mut spare = Spare::default();
+    loop {
+        let need = match lock.lock().enqueue(target, pending, realtime, &mut spare) {
+            Ok(queued) => {
+                if queued {
+                    SIGNAL_RUNTIME.pending_counts[instance].fetch_add(1, Ordering::Release);
+                }
+                return Ok(queued);
+            }
+            Err(need) => need,
+        };
+        spare.reserve(need)?;
     }
-    let mut target = None;
-    if !walk(queue, |frame, item| {
-        target = item
-            .entries
-            .iter()
-            .position(|entry| entry.occupied == 0)
-            .map(|index| (frame, index));
-        target.is_none()
-    }) {
-        return Err(Error::Invalid);
-    }
-    if target.is_none() {
-        let frame = allocate_page(queue.head)?;
-        queue.head = frame;
-        queue.pages = queue.pages.checked_add(1).ok_or(Error::NoMemory)?;
-        target = Some((frame, 0));
-    }
-    let sequence = queue.next_sequence;
-    queue.next_sequence = queue.next_sequence.wrapping_add(1);
-    let (frame, index) = target.ok_or(Error::Invalid)?;
-    page_mut(frame).ok_or(Error::Invalid)?.entries[index] = Entry {
-        sequence,
-        value: pending.value,
-        code: pending.code,
-        sender_pid: pending.sender_pid,
-        sender_uid: pending.sender_uid,
-        signal: pending.signal,
-        occupied: 1,
-        reserved: [0; 2],
-    };
-    queue.pending = queue.pending.checked_add(1).ok_or(Error::NoMemory)?;
-    SIGNAL_RUNTIME.pending_counts[instance].fetch_add(1, Ordering::Release);
-    Ok(true)
 }
 
 /// The signals queued in `instance`, for RLIMIT_SIGPENDING.
@@ -345,155 +333,131 @@ pub(crate) fn any_pending(instance: usize) -> bool {
         .is_some_and(|count| count.load(Ordering::Acquire) != 0)
 }
 
-/// Whether the queue of `slot` holds a signal, blocked or not. Cheap when
-/// the instance has nothing queued anywhere; otherwise one lock and a look
-/// at the queue's count (a slot never used has no queue and holds none).
-pub(crate) fn queued(instance: usize, scope: Scope, slot: usize) -> bool {
+/// Whether the queue of `target` holds a signal, blocked or not. Cheap
+/// when the instance has nothing queued anywhere; otherwise one lock and a
+/// look at the queue's length (a slot never used has no queue and holds
+/// none).
+pub(crate) fn queued(instance: usize, target: Target) -> bool {
     if !any_pending(instance) {
         return false;
     }
-    let Ok(_guard) = Guard::acquire(instance) else {
+    let Ok(lock) = tables(instance) else {
         return false;
     };
-    let index = usize::from(scope == Scope::Thread);
-    // SAFETY: the guard holds the instance's lock, which serializes every
-    // access to its tables; this only reads one queue's count.
-    let queues = unsafe { &(*SIGNAL_RUNTIME.queues.get())[instance][index] };
-    queues.get(slot).is_some_and(|queue| queue.pending != 0)
+    let mut tables = lock.lock();
+    tables
+        .existing(target)
+        .ok()
+        .flatten()
+        .is_some_and(|queue| !queue.is_empty())
 }
 
-pub(crate) fn pending_mask(instance: usize, scope: Scope, slot: usize) -> Result<u64, Error> {
-    let guard = Guard::acquire(instance)?;
-    let Some(queue) = guard.existing(scope, slot)? else {
-        return Ok(0);
-    };
-    let mut mask = 0_u64;
-    walk(queue, |_, item| {
-        for entry in item.entries.iter().filter(|entry| entry.occupied != 0) {
-            mask |= 1_u64 << (entry.signal - 1);
-        }
-        true
-    })
-    .then_some(mask)
-    .ok_or(Error::Invalid)
+pub(crate) fn pending_mask(instance: usize, target: Target) -> Result<u64, Error> {
+    let mut tables = tables(instance)?.lock();
+    Ok(tables.existing(target)?.map_or(0, |queue| {
+        queue
+            .iter()
+            .fold(0, |mask, pending| mask | signal_bit(pending.signal))
+    }))
 }
 
 pub(crate) fn peek(
     instance: usize,
-    scope: Scope,
-    slot: usize,
+    target: Target,
     requested: u64,
 ) -> Result<Option<Pending>, Error> {
-    let guard = Guard::acquire(instance)?;
-    let Some(queue) = guard.existing(scope, slot)? else {
-        return Ok(None);
-    };
-    let mut selected: Option<Entry> = None;
-    if !walk(queue, |_, item| {
-        for entry in item.entries.iter().copied() {
-            if entry.occupied == 0 || requested & (1_u64 << (entry.signal - 1)) == 0 {
-                continue;
-            }
-            if selected.is_none_or(|current| {
-                (entry.signal, entry.sequence) < (current.signal, current.sequence)
-            }) {
-                selected = Some(entry);
-            }
-        }
-        true
-    }) {
-        return Err(Error::Invalid);
-    }
-    Ok(selected.map(|entry| Pending {
-        signal: entry.signal,
-        code: entry.code,
-        value: entry.value,
-        sender_pid: entry.sender_pid,
-        sender_uid: entry.sender_uid,
-    }))
+    let mut tables = tables(instance)?.lock();
+    Ok(tables
+        .existing(target)?
+        .and_then(|queue| select(queue, requested).map(|index| queue[index])))
 }
 
 pub(crate) fn dequeue(
     instance: usize,
-    scope: Scope,
-    slot: usize,
+    target: Target,
     requested: u64,
 ) -> Result<Option<Pending>, Error> {
-    let guard = Guard::acquire(instance)?;
-    let Some(queue) = guard.existing(scope, slot)? else {
-        return Ok(None);
+    let lock = tables(instance)?;
+    let (pending, released) = {
+        let mut tables = lock.lock();
+        let Some(queue) = tables.existing(target)? else {
+            return Ok(None);
+        };
+        let Some(index) = select(queue, requested) else {
+            return Ok(None);
+        };
+        // `remove` keeps the order the rest were queued in.
+        let pending = queue.remove(index);
+        SIGNAL_RUNTIME.pending_counts[instance].fetch_sub(1, Ordering::AcqRel);
+        // A drained queue gives its storage back, freed below.
+        let released = if queue.is_empty() {
+            core::mem::take(queue)
+        } else {
+            Vec::new()
+        };
+        (pending, released)
     };
-    let mut selected: Option<(memory::FrameLease, usize, Entry)> = None;
-    if !walk(queue, |frame, item| {
-        for (index, entry) in item.entries.iter().copied().enumerate() {
-            if entry.occupied == 0 || requested & (1_u64 << (entry.signal - 1)) == 0 {
-                continue;
-            }
-            if selected.is_none_or(|(_, _, current)| {
-                (entry.signal, entry.sequence) < (current.signal, current.sequence)
-            }) {
-                selected = Some((frame, index, entry));
-            }
-        }
-        true
-    }) {
-        return Err(Error::Invalid);
-    }
-    let Some((frame, index, entry)) = selected else {
-        return Ok(None);
-    };
-    page_mut(frame).ok_or(Error::Invalid)?.entries[index] = Entry::EMPTY;
-    queue.pending = queue.pending.checked_sub(1).ok_or(Error::Invalid)?;
-    SIGNAL_RUNTIME.pending_counts[instance].fetch_sub(1, Ordering::AcqRel);
-    if !release_empty_pages(queue) {
-        return Err(Error::Invalid);
-    }
-    Ok(Some(Pending {
-        signal: entry.signal,
-        code: entry.code,
-        value: entry.value,
-        sender_pid: entry.sender_pid,
-        sender_uid: entry.sender_uid,
-    }))
+    drop(released);
+    Ok(Some(pending))
 }
 
-pub(crate) fn clear(instance: usize, scope: Scope, slot: usize) -> Result<(), Error> {
-    let guard = Guard::acquire(instance)?;
-    let Some(queue) = guard.existing(scope, slot)? else {
-        return Ok(());
-    };
-    if queue.pages == 0 && queue.pending == 0 {
-        // Already empty: nothing to free, and the table keeps its length.
-        return Ok(());
-    }
-    let mut current = queue.head;
-    for _ in 0..queue.pages {
-        let next = page(current).ok_or(Error::Invalid)?.header.next;
-        if !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[current]) {
-            return Err(Error::Invalid);
+/// Drops every signal queued for `target`.
+pub(crate) fn clear(instance: usize, target: Target) -> Result<(), Error> {
+    let lock = tables(instance)?;
+    // Freed after the lock is released.
+    let _released = {
+        let mut tables = lock.lock();
+        let released = tables.existing(target)?.map(core::mem::take);
+        tables.trim(target);
+        let dropped = released.as_ref().map_or(0, Vec::len);
+        if dropped != 0 {
+            SIGNAL_RUNTIME.pending_counts[instance].fetch_sub(dropped as u64, Ordering::AcqRel);
         }
-        current = next;
-    }
-    if current != memory::FrameLease::EMPTY {
-        return Err(Error::Invalid);
-    }
-    let pending = queue.pending;
-    *queue = Queue::EMPTY;
-    if pending != 0 {
-        SIGNAL_RUNTIME.pending_counts[instance].fetch_sub(pending, Ordering::AcqRel);
-    }
-    guard.trim(scope);
+        released
+    };
     Ok(())
 }
 
+/// Drops every signal queued for process slot `process` and each of its
+/// thread slots, and the thread queues themselves: for a process slot that
+/// is freed or given to a new process.
+pub(crate) fn clear_process(instance: usize, process: usize) -> Result<(), Error> {
+    let target = Target::Process(process);
+    let lock = tables(instance)?;
+    // Freed after the lock is released.
+    let _released = {
+        let mut tables = lock.lock();
+        let queue = tables.existing(target)?.map(core::mem::take);
+        let row = tables.threads.get_mut(process).map(core::mem::take);
+        tables.trim(target);
+        tables.trim(Target::Thread { process, thread: 0 });
+        let dropped = queue.as_ref().map_or(0, Vec::len)
+            + row
+                .as_ref()
+                .map_or(0, |row| row.iter().map(Vec::len).sum::<usize>());
+        if dropped != 0 {
+            SIGNAL_RUNTIME.pending_counts[instance].fetch_sub(dropped as u64, Ordering::AcqRel);
+        }
+        (queue, row)
+    };
+    Ok(())
+}
+
+/// The boot self-test of the queues: coalescing, real-time order, queues
+/// of one process and thread slot kept apart from every other's, and the
+/// storage given back once they drain.
 pub(crate) fn verify_dynamic_fifo(instance: usize) -> bool {
-    let process = linux_process::PROCESS_LIMIT - 1;
-    let thread = process * THREAD_LIMIT + THREAD_LIMIT - 1;
-    if clear(instance, Scope::Process, process).is_err()
-        || clear(instance, Scope::Thread, thread).is_err()
-    {
+    let process = linux_process::PROCESS_LIMIT - 2;
+    let next = process + 1;
+    let thread = Target::Thread {
+        process,
+        thread: THREAD_LIMIT - 1,
+    };
+    let process_target = Target::Process(process);
+    if clear_process(instance, process).is_err() || clear_process(instance, next).is_err() {
         return false;
     }
+    let base = pending_count(instance);
     let standard = Pending {
         signal: 10,
         code: 0,
@@ -501,111 +465,102 @@ pub(crate) fn verify_dynamic_fifo(instance: usize) -> bool {
         sender_pid: 1,
         sender_uid: 0,
     };
-    let standard_coalesced = enqueue(instance, Scope::Process, process, standard, false)
-        == Ok(true)
+    let realtime = |code: i32, value: u64| Pending {
+        signal: 34,
+        code,
+        value,
+        sender_pid: 1,
+        sender_uid: 0,
+    };
+    let standard_coalesced = enqueue(instance, process_target, standard, false) == Ok(true)
         && enqueue(
             instance,
-            Scope::Process,
-            process,
+            process_target,
             Pending {
                 value: 2,
                 ..standard
             },
             false,
         ) == Ok(false)
-        && any_pending(instance)
-        && dequeue(instance, Scope::Process, process, u64::MAX) == Ok(Some(standard))
-        && !any_pending(instance);
-    let isolated = enqueue(
-        instance,
-        Scope::Process,
+        && pending_count(instance) == base + 1
+        && dequeue(instance, process_target, u64::MAX) == Ok(Some(standard))
+        && pending_count(instance) == base;
+    let isolated = enqueue(instance, process_target, realtime(-1, 3), true) == Ok(true)
+        && enqueue(instance, thread, realtime(-6, 4), true) == Ok(true)
+        && pending_count(instance) == base + 2
+        && pending_mask(instance, process_target) == Ok(1 << 33)
+        && pending_mask(instance, thread) == Ok(1 << 33)
+        && dequeue(instance, thread, u64::MAX) == Ok(Some(realtime(-6, 4)))
+        && dequeue(instance, process_target, u64::MAX) == Ok(Some(realtime(-1, 3)))
+        && pending_count(instance) == base;
+    // Thread slot 20 of one process and thread slot 4 of the next: a
+    // flattened index of 16 thread slots per process made them one queue.
+    let high = Target::Thread {
         process,
-        Pending {
-            signal: 34,
-            code: -1,
-            value: 3,
-            sender_pid: 1,
-            sender_uid: 0,
-        },
-        true,
-    ) == Ok(true)
+        thread: 20,
+    };
+    let other = Target::Thread {
+        process: next,
+        thread: 4,
+    };
+    let threads_apart = enqueue(instance, high, realtime(-6, 20), true) == Ok(true)
+        && pending_mask(instance, other) == Ok(0)
+        && !queued(instance, other)
+        && queued(instance, high)
+        && dequeue(instance, other, u64::MAX) == Ok(None)
+        && enqueue(instance, other, realtime(-6, 4), true) == Ok(true)
+        && dequeue(instance, high, u64::MAX) == Ok(Some(realtime(-6, 20)))
+        && dequeue(instance, other, u64::MAX) == Ok(Some(realtime(-6, 4)))
         && enqueue(
             instance,
-            Scope::Thread,
-            thread,
-            Pending {
-                signal: 34,
-                code: -6,
-                value: 4,
-                sender_pid: 1,
-                sender_uid: 0,
+            Target::Thread {
+                process,
+                thread: THREAD_LIMIT,
             },
-            true,
-        ) == Ok(true)
-        && any_pending(instance)
-        && pending_mask(instance, Scope::Process, process) == Ok(1 << 33)
-        && pending_mask(instance, Scope::Thread, thread) == Ok(1 << 33)
-        && dequeue(instance, Scope::Thread, thread, u64::MAX)
-            == Ok(Some(Pending {
-                signal: 34,
-                code: -6,
-                value: 4,
-                sender_pid: 1,
-                sender_uid: 0,
-            }))
-        && dequeue(instance, Scope::Process, process, u64::MAX)
-            == Ok(Some(Pending {
-                signal: 34,
-                code: -1,
-                value: 3,
-                sender_pid: 1,
-                sender_uid: 0,
-            }))
-        && !any_pending(instance);
-    let mut filled = standard_coalesced && isolated;
-    for value in 0..=ENTRIES_PER_PAGE as u64 {
-        filled &= enqueue(
-            instance,
-            Scope::Process,
-            process,
-            Pending {
-                signal: 34,
-                code: -1,
-                value,
-                sender_pid: 1,
-                sender_uid: 0,
-            },
-            true,
-        ) == Ok(true);
+            standard,
+            false,
+        ) == Err(Error::Invalid);
+    // A process slot's clear drops its thread queues, the last too.
+    let process_cleared = enqueue(instance, thread, standard, false) == Ok(true)
+        && enqueue(instance, high, standard, false) == Ok(true)
+        && enqueue(instance, other, standard, false) == Ok(true)
+        && clear_process(instance, process).is_ok()
+        && pending_count(instance) == base + 1
+        && pending_mask(instance, thread) == Ok(0)
+        && pending_mask(instance, high) == Ok(0)
+        && pending_mask(instance, other) == Ok(1 << 9)
+        && clear(instance, other).is_ok()
+        && pending_count(instance) == base;
+    // Many real-time signals of one number come out in the order sent,
+    // after a lower-numbered one sent last.
+    const MANY: u64 = 300;
+    let mut filled = true;
+    for value in 0..MANY {
+        filled &= enqueue(instance, process_target, realtime(-1, value), true) == Ok(true);
     }
-    let two_pages = Guard::acquire(instance)
-        .ok()
-        .and_then(|guard| {
-            guard
-                .queue(Scope::Process, process)
-                .map(|queue| queue.pages == 2)
-        })
-        .unwrap_or(false);
-    let mut ordered = true;
-    for value in 0..=ENTRIES_PER_PAGE as u64 {
-        ordered &= dequeue(instance, Scope::Process, process, 1 << 33)
-            == Ok(Some(Pending {
-                signal: 34,
-                code: -1,
-                value,
-                sender_pid: 1,
-                sender_uid: 0,
-            }));
+    let lower = Pending {
+        signal: 33,
+        ..realtime(-1, MANY)
+    };
+    filled &= enqueue(instance, process_target, lower, true) == Ok(true);
+    let mut ordered = peek(instance, process_target, u64::MAX) == Ok(Some(lower))
+        && dequeue(instance, process_target, 1 << 32) == Ok(Some(lower));
+    for value in 0..MANY {
+        ordered &= dequeue(instance, process_target, 1 << 33) == Ok(Some(realtime(-1, value)));
     }
-    let released = Guard::acquire(instance)
-        .ok()
-        .and_then(|guard| {
-            guard
-                .queue(Scope::Process, process)
-                .map(|queue| queue.pages == 0 && queue.pending == 0 && !any_pending(instance))
-        })
-        .unwrap_or(false);
-    let clean = clear(instance, Scope::Process, process).is_ok()
-        && clear(instance, Scope::Thread, thread).is_ok();
-    filled && two_pages && ordered && released && clean
+    let released = pending_count(instance) == base
+        && tables(instance).is_ok_and(|lock| {
+            lock.lock()
+                .existing(process_target)
+                .is_ok_and(|queue| queue.is_none_or(|queue| queue.capacity() == 0))
+        });
+    let clean = clear_process(instance, process).is_ok() && clear_process(instance, next).is_ok();
+    standard_coalesced
+        && isolated
+        && threads_apart
+        && process_cleared
+        && filled
+        && ordered
+        && released
+        && clean
 }

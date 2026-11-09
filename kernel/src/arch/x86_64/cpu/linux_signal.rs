@@ -302,18 +302,16 @@ pub(super) fn linux_rt_sigqueueinfo(
         Some(slot) => slot,
         None => return LINUX_ESRCH,
     };
-    let (scope, slot, target_is_current, target_mask) = if let Some(target) = target_thread {
+    let (queue, target_is_current, target_mask) = if let Some(target) = target_thread {
         let thread_slot = usize::from(target.slot);
         (
-            crate::linux_signal::Scope::Thread,
-            linux_thread_signal_queue_slot(process_slot, thread_slot),
+            linux_thread_signal_queue(process_slot, thread_slot),
             current_linux_thread_handle() == Some(target),
             X86_RUNTIME.LINUX_THREAD_SIGNAL_MASKS[thread_slot].load(Ordering::SeqCst),
         )
     } else {
         (
-            crate::linux_signal::Scope::Process,
-            process_slot,
+            crate::linux_signal::Target::Process(process_slot),
             true,
             X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.load(Ordering::SeqCst),
         )
@@ -329,8 +327,7 @@ pub(super) fn linux_rt_sigqueueinfo(
     }
     match linux_enqueue_signal(
         instance,
-        scope,
-        slot,
+        queue,
         crate::linux_signal::Pending {
             signal: signal as u8,
             code,
@@ -357,20 +354,18 @@ pub(super) fn linux_signal_sender() -> (u32, u32) {
     )
 }
 
-pub(super) fn linux_thread_signal_queue_slot(process: usize, thread: usize) -> usize {
-    process * crate::linux_signal::THREAD_LIMIT + thread
+// Every thread slot of a process has a queue of its own.
+const _: () = assert!(crate::linux_signal::THREAD_LIMIT == LINUX_THREAD_LIMIT);
+
+pub(super) fn linux_thread_signal_queue(
+    process: usize,
+    thread: usize,
+) -> crate::linux_signal::Target {
+    crate::linux_signal::Target::Thread { process, thread }
 }
 
 pub(super) fn clear_linux_signal_queues_for_process(instance: usize, process: usize) -> bool {
-    crate::linux_signal::clear(instance, crate::linux_signal::Scope::Process, process).is_ok()
-        && (0..crate::linux_signal::THREAD_LIMIT).all(|thread| {
-            crate::linux_signal::clear(
-                instance,
-                crate::linux_signal::Scope::Thread,
-                linux_thread_signal_queue_slot(process, thread),
-            )
-            .is_ok()
-        })
+    crate::linux_signal::clear_process(instance, process).is_ok()
 }
 
 pub(super) fn clear_current_linux_process_signal_queues() -> bool {
@@ -384,14 +379,10 @@ pub(super) fn linux_dynamic_pending_masks() -> Option<(u64, u64)> {
     let process = linux_process::live_process_slot(current_linux_process_pid())?;
     let thread = current_linux_thread_slot()?;
     Some((
-        crate::linux_signal::pending_mask(instance, crate::linux_signal::Scope::Process, process)
+        crate::linux_signal::pending_mask(instance, crate::linux_signal::Target::Process(process))
             .ok()?,
-        crate::linux_signal::pending_mask(
-            instance,
-            crate::linux_signal::Scope::Thread,
-            linux_thread_signal_queue_slot(process, thread),
-        )
-        .ok()?,
+        crate::linux_signal::pending_mask(instance, linux_thread_signal_queue(process, thread))
+            .ok()?,
     ))
 }
 
@@ -413,11 +404,8 @@ pub(super) fn linux_current_signals_queued() -> bool {
     let Some(thread) = current_linux_thread_slot() else {
         return true;
     };
-    crate::linux_signal::queued(
-        instance,
-        crate::linux_signal::Scope::Thread,
-        linux_thread_signal_queue_slot(process, thread),
-    ) || crate::linux_signal::queued(instance, crate::linux_signal::Scope::Process, process)
+    crate::linux_signal::queued(instance, linux_thread_signal_queue(process, thread))
+        || crate::linux_signal::queued(instance, crate::linux_signal::Target::Process(process))
 }
 
 pub(super) fn linux_peek_dynamic_signal(
@@ -428,8 +416,7 @@ pub(super) fn linux_peek_dynamic_signal(
     let thread = current_linux_thread_slot()?;
     if let Some(pending) = crate::linux_signal::peek(
         instance,
-        crate::linux_signal::Scope::Thread,
-        linux_thread_signal_queue_slot(process, thread),
+        linux_thread_signal_queue(process, thread),
         requested,
     )
     .ok()?
@@ -438,8 +425,7 @@ pub(super) fn linux_peek_dynamic_signal(
     }
     crate::linux_signal::peek(
         instance,
-        crate::linux_signal::Scope::Process,
-        process,
+        crate::linux_signal::Target::Process(process),
         requested,
     )
     .ok()?
@@ -451,16 +437,14 @@ pub(super) fn linux_dequeue_dynamic_signal(
     requested: u64,
 ) -> Option<crate::linux_signal::Pending> {
     let instance = linux_signal_instance();
-    let slot = match scope {
-        crate::linux_signal::Scope::Process => {
-            linux_process::live_process_slot(current_linux_process_pid())?
+    let process = linux_process::live_process_slot(current_linux_process_pid())?;
+    let queue = match scope {
+        crate::linux_signal::Scope::Process => crate::linux_signal::Target::Process(process),
+        crate::linux_signal::Scope::Thread => {
+            linux_thread_signal_queue(process, current_linux_thread_slot()?)
         }
-        crate::linux_signal::Scope::Thread => linux_thread_signal_queue_slot(
-            linux_process::live_process_slot(current_linux_process_pid())?,
-            current_linux_thread_slot()?,
-        ),
     };
-    crate::linux_signal::dequeue(instance, scope, slot, requested)
+    crate::linux_signal::dequeue(instance, queue, requested)
         .ok()
         .flatten()
 }
@@ -1713,8 +1697,7 @@ pub(super) fn linux_queue_process_signal_from(
         if let Some(process) = linux_process::live_process_slot(target) {
             while let Ok(Some(_)) = crate::linux_signal::dequeue(
                 linux_signal_instance(),
-                crate::linux_signal::Scope::Process,
-                process,
+                crate::linux_signal::Target::Process(process),
                 STOP_SIGNALS,
             ) {}
         }
@@ -1742,8 +1725,7 @@ pub(super) fn linux_queue_process_signal_from(
     };
     match linux_enqueue_signal(
         linux_signal_instance(),
-        crate::linux_signal::Scope::Process,
-        process,
+        crate::linux_signal::Target::Process(process),
         crate::linux_signal::Pending {
             signal: signal as u8,
             code: signal_code,
@@ -2185,8 +2167,7 @@ pub(super) fn linux_kill_current(
             let (sender_pid, sender_uid) = linux_signal_sender();
             return match linux_enqueue_signal(
                 linux_signal_instance(),
-                crate::linux_signal::Scope::Process,
-                process,
+                crate::linux_signal::Target::Process(process),
                 crate::linux_signal::Pending {
                     signal: signal as u8,
                     code: signal_code,
@@ -2785,8 +2766,7 @@ pub(super) fn linux_queue_saved_thread_signal(
     let (sender_pid, sender_uid) = linux_signal_sender();
     match linux_enqueue_signal(
         linux_signal_instance(),
-        crate::linux_signal::Scope::Thread,
-        linux_thread_signal_queue_slot(process_slot, thread_slot),
+        linux_thread_signal_queue(process_slot, thread_slot),
         crate::linux_signal::Pending {
             signal: signal as u8,
             code,
@@ -2952,8 +2932,7 @@ pub(super) fn linux_send_thread_signal(
     let (sender_pid, sender_uid) = linux_signal_sender();
     match linux_enqueue_signal(
         linux_signal_instance(),
-        crate::linux_signal::Scope::Thread,
-        linux_thread_signal_queue_slot(process, slot),
+        linux_thread_signal_queue(process, slot),
         crate::linux_signal::Pending {
             signal: signal as u8,
             code,
@@ -3341,8 +3320,7 @@ pub(super) fn abort_linux_signal() {
 /// as Linux refuses to allocate its queue entry (tgkill02).
 fn linux_enqueue_signal(
     instance: usize,
-    scope: crate::linux_signal::Scope,
-    slot: usize,
+    queue: crate::linux_signal::Target,
     pending: crate::linux_signal::Pending,
     realtime: bool,
 ) -> Result<bool, crate::linux_signal::Error> {
@@ -3358,19 +3336,18 @@ fn linux_enqueue_signal(
             return Err(crate::linux_signal::Error::NoMemory);
         }
     }
-    let queued = crate::linux_signal::enqueue(instance, scope, slot, pending, realtime);
+    let queued = crate::linux_signal::enqueue(instance, queue, pending, realtime);
     // A signal ends any wait its process is blocked in, or is looked at
     // there (a blocked one only by a wait for it, sigtimedwait), and the
     // call waits on: the process makes the run queue again either way.
     if queued.is_ok() && instance == linux_signal_instance() {
-        match scope {
-            crate::linux_signal::Scope::Process => {
-                linux_process::wake_live_process_at_slot(slot, None);
+        match queue {
+            crate::linux_signal::Target::Process(process) => {
+                linux_process::wake_live_process_at_slot(process, None);
             }
-            crate::linux_signal::Scope::Thread => linux_process::wake_live_process_at_slot(
-                slot / crate::linux_signal::THREAD_LIMIT,
-                Some((slot % crate::linux_signal::THREAD_LIMIT) as u8),
-            ),
+            crate::linux_signal::Target::Thread { process, thread } => {
+                linux_process::wake_live_process_at_slot(process, Some(thread as u8));
+            }
         }
     }
     queued

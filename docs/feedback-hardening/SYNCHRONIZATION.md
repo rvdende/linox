@@ -140,6 +140,8 @@ nothing that takes a lock. Two such leaves are never held together.
   work, which allocates and takes the frame allocator; a nested operation
   finds the slot empty and starts a list of its own, and a list displaced
   on the way back is freed after the lock is released.
+- `SIGNAL_QUEUES` (199, `linux_signal`): each domain's signal queues;
+  see "Signal queues" below.
 
 ## Other new ranks
 
@@ -224,6 +226,68 @@ released).
 takes them out and puts them back, each a swap of vectors that allocates
 and frees nothing under the lock, so no lock is held across the fork's
 copies; a fork that finds them taken works with empty ones.
+
+## Signal queues
+
+`SIGNAL_QUEUES` (199, `linux_signal`): one `IrqSpinLock` per domain
+instance over that instance's queued signals, heap tables grown as
+process and thread slots are first used (thread queues are keyed by
+process slot and thread slot). The lock is held only inside
+`linux_signal.rs` and nothing else is taken under it, so its rank is set
+by what its callers hold. Audit of the callers:
+
+- Senders (`linux_enqueue_signal`): kill, tkill, tgkill,
+  rt_(tg)sigqueueinfo, a blocked real-time raise, SIGCONT's removal of
+  stop signals, SIGCHLD, SIGPIPE and SIGXFSZ on the write return paths,
+  SIGTRAP and fault signals, SIGIO and lease breaks (fcntl), dnotify, pty
+  hangups and job control, mq_notify, cgroup.kill, PID namespace
+  teardown and the POSIX and interval timers (expired from system calls,
+  `refresh_linux_posix_timers`). Almost all run at system-call level
+  under only the kernel-entry lock (100); subsystems that owe a signal
+  collect it under their own lock and send it after releasing it
+  (`linux_send_dnotify_notices`, `linux_pty_send_hangups`, the holders
+  `linux_lease::break_for` returns, `linux_mq_finish_registration`).
+  The exception is a memory cgroup's OOM kill: `allocate_user_frames`
+  charges the cgroup (`charge_linux_user_pages`), which may pick a victim
+  and queue SIGKILL (`linux_memcg_oom_kill`). That allocation happens in
+  page faults, including copy-on-write and lazily reserved pages faulted
+  during a copy to user memory, under whatever lock the system call holds:
+  SYSV_IPC, SOCKETS, the futex coordination lock, MEMORY_AREAS, VOLUMES,
+  the tmpfs limits or the swap areas (189), as `FILE_CACHE` above found.
+- Readers and takers (`pending_mask`, `peek`, `queued`, `dequeue`): signal
+  delivery, sigtimedwait, signalfd and sigpending at system-call level,
+  the scheduler loop (`linux_thread_turn`, `linux_process_killed`) under
+  the kernel-entry lock only, and the timer tick's
+  `linux_signal_due_from_timer`, which runs only on a tick that
+  interrupted user mode, after it takes the kernel-entry lock.
+- Clears: fork, exec, exit and slot release (`clear_process`) and a
+  thread's exit (`clear`), at system-call or scheduler-loop level.
+
+Because senders may hold locks up to 189, a lock below the heap (which
+would let the tables grow while held) cannot rank above them all, so the
+queues use the leaf pattern: nothing is allocated or freed while the lock
+is held. An operation that finds a table or queue too small returns what
+it needs; the caller reserves it with the lock released (`Spare`) and
+tries again, and under the lock the full table's entries move into the
+reserved storage, which is swapped in (no allocation). Storage a table
+lets go of (a drained or cleared queue, a process's thread queues, a
+replaced table) leaves the critical section with the result and is freed
+after the lock is released; trimming a table only drops trailing entries
+that hold no storage, so the two slot tables keep their capacity (at most
+4096 entries of 24 bytes each per domain), while a process's thread
+queues go with its slot (`clear_process`). Out of memory while reserving is still
+`Error::NoMemory`. The rank is 199 (shared with ADDRESS_SPACE_SCRATCH, a leaf that is
+never held with it), above the heap, every lock below it
+and the other leaves (none of which sends a signal or is held across
+one), below the frame allocator, which it never reaches. It is
+interrupt-safe so no tick can arrive on the CPU that holds it.
+`pending_count` and `any_pending` read per-instance atomic counts,
+changed only with the lock held, and take no lock. With every acquire
+recording the rank its CPU already held, the verification boot (`make
+test`), `make test-quick` and a full LTP run (the whole syscall list in
+one boot) saw only 0 (boot, no lock) and 100 (the kernel-entry lock); no
+memory cgroup ran out of memory in them, so the OOM path is what sets
+the rank, not the measurement.
 
 ## Local interrupt audit
 

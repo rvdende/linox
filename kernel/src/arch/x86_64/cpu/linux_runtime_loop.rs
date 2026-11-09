@@ -1609,8 +1609,7 @@ pub(super) fn linux_process_killed(pid: u32) -> bool {
         .and_then(|slot| {
             crate::linux_signal::pending_mask(
                 linux_signal_instance(),
-                crate::linux_signal::Scope::Process,
-                slot,
+                crate::linux_signal::Target::Process(slot),
             )
             .ok()
         })
