@@ -31,6 +31,14 @@ bypass=$(awk '
     fail 'runtime backing accessed outside its declaration or owner initializer'
 }
 
+# The backings are private to cpu.rs, so its submodules (cpu/*.rs) could name
+# them through `use super::*`: they must go through X86_RUNTIME as well.
+submodule_bypass=$(rg -n 'X86_RUNTIME_BACKING_' "$root/kernel/src/arch/x86_64/cpu" || true)
+[[ -z "$submodule_bypass" ]] || {
+    printf '%s\n' "$submodule_bypass" >&2
+    fail 'runtime backing accessed from a cpu/ submodule'
+}
+
 if [[ $# == 0 ]]; then
     negative=$(mktemp "${TMPDIR:-/tmp}/linox-x86-owner-negative.XXXXXX")
     trap 'rm -f "$negative"' EXIT

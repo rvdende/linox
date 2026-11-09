@@ -4,6 +4,9 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 cpu="$root/kernel/src/arch/x86_64/cpu.rs"
+# cpu.rs and its submodules (kernel/src/arch/x86_64/cpu/*.rs, which hold code
+# split out of cpu.rs): the SMAP and scalar-pointer rules cover all of them.
+cpu_tree=("$cpu" "$root/kernel/src/arch/x86_64/cpu")
 address_space="$root/kernel/src/address_space.rs"
 
 fail() {
@@ -33,12 +36,12 @@ done
 # The SMAP-opening closure remains available only for page-table construction
 # and address-space verification. Syscall implementation code must use the
 # fault-recovering raw or public copy APIs instead of opening SMAP directly.
-cpu_smap_sites=$(rg -F 'with_supervisor_user_access' "$cpu" | wc -l | tr -d ' ')
+cpu_smap_sites=$(rg -F 'with_supervisor_user_access' "${cpu_tree[@]}" | wc -l | tr -d ' ')
 [[ "$cpu_smap_sites" == 1 ]] || \
-    fail "expected only the helper definition in cpu.rs, found $cpu_smap_sites sites"
+    fail "expected only the helper definition in cpu.rs and cpu/, found $cpu_smap_sites sites"
 
-if rg -Uq '\bas \*(const|mut) u(8|16|32|64)\)[[:space:]]*\.(read|write)(_volatile)?\(' "$cpu"; then
-    fail 'cpu.rs directly dereferences a cast userspace scalar pointer'
+if rg -Uq '\bas \*(const|mut) u(8|16|32|64)\)[[:space:]]*\.(read|write)(_volatile)?\(' "${cpu_tree[@]}"; then
+    fail 'cpu.rs or cpu/ directly dereferences a cast userspace scalar pointer'
 fi
 
 printf '%s\n' 'User-access architecture check passed'
