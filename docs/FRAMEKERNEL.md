@@ -947,7 +947,9 @@ alone (it allowed `arch`, `image_store`, `scheduler` and `trusted`).
   gone, and with them cpu.rs's `unsafe impl Sync`.
   docs/feedback-hardening/SYNCHRONIZATION.md, "Process records".
 - **Scheduler.** The native runtime is an `IrqSpinLock` at the new rank
-  `NATIVE_SCHEDULER` (108), reached through `with_runtime`. A Linux
+  `NATIVE_SCHEDULER` (108), reached through `with_runtime`; the queries
+  of its current thread read a sequence-locked copy each hold publishes
+  (`NATIVE_CURRENT`), because they are asked under any lock. A Linux
   domain instance's run queue is part of its process table
   (`ProcessTable::run_queue`, under PROCESS_TABLE, where every use of it
   already ran); the per-instance `OwnedState` workspaces are gone, and so
