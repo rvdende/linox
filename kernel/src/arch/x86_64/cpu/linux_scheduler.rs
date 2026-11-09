@@ -1603,6 +1603,11 @@ fn linux_process_continues_in_place(pid: u32) -> bool {
                 || !X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst))
         || linux_process::live_process_status(pid)
             .is_none_or(|status| status.state != linux_process::LiveProcessState::Running)
+        // sched_setaffinity excluded this CPU: the process moves to one it
+        // allows at once, as Linux migrates it, rather than going on here
+        // (getcpu01).
+        || linux_process::live_process_cpu_affinity(pid)
+            .is_some_and(|mask| mask & (1_u64 << linux_cpu_slot()) == 0)
     {
         return false;
     }
@@ -2108,6 +2113,8 @@ pub(super) fn linux_complete_timer_preemption(
             // call whose wait is over.
             linux_process::other_live_process_ready(pid, now)
                 || linux_process::due_live_thread(pid, now).is_some()
+                || linux_process::live_process_cpu_affinity(pid)
+                    .is_some_and(|mask| mask & (1_u64 << linux_cpu_slot()) == 0)
         }
         && linux_process::set_live_process_thread_context(
             pid,

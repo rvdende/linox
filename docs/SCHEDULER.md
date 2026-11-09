@@ -311,6 +311,10 @@ parks this way, whether or not a sibling is ready:
   its activation finishes and its stack goes back to the pool; its block
   and futex records go with it. `activation::discard` drops one that
   cannot be resumed (a spin lock held) without running it.
+- **Affinity.** A process whose sched_setaffinity mask excludes the CPU
+  it runs on never goes on in place there, after its own call or a
+  preemption: it is released for a CPU the mask allows, as Linux migrates
+  it at once (getcpu01).
 - **Threads that waited the old way.** The `LINUX_THREAD_WAIT_*` thread
   waits, which save a thread's user context and hand the CPU to a ready
   sibling in user mode, remain for the application processors, whose
