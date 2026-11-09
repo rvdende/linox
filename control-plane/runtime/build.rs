@@ -49,7 +49,7 @@ fn main() {
         count += 1;
     }
     assert_eq!(
-        count, 375,
+        count, 376,
         "Linux syscall catalog size changed; review the runtime test contract"
     );
     generated.insert_str(

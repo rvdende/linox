@@ -73,10 +73,10 @@ qemu_pid=""
 for expected in \
     'Linux userspace runtime conformance summary:' \
     'Interfaces: 17 pass, 5 fail, 1 policy-exempt, 23 total' \
-    'Syscalls: 53 pass, 274 fail, 48 policy-exempt, 375 total' \
+    'Syscalls: 91 pass, 252 fail, 33 policy-exempt, 376 total' \
     'Linux userspace conformance results:' \
     'NAME/IDENTIFIER' \
-    'Summary: 70 pass, 279 fail, 49 policy-exempt, 398 total' \
+    'Summary: 108 pass, 257 fail, 34 policy-exempt, 399 total' \
     'PASS = verified; FAIL = incomplete or unsupported; POLICY-EXEMPT = deliberately denied.' \
     '1      0      R      controller' \
     'Shutting down Linox.'; do
@@ -94,7 +94,8 @@ for expected_regex in \
     '^read +syscall +0 +FAIL' \
     '^sched_yield +syscall +24 +PASS' \
     '^accept +syscall +43 +FAIL' \
-    '^setuid +syscall +105 +POLICY-EXEMPT' \
+    '^ptrace +syscall +101 +POLICY-EXEMPT' \
+    '^setuid +syscall +105 +PASS' \
     '^mseal +syscall +462 +FAIL' \
     '^9999 +syscall +- +FAIL'; do
     if ! grep -Eq "$expected_regex" "$output_file"; then
@@ -122,7 +123,7 @@ read -r report_rows interface_rows syscall_rows pass_rows fail_rows exempt_rows 
     ' "$output_file"
 )
 if [[ "$report_rows $interface_rows $syscall_rows $pass_rows $fail_rows $exempt_rows" != \
-    '398 23 375 70 279 49' ]]; then
+    '399 23 376 108 257 34' ]]; then
     cat "$output_file"
     echo "Linux ABI report test failed: incomplete or inconsistent result table." >&2
     exit 1
@@ -136,4 +137,4 @@ for rejected in LINOX_KERNEL_PANIC 'controller failed; restarting control plane'
     fi
 done
 
-echo "Linux ABI controller report passed (23 interfaces, 375 syscalls)."
+echo "Linux ABI controller report passed (23 interfaces, 376 syscalls)."
