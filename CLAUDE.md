@@ -44,13 +44,17 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    structs and `docs/feedback-hardening/writable-globals.tsv`; new
    `unsafe` blocks also update `tools/architecture/check-kernel-unsafe.sh`.
 2. **Per-thread kernel stacks and a preemptive per-CPU scheduler**
-   (design and migration steps: `docs/SCHEDULER.md`). Today a
-   process runs nested inside the syscall of the process that started it, on
-   one kernel stack: that bounds process-tree depth (the stack is 2 MiB as a
-   stopgap), and a parent can be resumed nested inside its child's syscall
-   (the desktop's shutdown failure). Each Linux thread gets its own kernel
-   stack with guard pages, and switching saves one stack pointer and loads
-   another, on any CPU, as Linux does.
+   (design and migration steps: `docs/SCHEDULER.md`). Done (steps 1-4,
+   2026-11-09): every process's calls run on a guarded activation stack of
+   its own and park there to wait; the boot CPU's scheduler loop
+   (`run_linux_runtime_loop`) owns the run queue and runs every process,
+   init included, round-robin, so none runs nested inside another's system
+   call; forks run the parent first (a vfork parent waits for its child's
+   exec or exit), and every process can be preempted by the timer. Next:
+   step 5, real wakeups (wait queues that hand the woken task its result
+   instead of resuming every parked call to look again) and an activation
+   per thread; then step 6, per-CPU loops with IPI wakeups and load
+   balancing, and splitting `kernel_entry_lock`.
 3. **A real task and memory model:** per-process memory-area tracking (VMAs),
    a shared page cache, and dynamically sized tables in place of the fixed
    arrays (32 threads per process, kept in per-thread arrays that the

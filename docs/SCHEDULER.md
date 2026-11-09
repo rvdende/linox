@@ -1,7 +1,10 @@
 # Kernel stacks and scheduling: design
 
-Status: design, step 1 of the core rebuild in CLAUDE.md. It replaces the
-nested execution model with Linux's: every thread has its own kernel stack,
+Status: steps 1-4 below are done (2026-11-09: the scheduler loop owns the
+run queue and nothing runs nested); step 5 (real wakeups, activations per
+thread) and step 6 (per-CPU loops, splitting the kernel-entry lock) are
+next. Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
+execution model with Linux's: every thread has its own kernel stack,
 blocking switches stacks, and a scheduler decides who runs next on each CPU.
 
 ## The model being replaced
@@ -78,10 +81,9 @@ idle task, which halts when nothing is runnable.
 Each step keeps `make check`, the Alpine, Rust-workload, all-Rust userland and
 desktop suites passing.
 
-Since the upstream merge only init (pid 1) runs other processes from inside
-its blocking calls; every other process waits by returning to the kernel
-with its call set to restart. So the nesting is shallow, and init's system
-calls act as the scheduler.
+Since 2026-11-09 no process runs inside another's system call: the boot
+CPU's scheduler loop runs every process, init included (see "The scheduler
+loop" below).
 
 1. Done: a kernel heap (`kernel/src/heap.rs`): slab size classes over the
    frame allocator plus frame runs for large objects.
@@ -100,19 +102,18 @@ exact interrupted registers; it is resumed where the tick interrupted it.
 It applies whenever someone can take the yield (init's nested scheduling, or
 a fork transaction's exec'd child); the scheduler loop makes that everyone.
 
-3. Parent-first fork, Linux's default order (`LINUX_PARENT_FIRST_FORK` in
-   cpu/linux_process_lifecycle.rs, implemented but off): plain forks resume the parent with the
-   child's pid and leave the child ready in the run queue; vfork, CLONE_VM,
-   child-stack, new-mount-namespace and domain-exec forks stay child-first.
-   Turning it on needed edge-triggered epoll (tokio waits on a pidfd) and a
-   sched_yield that lets other processes run (the rustup proxy spins on it),
-   both now in; `cargo build | grep` inside a domain still hangs with it on.
-4. A kernel scheduler loop replaces init's role: the runtime's entry frame
-   picks the next runnable process from the run queue and enters it; every
-   process, init included, waits by returning to the kernel; exit and fork
-   are handled by the loop. Processes can then be preempted by the timer
-   (save the user context, return to the loop), which LTP's spinning tests
-   need.
+3. Done (2026-11-09): parent-first fork, Linux's default order, for every
+   fork of a runtime: the parent goes on with the child's pid and the child
+   waits ready in the run queue; a vfork (CLONE_VFORK) parent waits in its
+   call until the child executes or exits, as Linux's does. Only the boot
+   verification probe, which has no scheduler loop, still runs a child
+   first inside the fork transaction.
+4. Done (2026-11-09): a kernel scheduler loop replaces init's role: the
+   runtime's entry frame picks the next ready process from the run queue,
+   round-robin, and enters it; every process, init included, waits by
+   parking in its call or returning to the kernel; forks, exits, domain
+   exec and suspension are handled by the loop, and every process can be
+   preempted by the timer.
 5. Real blocking: an activation that must wait parks (switches to the loop)
    instead of returning to the kernel with a restart, and the loop resumes
    parked activations by switching to them; threads get activations of their
@@ -123,7 +124,119 @@ a fork transaction's exec'd child); the scheduler loop makes that everyone.
    code in parallel (lock ranks from
    `docs/feedback-hardening/SYNCHRONIZATION.md`).
 
-## Step 4 in detail: the scheduler loop
+## The scheduler loop (done 2026-11-09)
+
+`run_linux_runtime_loop` (cpu/linux_runtime_loop.rs) is the boot CPU's scheduler. At runtime
+start init is admitted to the run queue, ready (`start_runtime_scheduler`),
+and its kernel state is saved like any process's; the loop owns the queue
+from then on and releases it when init has ended (`retire_lone_live_process`
+in `finish_linux_runtime`). Each round it picks one ready process: a
+process being resumed after a suspension or a domain exec's command first,
+then one with SIGKILL pending, then the next in pid order after the last
+one picked (`next_ready_live_process`, which passes over processes marked
+asleep). `run_linux_process_here` runs it, as the application processors'
+loops do (`run_linux_process_on_this_cpu`): claim it in the queue, restore
+its kernel state, enter it (or resume its parked call), and when it comes
+back settle it: a fork it asked for is made and the parent entered again at
+once, an exit is settled (`settle_linux_process_exit`: SIGCHLD, zombie,
+cgroup, descriptors, mount namespace, a domain exec's console), anything
+else puts it back ready, and the CPU leaves its bank. Init's end (exit, a
+fatal signal or fault) leaves init's state current and ends the loop; a
+suspension ends it too. With nothing ready, or once every process has had a
+round without a system call, the CPU halts until an interrupt.
+
+What went with it: init's branch of `run_other_linux_processes` (init now
+parks and yields like everyone), `run_one_other_linux_process` and its
+descendant walk, `run_scheduled_linux_process`, the scheduler nesting
+counter, the child-first fork in the runtime with its domain-exec loop
+(`LinuxDomainExecGuard`, the run-queue reset), epoll's and the Unix-socket
+send's init- or nesting-only paths, and the last-blocked-process hint.
+
+How the old init-only assumptions were resolved:
+
+- **Init never yielding.** `yield_current_linux_process` refused pid 1 and
+  the brush-as-init and busybox-as-init failures of the first attempt came
+  from init's own wait paths (its console read seeing no data as EOF, and
+  `take_linux_child_yield(1)` as its only wait signal). Init now takes the
+  same path as every process: its blocking calls park, the loop resumes it
+  to look again. The console read waits in `run_other_linux_processes`
+  like any blocking read.
+- **Init's end.** Init's exit and the kill rounds before it run as before
+  (`linux_init_exit_kill_others_live_return`: it parks between rounds and
+  the loop runs the killed processes first). Its exit retires its threads,
+  so its state cannot be saved: the loop recognises the end from the live
+  state right after the run (`LinuxRunOutcome::InitEnded`) and leaves that
+  state current for the teardown.
+- **Parent-first fork.** The `cargo build | grep` hang of 2026-10-31 was
+  gone once processes parked (it passed with parent-first under init's
+  scheduling, 2026-11-09); the regressions in LTP's wait/kill/clone tests
+  came from children waiting until init's descendant walk picked them,
+  which round-robin over the queue removes.
+- **vfork, posix_spawn.** The transaction makes the child ready, records it
+  as the parent's vfork child and sets the parent's registry context to
+  issue `LINUX_VFORK_WAIT_SYSCALL` (`restart_live_process_call`); the
+  parent waits there (parked, or yielding with a restart on an application
+  processor) until the child executes or exits, and returns the child's
+  pid. A child still sharing its parent's memory is not preempted.
+- **CLONE_NEWNS.** A parent-first child that exits leaves its namespace in
+  `settle_linux_process_exit`, which every exit goes through.
+- **Domain exec.** The command is forked from the suspended process (or
+  from init when the loop suspended with no process, below), loaded in the
+  transaction (`load_linux_domain_exec`) and run first by the loop; every
+  other process runs too. The suspended process keeps its own result: a
+  background one its call's, a console read is issued again
+  (`restart_live_process_call`; the suspension records the read's number)
+  instead of returning the fork's pid as a byte count. While the command
+  (`CONTAINER_EXEC_CHILD`) lives, only it and its descendants read the
+  console (`linux_console_held_by_domain_exec`); its exit detaches the
+  console, and the next console read suspends the domain as before.
+- **Suspension.** A process that suspends the runtime is settled like any
+  other; on resume its registry context (with the call's result, or the
+  console byte's count) is entered by the loop, so its kernel state is
+  restored, which a background resume of a process other than init used
+  to skip. The loop also takes a background yield request between
+  processes (`suspend_linux_runtime_from_loop`, suspended pid 0), so a
+  domain whose processes all wait still gives the CPU back.
+- **The run queue's copy of a context.** `claim_live_process` enters the
+  registry's context, which a write while the process waited (a result, a
+  restart) may have changed.
+- **Preemption.** `linux_preemption_yield_taken` holds for every runtime
+  process but one sharing its parent's memory; init is preempted too.
+- **Shared open files across CPUs.** With the parent going on after a
+  fork, a parent and its children run on different CPUs at once; an
+  offset written through a shared open file now also reaches the other
+  CPUs' live banks (`sync_live_linux_open_file_offset`), not only the
+  saved records, which the parent's next save overwrote (fork07).
+
+Kept for M2/M3: the application processors still leave a parked
+(Sleeping) process to the boot CPU unless it is due or pinned elsewhere,
+and never run init; they enter processes without activations, so a call
+there cannot park (it restarts or yields). The fork transaction's
+child-first path remains only for the boot verification probe.
+
+### What step 5 (M2) must do
+
+- **Wakeups instead of rechecks.** A parked call is still resumed by the
+  loop to look at its wait again (only futex, wait4/waitid and nanosleep
+  sleepers are skipped until due or woken, `linux_process_asleep`). Each
+  wait kind needs a wait queue (the records in "What waits look like" are
+  the start: SysV IPC, futex coordination, pipes, poll/epoll, children)
+  whose waker marks the waiter ready and hands it its result; then a
+  parked process leaves the run queue (Blocked) until woken, and the
+  idle-round heuristic and `mark_linux_process_asleep` go.
+- **Activations per thread.** Activations are keyed by process
+  (`linux_activation_owner`): a multithreaded process's sibling threads
+  still switch inside its one activation. Each thread needs its own, and
+  the registry's single context per process becomes per thread.
+- **Per-process globals as task fields.** Every dispatch still copies the
+  process's kernel state in and out of the CPU's bank (save and restore in
+  `run_linux_process_here`); skipping the restore when the bank already
+  holds the process is a cheap first step.
+- **Yields.** `yield_current_linux_process` still records the
+  CHILD_YIELDED flags for a caller that no longer needs them; with real
+  blocking the restart contexts it writes go too.
+
+## Step 4 in detail: the plan as made (history)
 
 Measured on 2026-10-31 with parent-first fork switched on under today's
 init-driven scheduling: LTP's wait/kill/clone tests regress (children forked
