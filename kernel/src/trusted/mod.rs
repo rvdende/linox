@@ -28,6 +28,10 @@
 //!   interrupt vectors.
 //! - [`ap_start`]: the application processors' start-up trampoline.
 //! - [`tsc`]: the timestamp counter.
+//! - [`boot`]: the kernel's entry from the loader and the boot information
+//!   it hands over.
+//! - [`control`]: control registers, the stack pointer, CR0.WP.
+//! - [`take_once`]: a static handed out as `&'static mut` once.
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
 //! - [`owned_state`]: set-once owners for long-lived kernel objects.
@@ -39,6 +43,8 @@
 pub(crate) mod ap_start;
 pub(crate) mod boot;
 pub(crate) mod claim;
+pub(crate) mod control;
+pub(crate) mod crash;
 pub(crate) mod dma;
 pub(crate) mod entry;
 pub(crate) mod firmware;
@@ -55,4 +61,5 @@ pub(crate) mod pci_config;
 pub(crate) mod pixels;
 pub(crate) mod port;
 pub(crate) mod root;
+pub(crate) mod take_once;
 pub(crate) mod tsc;

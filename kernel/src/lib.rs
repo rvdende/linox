@@ -88,18 +88,18 @@ mod sync;
 mod trusted;
 mod volume;
 
-use core::arch::{asm, global_asm};
-use core::cell::UnsafeCell;
-use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
+use trusted::boot::{Handoff, HandoffError};
+use trusted::take_once::TakeOnce;
 use trusted::{
     firmware, frame::Frame, image::BootImage, mmio::Mmio, pixels::PixelBuffer, port::Port8,
 };
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
+pub use trusted::boot::{kernel_entry, ResetSystem};
 
 struct HostControlOwner {
     operator_console_ready: AtomicBool,
@@ -107,14 +107,12 @@ struct HostControlOwner {
     linux_realtime_epoch_seconds: AtomicU64,
     linux_realtime_epoch_tsc: AtomicU64,
     oci_pull_started: AtomicU64,
-    persisted_oci_catalog: UnsafeCell<[u8; linox_oci_cache::ENCODED_SIZE]>,
+    persisted_oci_catalog: TakeOnce<[u8; linox_oci_cache::ENCODED_SIZE]>,
     /// Where the loaded kernel image lies, so crash reports can name code
     /// addresses relative to it.
     kernel_image_base: AtomicU64,
     kernel_image_size: AtomicU64,
 }
-
-unsafe impl Sync for HostControlOwner {}
 
 static HOST_CONTROL: HostControlOwner = HostControlOwner {
     operator_console_ready: AtomicBool::new(false),
@@ -122,7 +120,7 @@ static HOST_CONTROL: HostControlOwner = HostControlOwner {
     linux_realtime_epoch_seconds: AtomicU64::new(0),
     linux_realtime_epoch_tsc: AtomicU64::new(0),
     oci_pull_started: AtomicU64::new(0),
-    persisted_oci_catalog: UnsafeCell::new([0; linox_oci_cache::ENCODED_SIZE]),
+    persisted_oci_catalog: TakeOnce::new([0; linox_oci_cache::ENCODED_SIZE]),
     kernel_image_base: AtomicU64::new(0),
     kernel_image_size: AtomicU64::new(0),
 };
@@ -145,15 +143,8 @@ const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 const UEFI_PAGES_PER_MIB: u64 = 256;
 const PAGE_SIZE: usize = 4096;
 const Q35_IOMMU_REGISTER_BASE: u64 = 0xfed9_0000;
-// Linux processes run nested inside the syscalls of the processes that
-// started them, all on this stack, so its depth bounds how deep a process
-// tree (a shell running a compositor running a terminal running a shell) can
-// be. 512 KiB overflowed under the all-Rust desktop and a cargo build.
-const KERNEL_STACK_SIZE: usize = 2 * 1024 * 1024;
-const KERNEL_STACK_STORAGE_SIZE: usize = PAGE_SIZE + KERNEL_STACK_SIZE + PAGE_SIZE;
 const PERSISTENT_LOCAL_CONFIG_SIZE: usize =
     arch::x86_64::cpu::PERSISTENT_DOMAIN_CONFIG_SIZE + network::PERSISTENT_NETWORK_CONFIG_SIZE;
-const KERNEL_STACK_TOP_OFFSET: usize = PAGE_SIZE + KERNEL_STACK_SIZE;
 pub const BOOT_INFO_MAGIC: u64 = 0x0049_4258_4f4e_494c;
 pub const BOOT_INFO_VERSION: u32 = 8;
 /// No usable linear framebuffer was found.
@@ -185,34 +176,6 @@ pub(crate) fn linux_realtime_epoch() -> Option<(u64, u64)> {
         .load(Ordering::Acquire);
     (seconds != 0 && timestamp_counter != 0).then_some((seconds, timestamp_counter))
 }
-
-#[repr(C, align(4096))]
-struct KernelStackOwner([u8; KERNEL_STACK_STORAGE_SIZE]);
-
-static mut KERNEL_STACK: KernelStackOwner = KernelStackOwner([0; KERNEL_STACK_STORAGE_SIZE]);
-
-global_asm!(
-    r#"
-    .text
-    .global linox_kernel_stack_entry
-linox_kernel_stack_entry:
-    cli
-    lea rsp, [rip + {stack}]
-    add rsp, {stack_size}
-    and rsp, -16
-    call {kernel_main}
-    ud2
-"#,
-    stack = sym KERNEL_STACK,
-    stack_size = const KERNEL_STACK_TOP_OFFSET,
-    kernel_main = sym kernel_main,
-);
-
-extern "sysv64" {
-    fn linox_kernel_stack_entry(boot_info: *const BootInfo) -> !;
-}
-
-pub type ResetSystem = unsafe extern "efiapi" fn(u32, usize, usize, *const c_void);
 
 /// Information fixed by the boot environment before firmware boot services end.
 ///
@@ -280,17 +243,9 @@ struct MemorySummary {
     loader_pages: u64,
 }
 
-/// Takes control after UEFI boot services have ended.
-///
-/// # Safety
-///
-/// `boot_info` must identify a valid, immutable `BootInfo`. Its memory-map
-/// buffer must remain allocated for the lifetime of the kernel.
-pub unsafe extern "sysv64" fn kernel_entry(boot_info: *const BootInfo) -> ! {
-    linox_kernel_stack_entry(boot_info)
-}
-
-unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
+/// The kernel proper, on the boot stack with interrupts off, from
+/// `trusted::boot`'s entry with the loader's boot information.
+fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     let kernel_boot_started = arch::x86_64::timer::timestamp_counter();
     serial_init();
     serial_write_raw(b"linox: booting\r\n");
@@ -306,17 +261,11 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     serial_write("linox: kernel stack active\r\n");
 
-    if boot_info.is_null() {
-        kernel_fail("linox: missing boot information\r\n");
-    }
-
-    let boot_info = &*boot_info;
-    if boot_info.magic != BOOT_INFO_MAGIC
-        || boot_info.version != BOOT_INFO_VERSION
-        || boot_info.size < size_of::<BootInfo>() as u32
-    {
-        kernel_fail("linox: incompatible boot information\r\n");
-    }
+    let boot_info = match handoff {
+        Err(HandoffError::Missing) => kernel_fail("linox: missing boot information\r\n"),
+        Err(HandoffError::Incompatible) => kernel_fail("linox: incompatible boot information\r\n"),
+        Ok(handoff) => handoff,
+    };
     HOST_CONTROL
         .kernel_image_base
         .store(boot_info.image_base as u64, Ordering::Relaxed);
@@ -373,17 +322,11 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     // The loader's handoff images, as byte slices for the kernel's
     // lifetime (trusted::image::BootImage); each is checked further below.
-    let loaded_image = BootImage::from_loader(boot_info.image_base, boot_info.image_size);
-    let manifest_image = BootImage::from_loader(boot_info.manifest, boot_info.manifest_size);
-    let bundle_image = BootImage::from_loader(
-        boot_info.control_plane_bundle,
-        boot_info.control_plane_bundle_size,
-    );
-    let controller_image = BootImage::from_loader(
-        boot_info.controller_runtime,
-        boot_info.controller_runtime_size,
-    );
-    let root_image_bytes = BootImage::from_loader(boot_info.root_image, boot_info.root_image_size);
+    let loaded_image = boot_info.loaded_image();
+    let manifest_image = boot_info.manifest();
+    let bundle_image = boot_info.control_plane_bundle();
+    let controller_image = boot_info.controller_runtime();
+    let root_image_bytes = boot_info.root_image();
     let Some(image) = loaded_image.and_then(|loaded| pe::inspect(loaded.bytes())) else {
         kernel_fail("linox: invalid loaded EFI PE image\r\n");
     };
@@ -446,7 +389,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             && start
                 .checked_add(boot_info.oci_rootfs_size)
                 .is_some_and(|end| end <= image_start + boot_info.image_size);
-        let builtin = BootImage::from_loader(boot_info.oci_rootfs, boot_info.oci_rootfs_size);
+        let builtin = boot_info.oci_rootfs();
         let Some(builtin) = builtin.filter(|_| inside_image) else {
             kernel_fail("linox: boot-embedded root filesystem lies outside the boot image\r\n");
         };
@@ -532,17 +475,17 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         kernel_fail("linox: UEFI memory map address overflow\r\n");
     };
 
-    let stack_start = core::ptr::addr_of!(KERNEL_STACK) as usize;
+    let stack_start = trusted::boot::kernel_stack_base();
     let kernel_stack_guard = stack_start;
     let kernel_stack_start = stack_start + PAGE_SIZE;
-    let kernel_stack_upper_guard = stack_start + KERNEL_STACK_TOP_OFFSET;
+    let kernel_stack_upper_guard = stack_start + trusted::boot::KERNEL_STACK_TOP_OFFSET;
     let double_fault_guard = arch::x86_64::cpu::double_fault_guard_page();
     let nmi_guard = arch::x86_64::cpu::nmi_guard_page();
     let machine_check_guard = arch::x86_64::cpu::machine_check_guard_page();
     let privilege_stack_guard = arch::x86_64::cpu::privilege_stack_guard_page();
     let required_addresses = [
         kernel_main as *const () as usize,
-        boot_info as *const BootInfo as usize,
+        core::ptr::from_ref::<BootInfo>(&boot_info) as usize,
         boot_info.image_base as usize,
         image_end,
         boot_info.memory_map as usize,
@@ -611,10 +554,10 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         None => usb_count,
     };
 
-    // SAFETY: The entry trampoline disabled interrupts. The required live
-    // addresses and the page-table objects are checked against the complete
+    // The entry trampoline disabled interrupts. The required live addresses
+    // and the page-table objects are checked against the complete
     // transitional identity-map range before CR3 is changed.
-    let result = unsafe {
+    let result = {
         arch::x86_64::paging::install_initial_identity_map(
             boot_info,
             &image,
@@ -1306,7 +1249,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write_u64(summary.boot_service_pages);
     serial_write("\r\nlinox: reserved loader pages: ");
     serial_write_u64(summary.loader_pages);
-    if !verify_initial_frame_allocation(boot_info) {
+    if !verify_initial_frame_allocation(&boot_info) {
         kernel_fail("linox: physical frame allocation test failed\r\n");
     }
     if !heap::verify() {
@@ -1488,7 +1431,9 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let mut persisted_local_configuration = [0_u8; PERSISTENT_LOCAL_CONFIG_SIZE];
     let mut persisted_local_record = None;
     let mut persisted_local_configuration_valid = true;
-    let persisted_oci_catalog = &mut *HOST_CONTROL.persisted_oci_catalog.get();
+    let Some(persisted_oci_catalog) = HOST_CONTROL.persisted_oci_catalog.take() else {
+        kernel_fail("\r\nlinox: persisted OCI catalog buffer already taken\r\n");
+    };
     let mut persisted_oci_catalog_valid = false;
     let mut persisted_oci_catalog_corrupt = false;
     let disk_volume = (|| {
@@ -1815,17 +1760,11 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write("\r\nlinox: auxiliary address-space ownership retained");
     serial_write("\r\nlinox: auxiliary runtime teardown path connected");
     serial_write("\r\nlinox: auxiliary teardown restores kernel page tables");
-    let control_plane_bundle = core::slice::from_raw_parts(
-        boot_info.control_plane_bundle,
-        boot_info.control_plane_bundle_size,
-    );
+    let control_plane_bundle = bundle_image.map_or(&[][..], BootImage::bytes);
     let Some(control_plane_image) = executable::parse(control_plane_bundle) else {
         kernel_fail("\r\nlinox: control-plane executable container invalid\r\n");
     };
-    let controller_runtime = core::slice::from_raw_parts(
-        boot_info.controller_runtime,
-        boot_info.controller_runtime_size,
-    );
+    let controller_runtime = controller_image.map_or(&[][..], BootImage::bytes);
     let Some(controller_image) = native_elf::inspect_controller(controller_runtime) else {
         kernel_fail("\r\nlinox: embedded controller ELF invalid\r\n");
     };
@@ -1838,7 +1777,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write("\r\nlinox: bounded executable container accepted");
     serial_write("\r\nlinox: authenticated executable entry points accepted");
     serial_write("\r\nlinox: malformed executable containers rejected\r\n");
-    let root_image = core::slice::from_raw_parts(boot_info.root_image, boot_info.root_image_size);
+    let root_image = root_image_bytes.map_or(&[][..], BootImage::bytes);
     if !initramfs::verify_pinned_image(root_image) {
         kernel_fail("linox: bounded initramfs image invalid\r\n");
     }
@@ -4526,13 +4465,8 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // A privileged domain's reboot(2) may have asked for a cold reset. The
     // firmware runs on the kernel's own tables, which map all its memory
     // (a Linux process's map only its runtime services).
-    address_space::activate_root(arch::x86_64::paging::kernel_root_address());
-    (boot_info.reset_system)(
-        machine_control::reset_kind(),
-        EFI_SUCCESS,
-        0,
-        core::ptr::null(),
-    );
+    trusted::root::activate_kernel_root();
+    boot_info.reset_system(machine_control::reset_kind(), EFI_SUCCESS);
     kernel_fail("linox: firmware shutdown returned unexpectedly\r\n");
 }
 
@@ -4619,23 +4553,10 @@ fn frame_is_zero(frame: memory::FrameLease) -> bool {
 }
 
 fn kernel_stack_is_active() -> bool {
-    let stack_pointer: usize;
-    // SAFETY: Reading RSP does not alter machine or memory state.
-    unsafe {
-        asm!(
-            "mov {}, rsp",
-            out(reg) stack_pointer,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-
-    let stack_start = core::ptr::addr_of!(KERNEL_STACK) as usize;
-    let stack_start = stack_start + PAGE_SIZE;
-    let stack_end = stack_start + KERNEL_STACK_SIZE;
-    (stack_start..stack_end).contains(&stack_pointer)
+    trusted::boot::kernel_stack_contains(trusted::control::stack_pointer() as usize)
 }
 
-fn summarize_memory(boot_info: &BootInfo) -> MemorySummary {
+fn summarize_memory(boot_info: Handoff) -> MemorySummary {
     let descriptors = boot_info.memory_map_size / boot_info.memory_descriptor_size;
     let mut summary = MemorySummary {
         descriptors,
@@ -4644,16 +4565,7 @@ fn summarize_memory(boot_info: &BootInfo) -> MemorySummary {
         loader_pages: 0,
     };
 
-    for index in 0..descriptors {
-        // SAFETY: BootInfo validation established a non-null map, a descriptor
-        // stride large enough for the required prefix, and an integral count.
-        let descriptor = unsafe {
-            let address = boot_info
-                .memory_map
-                .add(index * boot_info.memory_descriptor_size);
-            core::ptr::read_unaligned(address.cast::<UefiMemoryDescriptor>())
-        };
-
+    for descriptor in boot_info.memory_descriptors() {
         match descriptor.memory_type {
             EFI_CONVENTIONAL_MEMORY => {
                 summary.conventional_pages = summary

@@ -1,10 +1,16 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
-use core::{arch::asm, cell::UnsafeCell};
+#![forbid(unsafe_code)]
+
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::{
     pe::ImageSummary,
-    trusted::page_table::{invalidate_page, PageTable as TableView},
-    BootInfo, UefiMemoryDescriptor, EFI_RUNTIME_SERVICES_CODE, EFI_RUNTIME_SERVICES_DATA,
+    trusted::{
+        boot::Handoff,
+        control,
+        page_table::{invalidate_page, PageTable as TableView},
+        root,
+    },
+    UefiMemoryDescriptor, EFI_RUNTIME_SERVICES_CODE, EFI_RUNTIME_SERVICES_DATA,
 };
 
 const ENTRY_COUNT: usize = 512;
@@ -25,7 +31,7 @@ const DIRTY: u64 = 1 << 6;
 const LARGE_PAGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: usize = 0x000f_ffff_ffff_f000;
-const CR0_WRITE_PROTECT: usize = 1 << 16;
+const CR0_WRITE_PROTECT: u64 = 1 << 16;
 
 pub(crate) const INITIAL_IDENTITY_LIMIT: usize = 1usize << 32;
 pub(crate) const DIRECT_MAP_BASE: usize = 0xffff_8000_0000_0000;
@@ -208,7 +214,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         return None;
     }
     let entries = TableView::from_physical(root)?;
-    let kernel = static_table(PAGING.pml4.get())?;
+    let kernel = static_table(&PAGING.pml4)?;
     let kernel_entry = kernel.get(0);
     let kernel_direct_entry = kernel.get(DIRECT_MAP_PML4_INDEX);
     let shared = entries.get(0);
@@ -462,25 +468,61 @@ fn single_user_table_entry(table_address: u64) -> Option<u64> {
     .then_some(entry)
 }
 
-#[derive(Clone, Copy)]
+/// One of the kernel's static page-table pages. Its entries are atomics,
+/// which have `u64`'s layout, so the processor walks the page as an ordinary
+/// table while the kernel reads and writes entries by index without raw
+/// pointers (relaxed loads and stores, which compile to the same plain moves
+/// as before). The page lies in the identity-mapped kernel image, so its
+/// address is its physical address.
 #[repr(C, align(4096))]
-struct PageTable([u64; ENTRY_COUNT]);
+struct PageTable([AtomicU64; ENTRY_COUNT]);
+
+impl PageTable {
+    const fn new() -> Self {
+        Self([const { AtomicU64::new(0) }; ENTRY_COUNT])
+    }
+
+    /// Entry `index` (below 512).
+    fn get(&self, index: usize) -> u64 {
+        self.0[index].load(Ordering::Relaxed)
+    }
+
+    fn set(&self, index: usize, value: u64) {
+        self.0[index].store(value, Ordering::Relaxed);
+    }
+
+    fn zero(&self) {
+        self.0
+            .iter()
+            .for_each(|entry| entry.store(0, Ordering::Relaxed));
+    }
+
+    /// The table's address, which is also its physical address.
+    fn address(&self) -> usize {
+        core::ptr::from_ref(self) as usize
+    }
+}
+
+/// The address of the first table in `tables`.
+fn tables_address(tables: &[PageTable]) -> usize {
+    tables.as_ptr() as usize
+}
 
 struct PagingOwner {
-    pml4: UnsafeCell<PageTable>,
-    pdpt: UnsafeCell<PageTable>,
-    direct_pdpt: UnsafeCell<PageTable>,
-    page_directories: UnsafeCell<[PageTable; DIRECTORY_COUNT]>,
-    fine_page_tables: UnsafeCell<[PageTable; MAX_FINE_TABLES]>,
-    mmio_directory: UnsafeCell<PageTable>,
-    mmio_table: UnsafeCell<PageTable>,
-    framebuffer_directory: UnsafeCell<PageTable>,
-    device_directory: UnsafeCell<PageTable>,
-    device_table: UnsafeCell<PageTable>,
+    pml4: PageTable,
+    pdpt: PageTable,
+    direct_pdpt: PageTable,
+    page_directories: [PageTable; DIRECTORY_COUNT],
+    fine_page_tables: [PageTable; MAX_FINE_TABLES],
+    mmio_directory: PageTable,
+    mmio_table: PageTable,
+    framebuffer_directory: PageTable,
+    device_directory: PageTable,
+    device_table: PageTable,
     /// The kernel stack window's page directory. Unlike the other tables it
     /// stays writable after boot: page tables for stacks are added to it
     /// while the kernel runs.
-    kernel_stack_directories: UnsafeCell<[PageTable; KERNEL_STACK_DIRECTORY_COUNT]>,
+    kernel_stack_directories: [PageTable; KERNEL_STACK_DIRECTORY_COUNT],
     /// What a Linux process's first PML4 entry starts from: the kernel's
     /// identity entries for only the 2 MiB regions it still reaches by
     /// physical address while a process's tables are loaded (its own
@@ -490,8 +532,8 @@ struct PagingOwner {
     /// directories; the tables are sealed read-only with the others, and
     /// a process makes a directory its own only to add user tables beside
     /// these entries (`address_space::ensure_current_linux_leaf`).
-    linux_low_pdpt: UnsafeCell<PageTable>,
-    linux_low_directories: UnsafeCell<[PageTable; DIRECTORY_COUNT]>,
+    linux_low_pdpt: PageTable,
+    linux_low_directories: [PageTable; DIRECTORY_COUNT],
     /// End of the physical range reachable through the direct map once RAM
     /// above the initial identity map joins it; zero until then. (A zero
     /// initializer keeps this owner, and its page tables, out of the image's
@@ -499,61 +541,49 @@ struct PagingOwner {
     direct_map_limit: AtomicUsize,
 }
 
-// SAFETY: the tables are written during boot on the bootstrap CPU before
-// any other CPU starts, and afterwards only by callers that serialize
-// their writes (the kernel stack and device windows); the limit is atomic.
-unsafe impl Sync for PagingOwner {}
-
 static PAGING: PagingOwner = PagingOwner {
-    pml4: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    pdpt: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    direct_pdpt: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    page_directories: UnsafeCell::new([PageTable([0; ENTRY_COUNT]); DIRECTORY_COUNT]),
-    fine_page_tables: UnsafeCell::new([PageTable([0; ENTRY_COUNT]); MAX_FINE_TABLES]),
-    mmio_directory: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    mmio_table: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    framebuffer_directory: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    device_directory: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    device_table: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    kernel_stack_directories: UnsafeCell::new(
-        [PageTable([0; ENTRY_COUNT]); KERNEL_STACK_DIRECTORY_COUNT],
-    ),
-    linux_low_pdpt: UnsafeCell::new(PageTable([0; ENTRY_COUNT])),
-    linux_low_directories: UnsafeCell::new([PageTable([0; ENTRY_COUNT]); DIRECTORY_COUNT]),
+    pml4: PageTable::new(),
+    pdpt: PageTable::new(),
+    direct_pdpt: PageTable::new(),
+    page_directories: [const { PageTable::new() }; DIRECTORY_COUNT],
+    fine_page_tables: [const { PageTable::new() }; MAX_FINE_TABLES],
+    mmio_directory: PageTable::new(),
+    mmio_table: PageTable::new(),
+    framebuffer_directory: PageTable::new(),
+    device_directory: PageTable::new(),
+    device_table: PageTable::new(),
+    kernel_stack_directories: [const { PageTable::new() }; KERNEL_STACK_DIRECTORY_COUNT],
+    linux_low_pdpt: PageTable::new(),
+    linux_low_directories: [const { PageTable::new() }; DIRECTORY_COUNT],
     direct_map_limit: AtomicUsize::new(0),
 };
 
 /// One of this owner's static tables as a page-table view through the
 /// direct map, for code that runs once the direct map exists. The tables
 /// lie in the identity-mapped kernel image, so a table's address is its
-/// physical address, and the kernel reaches them only through raw
-/// pointers.
-fn static_table(table: *const PageTable) -> Option<TableView> {
-    TableView::from_physical(table as u64)
+/// physical address.
+fn static_table(table: &PageTable) -> Option<TableView> {
+    TableView::from_physical(table.address() as u64)
 }
 
 /// Entry `region % 512` of the kernel's identity-map directory for 2-MiB
 /// region `region` of the first 4 GiB.
 fn identity_directory_entry(region: usize) -> Option<u64> {
-    let directory = PAGING
+    PAGING
         .page_directories
-        .get()
-        .cast::<PageTable>()
-        .wrapping_add(region / ENTRY_COUNT);
-    (region < DIRECTORY_COUNT * ENTRY_COUNT)
-        .then(|| static_table(directory))
-        .flatten()
+        .get(region / ENTRY_COUNT)
+        .and_then(static_table)
         .map(|directory| directory.get(region % ENTRY_COUNT))
 }
 
 pub(crate) fn kernel_root_address() -> u64 {
-    PAGING.pml4.get().cast_const() as u64
+    PAGING.pml4.address() as u64
 }
 
 /// The physical address of the directory-pointer table a Linux process's
 /// first PML4 entry is copied from (`PagingOwner::linux_low_pdpt`).
 pub(crate) fn linux_low_template() -> u64 {
-    PAGING.linux_low_pdpt.get().cast_const() as u64
+    PAGING.linux_low_pdpt.address() as u64
 }
 
 /// The shared template directory for gigabyte `index` of the first 4 GiB,
@@ -562,14 +592,9 @@ pub(crate) fn linux_low_template_directory(index: usize) -> Option<u64> {
     if index >= DIRECTORY_COUNT {
         return None;
     }
-    // SAFETY: the template is written once during boot, before any Linux
-    // process exists, and is read-only afterwards.
-    let entry = unsafe {
-        core::ptr::addr_of!((*PAGING.linux_low_pdpt.get()).0)
-            .cast::<u64>()
-            .add(index)
-            .read()
-    };
+    // The template is written once during boot, before any Linux process
+    // exists, and is read-only afterwards.
+    let entry = PAGING.linux_low_pdpt.get(index);
     (entry & PRESENT != 0).then_some(entry & ADDRESS_MASK as u64)
 }
 
@@ -582,12 +607,10 @@ pub(crate) fn direct_map_limit() -> usize {
 }
 
 /// Returns the end of the highest RAM region in the UEFI memory map.
-fn ram_end(boot_info: &BootInfo) -> u64 {
+fn ram_end(boot_info: Handoff) -> u64 {
     const RAM_TYPES: [u32; 6] = [1, 2, 3, 4, 7, 9];
-    let count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
-    (0..count)
-        // SAFETY: the index is below the descriptor count.
-        .map(|index| unsafe { read_descriptor(boot_info, index) })
+    boot_info
+        .memory_descriptors()
         .filter(|descriptor| RAM_TYPES.contains(&descriptor.memory_type))
         .filter_map(|descriptor| {
             descriptor
@@ -619,13 +642,10 @@ pub(crate) enum PagingError {
 /// [`MAX_DEVICE_REGIONS`], mapped uncached in a window of their own; like the
 /// reference devices' ranges they lose any identity alias.
 ///
-/// # Safety
-///
-/// The caller must ensure interrupts are disabled and that the current x86-64
-/// UEFI environment uses identity-addressable physical memory for the supplied
-/// pointers and the statically linked page-table objects.
-pub(crate) unsafe fn install_initial_identity_map(
-    boot_info: &BootInfo,
+/// Runs once, at boot, with interrupts disabled, on the firmware's identity
+/// map; it builds the kernel's tables in the statics above and loads them.
+pub(crate) fn install_initial_identity_map(
+    boot_info: Handoff,
     image: &ImageSummary,
     required_addresses: &[usize],
     guard_pages: &[usize],
@@ -650,13 +670,13 @@ pub(crate) unsafe fn install_initial_identity_map(
         return Err(PagingError::RequiredAddressOutsideMap);
     }
 
-    let pml4_address = PAGING.pml4.get().cast_const() as usize;
-    let pdpt_address = PAGING.pdpt.get().cast_const() as usize;
-    let direct_pdpt_address = PAGING.direct_pdpt.get().cast_const() as usize;
-    let directories_address = PAGING.page_directories.get().cast_const() as usize;
-    let fine_tables_address = PAGING.fine_page_tables.get().cast_const() as usize;
-    let mmio_directory_address = PAGING.mmio_directory.get().cast_const() as usize;
-    let mmio_table_address = PAGING.mmio_table.get().cast_const() as usize;
+    let pml4_address = PAGING.pml4.address();
+    let pdpt_address = PAGING.pdpt.address();
+    let direct_pdpt_address = PAGING.direct_pdpt.address();
+    let directories_address = tables_address(&PAGING.page_directories);
+    let fine_tables_address = tables_address(&PAGING.fine_page_tables);
+    let mmio_directory_address = PAGING.mmio_directory.address();
+    let mmio_table_address = PAGING.mmio_table.address();
 
     for address in [
         pml4_address,
@@ -682,36 +702,40 @@ pub(crate) unsafe fn install_initial_identity_map(
         return Err(PagingError::GuardMisaligned);
     }
 
-    let pml4 = core::ptr::addr_of_mut!((*PAGING.pml4.get()).0).cast::<u64>();
-    let pdpt = core::ptr::addr_of_mut!((*PAGING.pdpt.get()).0).cast::<u64>();
-    let direct_pdpt = core::ptr::addr_of_mut!((*PAGING.direct_pdpt.get()).0).cast::<u64>();
-    let directories = PAGING.page_directories.get().cast::<PageTable>();
+    let pml4 = &PAGING.pml4;
+    let pdpt = &PAGING.pdpt;
+    let direct_pdpt = &PAGING.direct_pdpt;
+    let directories = &PAGING.page_directories;
 
-    zero_entries(pml4);
-    zero_entries(pdpt);
-    zero_entries(direct_pdpt);
+    pml4.zero();
+    pdpt.zero();
+    direct_pdpt.zero();
 
-    pml4.write((pdpt_address as u64) | PRESENT | WRITABLE);
-    pml4.add(DIRECT_MAP_PML4_INDEX)
-        .write((direct_pdpt_address as u64) | PRESENT | WRITABLE);
+    pml4.set(0, (pdpt_address as u64) | PRESENT | WRITABLE);
+    pml4.set(
+        DIRECT_MAP_PML4_INDEX,
+        (direct_pdpt_address as u64) | PRESENT | WRITABLE,
+    );
 
-    for directory_index in 0..DIRECTORY_COUNT {
-        let directory = directories.add(directory_index);
-        let entries = core::ptr::addr_of_mut!((*directory).0).cast::<u64>();
-        zero_entries(entries);
+    for (directory_index, entries) in directories.iter().enumerate() {
+        entries.zero();
 
-        pdpt.add(directory_index)
-            .write((directory as u64) | PRESENT | WRITABLE);
-        direct_pdpt
-            .add(directory_index)
-            .write((directory as u64) | PRESENT | WRITABLE);
+        pdpt.set(
+            directory_index,
+            (entries.address() as u64) | PRESENT | WRITABLE,
+        );
+        direct_pdpt.set(
+            directory_index,
+            (entries.address() as u64) | PRESENT | WRITABLE,
+        );
 
         for entry_index in 0..ENTRY_COUNT {
             let page_index = directory_index * ENTRY_COUNT + entry_index;
             let physical_address = page_index as u64 * LARGE_PAGE_SIZE;
-            entries
-                .add(entry_index)
-                .write(physical_address | PRESENT | WRITABLE | LARGE_PAGE | NO_EXECUTE);
+            entries.set(
+                entry_index,
+                physical_address | PRESENT | WRITABLE | LARGE_PAGE | NO_EXECUTE,
+            );
         }
     }
 
@@ -722,9 +746,10 @@ pub(crate) unsafe fn install_initial_identity_map(
         && core::arch::x86_64::__cpuid(CPUID_EXTENDED_FEATURES).edx & CPUID_PAGE_1GB != 0
     {
         for index in DIRECTORY_COUNT..gibibytes {
-            direct_pdpt
-                .add(index)
-                .write((index as u64 * GIBIBYTE) | PRESENT | WRITABLE | LARGE_PAGE | NO_EXECUTE);
+            direct_pdpt.set(
+                index,
+                (index as u64 * GIBIBYTE) | PRESENT | WRITABLE | LARGE_PAGE | NO_EXECUTE,
+            );
         }
         PAGING
             .direct_map_limit
@@ -732,7 +757,7 @@ pub(crate) unsafe fn install_initial_identity_map(
     }
 
     let framebuffer = match framebuffer {
-        Some((physical, length)) => Some(map_framebuffer_window(direct_pdpt, physical, length)?),
+        Some((physical, length)) => Some(map_framebuffer_window(physical, length)?),
         None => None,
     };
 
@@ -1044,12 +1069,13 @@ pub(crate) unsafe fn install_initial_identity_map(
     {
         return Err(PagingError::MmioMapInvalid);
     }
-    let mmio_directory = core::ptr::addr_of_mut!((*PAGING.mmio_directory.get()).0).cast::<u64>();
-    let mmio_table = core::ptr::addr_of_mut!((*PAGING.mmio_table.get()).0).cast::<u64>();
-    zero_entries(mmio_directory);
-    zero_entries(mmio_table);
+    let mmio_directory = &PAGING.mmio_directory;
+    let mmio_table = &PAGING.mmio_table;
+    mmio_directory.zero();
+    mmio_table.zero();
     for index in 0..mmio_pages {
-        mmio_table.add(index).write(
+        mmio_table.set(
+            index,
             (mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | WRITABLE
@@ -1058,7 +1084,8 @@ pub(crate) unsafe fn install_initial_identity_map(
         );
     }
     for index in 0..auxiliary_mmio_pages {
-        mmio_table.add(auxiliary_mmio_index + index).write(
+        mmio_table.set(
+            auxiliary_mmio_index + index,
             (auxiliary_mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | WRITABLE
@@ -1067,7 +1094,8 @@ pub(crate) unsafe fn install_initial_identity_map(
         );
     }
     for index in 0..platform_mmio_pages {
-        mmio_table.add(platform_mmio_index + index).write(
+        mmio_table.set(
+            platform_mmio_index + index,
             (platform_mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | WRITABLE
@@ -1076,7 +1104,8 @@ pub(crate) unsafe fn install_initial_identity_map(
         );
     }
     for index in 0..device_mmio_pages {
-        mmio_table.add(device_mmio_index + index).write(
+        mmio_table.set(
+            device_mmio_index + index,
             (device_mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | WRITABLE
@@ -1085,7 +1114,8 @@ pub(crate) unsafe fn install_initial_identity_map(
         );
     }
     for index in 0..device_config_mmio_pages {
-        mmio_table.add(device_config_mmio_index + index).write(
+        mmio_table.set(
+            device_config_mmio_index + index,
             (device_config_mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | CACHE_DISABLE
@@ -1093,18 +1123,18 @@ pub(crate) unsafe fn install_initial_identity_map(
         );
     }
     for index in 0..device_notification_mmio_pages {
-        mmio_table
-            .add(device_notification_mmio_index + index)
-            .write(
-                (device_notification_mmio_page + (index * PAGE_SIZE) as u64)
-                    | PRESENT
-                    | WRITABLE
-                    | CACHE_DISABLE
-                    | NO_EXECUTE,
-            );
+        mmio_table.set(
+            device_notification_mmio_index + index,
+            (device_notification_mmio_page + (index * PAGE_SIZE) as u64)
+                | PRESENT
+                | WRITABLE
+                | CACHE_DISABLE
+                | NO_EXECUTE,
+        );
     }
     for index in 0..device_msix_mmio_pages {
-        mmio_table.add(device_msix_mmio_index + index).write(
+        mmio_table.set(
+            device_msix_mmio_index + index,
             (device_msix_mmio_page + (index * PAGE_SIZE) as u64)
                 | PRESENT
                 | WRITABLE
@@ -1112,10 +1142,11 @@ pub(crate) unsafe fn install_initial_identity_map(
                 | NO_EXECUTE,
         );
     }
-    mmio_directory.write((mmio_table_address as u64) | PRESENT | WRITABLE);
-    direct_pdpt
-        .add(MMIO_PDPT_INDEX)
-        .write((mmio_directory_address as u64) | PRESENT | WRITABLE);
+    mmio_directory.set(0, (mmio_table_address as u64) | PRESENT | WRITABLE);
+    direct_pdpt.set(
+        MMIO_PDPT_INDEX,
+        (mmio_directory_address as u64) | PRESENT | WRITABLE,
+    );
     let mmio_mapping = MmioMapping {
         physical_page: mmio_page,
         physical_start: mmio_physical,
@@ -1181,18 +1212,17 @@ pub(crate) unsafe fn install_initial_identity_map(
         device_notification_mmio_mapping,
         device_msix_mmio_mapping,
     ];
-    let devices = map_device_window(direct_pdpt, device_regions, &reference_mmio)?;
+    let devices = map_device_window(device_regions, &reference_mmio)?;
     for index in 0..KERNEL_STACK_DIRECTORY_COUNT {
-        let stack_directory =
-            core::ptr::addr_of_mut!((*PAGING.kernel_stack_directories.get())[index].0)
-                .cast::<u64>();
-        zero_entries(stack_directory);
-        direct_pdpt
-            .add(KERNEL_STACK_PDPT_INDEX + index)
-            .write(stack_directory as u64 | PRESENT | WRITABLE);
+        let stack_directory = &PAGING.kernel_stack_directories[index];
+        stack_directory.zero();
+        direct_pdpt.set(
+            KERNEL_STACK_PDPT_INDEX + index,
+            stack_directory.address() as u64 | PRESENT | WRITABLE,
+        );
     }
 
-    let fine_tables = PAGING.fine_page_tables.get().cast::<PageTable>();
+    let fine_tables = &PAGING.fine_page_tables;
     let mut fine_regions = [usize::MAX; MAX_FINE_TABLES];
     let mut fine_count = 0;
     for guard in guard_pages {
@@ -1205,13 +1235,11 @@ pub(crate) unsafe fn install_initial_identity_map(
             directories,
         )?;
         let page = (*guard % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-        let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-        entries.add(page).write(0);
+        let entries = &fine_tables[fine_index];
+        entries.set(page, 0);
     }
 
-    let descriptor_count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
-    for index in 0..descriptor_count {
-        let descriptor = read_descriptor(boot_info, index);
+    for descriptor in boot_info.memory_descriptors() {
         let Some((start, end)) = runtime_code_bounds(descriptor)? else {
             continue;
         };
@@ -1248,14 +1276,14 @@ pub(crate) unsafe fn install_initial_identity_map(
             return Err(PagingError::ExecutableMapInvalid);
         };
         let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-        let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
+        let entries = &fine_tables[fine_index];
         let writable = image
             .writable_ranges()
             .iter()
             .any(|(start, end)| address < *end && *start < address + PAGE_SIZE);
         if !writable {
-            let value = entries.add(page).read();
-            entries.add(page).write(value & !WRITABLE);
+            let value = entries.get(page);
+            entries.set(page, value & !WRITABLE);
         }
     }
     for &(start, end) in image.executable_ranges() {
@@ -1281,12 +1309,9 @@ pub(crate) unsafe fn install_initial_identity_map(
         directories,
     )?;
     let trampoline_page = (trampoline % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-    let trampoline_entries =
-        core::ptr::addr_of_mut!((*fine_tables.add(trampoline_fine_index)).0).cast::<u64>();
-    let trampoline_value = trampoline_entries.add(trampoline_page).read();
-    trampoline_entries
-        .add(trampoline_page)
-        .write(trampoline_value & !(NO_EXECUTE | WRITABLE));
+    let trampoline_entries = &fine_tables[trampoline_fine_index];
+    let trampoline_value = trampoline_entries.get(trampoline_page);
+    trampoline_entries.set(trampoline_page, trampoline_value & !(NO_EXECUTE | WRITABLE));
 
     if auxiliary_mmio_page < INITIAL_IDENTITY_LIMIT as u64 {
         let auxiliary_end = auxiliary_mmio_mapped_end.ok_or(PagingError::MmioMapInvalid)?;
@@ -1304,8 +1329,8 @@ pub(crate) unsafe fn install_initial_identity_map(
                 directories,
             )?;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            entries.add(page).write(0);
+            let entries = &fine_tables[fine_index];
+            entries.set(page, 0);
         }
     }
     if platform_mmio_page < INITIAL_IDENTITY_LIMIT as u64 {
@@ -1324,8 +1349,8 @@ pub(crate) unsafe fn install_initial_identity_map(
                 directories,
             )?;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            entries.add(page).write(0);
+            let entries = &fine_tables[fine_index];
+            entries.set(page, 0);
         }
     }
     if device_notification_mmio_page < INITIAL_IDENTITY_LIMIT as u64 {
@@ -1345,8 +1370,8 @@ pub(crate) unsafe fn install_initial_identity_map(
                 directories,
             )?;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            entries.add(page).write(0);
+            let entries = &fine_tables[fine_index];
+            entries.set(page, 0);
         }
     }
     for device in devices.iter().flatten() {
@@ -1368,8 +1393,8 @@ pub(crate) unsafe fn install_initial_identity_map(
                 directories,
             )?;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            entries.add(page).write(0);
+            let entries = &fine_tables[fine_index];
+            entries.set(page, 0);
         }
     }
     if device_msix_mmio_page < INITIAL_IDENTITY_LIMIT as u64 {
@@ -1388,12 +1413,11 @@ pub(crate) unsafe fn install_initial_identity_map(
                 directories,
             )?;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            entries.add(page).write(0);
+            let entries = &fine_tables[fine_index];
+            entries.set(page, 0);
         }
     }
-    for index in 0..descriptor_count {
-        let descriptor = read_descriptor(boot_info, index);
+    for descriptor in boot_info.memory_descriptors() {
         let Some((start, end)) = runtime_code_bounds(descriptor)? else {
             continue;
         };
@@ -1406,9 +1430,9 @@ pub(crate) unsafe fn install_initial_identity_map(
                 return Err(PagingError::ExecutableMapInvalid);
             };
             let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            let value = entries.add(page).read();
-            entries.add(page).write(value & !NO_EXECUTE);
+            let entries = &fine_tables[fine_index];
+            let value = entries.get(page);
+            entries.set(page, value & !NO_EXECUTE);
         }
     }
     for &(start, end) in image.executable_ranges() {
@@ -1421,9 +1445,9 @@ pub(crate) unsafe fn install_initial_identity_map(
                 return Err(PagingError::ExecutableMapInvalid);
             };
             let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-            let value = entries.add(page).read();
-            entries.add(page).write(value & !(NO_EXECUTE | WRITABLE));
+            let entries = &fine_tables[fine_index];
+            let value = entries.get(page);
+            entries.set(page, value & !(NO_EXECUTE | WRITABLE));
         }
     }
 
@@ -1449,59 +1473,32 @@ pub(crate) unsafe fn install_initial_identity_map(
             return Err(PagingError::HardeningFailed);
         };
         let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-        let entries = core::ptr::addr_of_mut!((*fine_tables.add(fine_index)).0).cast::<u64>();
-        let value = entries.add(page).read();
+        let entries = &fine_tables[fine_index];
+        let value = entries.get(page);
         if value & PRESENT == 0 {
             return Err(PagingError::HardeningFailed);
         }
-        entries.add(page).write(value & !WRITABLE);
+        entries.set(page, value & !WRITABLE);
     }
 
     // Loading CR3 serializes the page-table writes and activates the new root.
-    asm!(
-        "mov cr3, {}",
-        in(reg) pml4_address,
-        options(nostack, preserves_flags)
-    );
-
-    let active_root: usize;
-    asm!(
-        "mov {}, cr3",
-        out(reg) active_root,
-        options(nomem, nostack, preserves_flags)
-    );
+    root::install_kernel_root();
+    let active_root = root::current() as usize;
 
     if active_root & ADDRESS_MASK != pml4_address {
         return Err(PagingError::ActivationFailed);
     }
 
-    let mut cr0: usize;
-    asm!(
-        "mov {}, cr0",
-        out(reg) cr0,
-        options(nomem, nostack, preserves_flags)
-    );
-    cr0 |= CR0_WRITE_PROTECT;
-    asm!(
-        "mov cr0, {}",
-        in(reg) cr0,
-        options(nostack, preserves_flags)
-    );
-    asm!(
-        "mov {}, cr0",
-        out(reg) cr0,
-        options(nomem, nostack, preserves_flags)
-    );
-    if cr0 & CR0_WRITE_PROTECT == 0 {
+    if !control::enable_write_protect() {
         return Err(PagingError::HardeningFailed);
     }
 
     for (index, region) in fine_regions[..fine_count].iter().enumerate() {
-        let entries = core::ptr::addr_of!((*fine_tables.add(index)).0).cast::<u64>();
+        let entries = &fine_tables[index];
         for guard in guard_pages {
             if *guard / LARGE_PAGE_SIZE as usize == *region {
                 let page = (*guard % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-                if entries.add(page).read() != 0 {
+                if entries.get(page) != 0 {
                     return Err(PagingError::HardeningFailed);
                 }
             }
@@ -1516,8 +1513,8 @@ pub(crate) unsafe fn install_initial_identity_map(
             return Err(PagingError::HardeningFailed);
         };
         let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-        let entries = core::ptr::addr_of!((*fine_tables.add(fine_index)).0).cast::<u64>();
-        let value = entries.add(page).read();
+        let entries = &fine_tables[fine_index];
+        let value = entries.get(page);
         if value & PRESENT == 0 || value & WRITABLE != 0 {
             return Err(PagingError::HardeningFailed);
         }
@@ -1542,15 +1539,14 @@ pub(crate) unsafe fn install_initial_identity_map(
 /// Maps `regions` uncached, one after another, into the direct-map slot
 /// reserved for device registers. Each region must stay clear of the others
 /// and of the reference devices' ranges in `reference`.
-unsafe fn map_device_window(
-    direct_pdpt: *mut u64,
+fn map_device_window(
     regions: &[(u64, usize)],
     reference: &[MmioMapping],
 ) -> Result<[Option<MmioMapping>; MAX_DEVICE_REGIONS], PagingError> {
-    let directory = core::ptr::addr_of_mut!((*PAGING.device_directory.get()).0).cast::<u64>();
-    let table = core::ptr::addr_of_mut!((*PAGING.device_table.get()).0).cast::<u64>();
-    zero_entries(directory);
-    zero_entries(table);
+    let directory = &PAGING.device_directory;
+    let table = &PAGING.device_table;
+    directory.zero();
+    table.zero();
     let mut mappings = [None; MAX_DEVICE_REGIONS];
     if regions.is_empty() {
         return Ok(mappings);
@@ -1591,7 +1587,8 @@ unsafe fn map_device_window(
             return Err(PagingError::MmioMapInvalid);
         }
         for index in 0..pages {
-            table.add(next + index).write(
+            table.set(
+                next + index,
                 (page + (index * PAGE_SIZE) as u64)
                     | PRESENT
                     | WRITABLE
@@ -1609,10 +1606,11 @@ unsafe fn map_device_window(
         });
         next += pages;
     }
-    directory.write(table as u64 | PRESENT | WRITABLE);
-    direct_pdpt
-        .add(DEVICE_PDPT_INDEX)
-        .write(directory as u64 | PRESENT | WRITABLE);
+    directory.set(0, table.address() as u64 | PRESENT | WRITABLE);
+    PAGING.direct_pdpt.set(
+        DEVICE_PDPT_INDEX,
+        directory.address() as u64 | PRESENT | WRITABLE,
+    );
     Ok(mappings)
 }
 
@@ -1641,13 +1639,11 @@ pub(crate) fn map_kernel_stack_page(
     }
     // The directory is this owner's, installed in the shared direct PDPT at
     // boot and left writable; the caller serializes writers.
-    let Some(directory) = static_table(
-        PAGING
-            .kernel_stack_directories
-            .get()
-            .cast::<PageTable>()
-            .wrapping_add(offset >> 30),
-    ) else {
+    let Some(directory) = PAGING
+        .kernel_stack_directories
+        .get(offset >> 30)
+        .and_then(static_table)
+    else {
         return false;
     };
     let directory_index = (offset % (1 << 30)) / LARGE_PAGE_SIZE as usize;
@@ -1692,13 +1688,10 @@ pub(crate) fn unmap_kernel_stack_page(address: usize) -> Option<u64> {
         return None;
     }
     // As in `map_kernel_stack_page`.
-    let directory = static_table(
-        PAGING
-            .kernel_stack_directories
-            .get()
-            .cast::<PageTable>()
-            .wrapping_add(offset >> 30),
-    )?;
+    let directory = PAGING
+        .kernel_stack_directories
+        .get(offset >> 30)
+        .and_then(static_table)?;
     let directory_index = (offset % (1 << 30)) / LARGE_PAGE_SIZE as usize;
     let entry = directory.get(directory_index);
     if entry & PRESENT == 0 {
@@ -1729,11 +1722,7 @@ pub(crate) fn install_page_attribute_table() {
 /// Maps a framebuffer write-combining into the direct-map slot reserved for it
 /// and returns the window from `physical`, `length` bytes. The window holds
 /// 1 GiB.
-unsafe fn map_framebuffer_window(
-    direct_pdpt: *mut u64,
-    physical: u64,
-    length: usize,
-) -> Result<FramebufferWindow, PagingError> {
+fn map_framebuffer_window(physical: u64, length: usize) -> Result<FramebufferWindow, PagingError> {
     let start = physical & !(LARGE_PAGE_SIZE - 1);
     let end = physical
         .checked_add(length as u64)
@@ -1745,29 +1734,31 @@ unsafe fn map_framebuffer_window(
         return Err(PagingError::MmioMapInvalid);
     }
     install_page_attribute_table();
-    let directory = core::ptr::addr_of_mut!((*PAGING.framebuffer_directory.get()).0).cast::<u64>();
-    zero_entries(directory);
+    let directory = &PAGING.framebuffer_directory;
+    directory.zero();
     for index in 0..pages {
         let page = start + index as u64 * LARGE_PAGE_SIZE;
-        directory
-            .add(index)
-            .write(page | PRESENT | WRITABLE | LARGE_PAGE | WRITE_THROUGH | NO_EXECUTE);
+        directory.set(
+            index,
+            page | PRESENT | WRITABLE | LARGE_PAGE | WRITE_THROUGH | NO_EXECUTE,
+        );
     }
-    direct_pdpt
-        .add(FRAMEBUFFER_PDPT_INDEX)
-        .write(directory as u64 | PRESENT | WRITABLE);
+    PAGING.direct_pdpt.set(
+        FRAMEBUFFER_PDPT_INDEX,
+        directory.address() as u64 | PRESENT | WRITABLE,
+    );
     Ok(FramebufferWindow {
         address: FRAMEBUFFER_WINDOW_BASE + (physical - start) as usize,
         length,
     })
 }
 
-unsafe fn ensure_fine_region(
+fn ensure_fine_region(
     region: usize,
     fine_regions: &mut [usize; MAX_FINE_TABLES],
     fine_count: &mut usize,
-    fine_tables: *mut PageTable,
-    directories: *mut PageTable,
+    fine_tables: &[PageTable; MAX_FINE_TABLES],
+    directories: &[PageTable; DIRECTORY_COUNT],
 ) -> Result<usize, PagingError> {
     if let Some(index) = fine_regions[..*fine_count]
         .iter()
@@ -1781,34 +1772,26 @@ unsafe fn ensure_fine_region(
     let index = *fine_count;
     fine_regions[index] = region;
     *fine_count += 1;
-    let table = fine_tables.add(index);
-    let entries = core::ptr::addr_of_mut!((*table).0).cast::<u64>();
-    zero_entries(entries);
+    let table = &fine_tables[index];
+    let entries = table;
+    entries.zero();
     let region_base = region as u64 * LARGE_PAGE_SIZE;
     for entry in 0..ENTRY_COUNT {
-        entries.add(entry).write(
+        entries.set(
+            entry,
             (region_base + entry as u64 * PAGE_SIZE as u64) | PRESENT | WRITABLE | NO_EXECUTE,
         );
     }
-    let directory = directories.add(region / ENTRY_COUNT);
-    let directory_entries = core::ptr::addr_of_mut!((*directory).0).cast::<u64>();
-    directory_entries
-        .add(region % ENTRY_COUNT)
-        .write((table as u64) | PRESENT | WRITABLE);
+    let directory_entries = &directories[region / ENTRY_COUNT];
+    directory_entries.set(
+        region % ENTRY_COUNT,
+        (table.address() as u64) | PRESENT | WRITABLE,
+    );
     Ok(index)
 }
 
 pub(crate) fn supervisor_write_protect_enabled() -> bool {
-    let cr0: usize;
-    // SAFETY: reading CR0 has no side effects and touches no memory.
-    unsafe {
-        asm!(
-            "mov {}, cr0",
-            out(reg) cr0,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    cr0 & CR0_WRITE_PROTECT != 0
+    control::cr0() & CR0_WRITE_PROTECT != 0
 }
 
 pub(crate) fn direct_map_range_address(physical: u64, length: usize) -> Option<usize> {
@@ -1855,10 +1838,6 @@ pub(crate) fn direct_map_physical(address: usize) -> Option<u64> {
     (physical < direct_map_limit()).then_some(physical as u64)
 }
 
-pub(crate) fn direct_map_address(physical: usize) -> Option<usize> {
-    direct_map_range_address(physical as u64, 1)
-}
-
 pub(crate) fn direct_map_translation_is_bounded() -> bool {
     let limit = direct_map_limit();
     (INITIAL_IDENTITY_LIMIT..=DEVICE_PDPT_INDEX << 30).contains(&limit)
@@ -1871,13 +1850,13 @@ pub(crate) fn direct_map_translation_is_bounded() -> bool {
 }
 
 pub(crate) fn direct_map_alias_is_valid() -> bool {
-    let Some(pml4) = static_table(PAGING.pml4.get()) else {
+    let Some(pml4) = static_table(&PAGING.pml4) else {
         return false;
     };
     let identity = pml4.get(0);
     let direct = pml4.get(DIRECT_MAP_PML4_INDEX);
-    let expected_identity = PAGING.pdpt.get().cast_const() as u64 | PRESENT | WRITABLE;
-    let expected_direct = PAGING.direct_pdpt.get().cast_const() as u64 | PRESENT | WRITABLE;
+    let expected_identity = PAGING.pdpt.address() as u64 | PRESENT | WRITABLE;
+    let expected_direct = PAGING.direct_pdpt.address() as u64 | PRESENT | WRITABLE;
     if (identity ^ expected_identity) & !ACCESSED != 0
         || (direct ^ expected_direct) & !ACCESSED != 0
         || direct & PRESENT == 0
@@ -1886,8 +1865,8 @@ pub(crate) fn direct_map_alias_is_valid() -> bool {
         return false;
     }
     let (Some(identity_pdpt), Some(direct_pdpt)) = (
-        static_table(PAGING.pdpt.get()),
-        static_table(PAGING.direct_pdpt.get()),
+        static_table(&PAGING.pdpt),
+        static_table(&PAGING.direct_pdpt),
     ) else {
         return false;
     };
@@ -1896,14 +1875,9 @@ pub(crate) fn direct_map_alias_is_valid() -> bool {
             return false;
         }
     }
-    let physical = PAGING.pml4.get().cast_const() as usize;
-    let Some(alias) = direct_map_address(physical) else {
-        return false;
-    };
-    // SAFETY: both addresses name the kernel's root table, a static the
-    // kernel reaches only through raw pointers: through the direct map and
-    // through the identity map of the kernel image.
-    unsafe { (alias as *const u64).read() == (physical as *const u64).read() }
+    // The root's first entry, read through the direct map and through the
+    // kernel image's own mapping, must agree.
+    pml4.get(0) == PAGING.pml4.get(0)
 }
 
 pub(crate) fn mmio_mapping_is_valid(mapping: MmioMapping) -> bool {
@@ -1929,21 +1903,21 @@ pub(crate) fn mmio_mapping_is_valid(mapping: MmioMapping) -> bool {
         return false;
     }
     let (Some(direct_pdpt), Some(directory), Some(table)) = (
-        static_table(PAGING.direct_pdpt.get()),
-        static_table(PAGING.mmio_directory.get()),
-        static_table(PAGING.mmio_table.get()),
+        static_table(&PAGING.direct_pdpt),
+        static_table(&PAGING.mmio_directory),
+        static_table(&PAGING.mmio_table),
     ) else {
         return false;
     };
     let directory_entry = direct_pdpt.get(MMIO_PDPT_INDEX);
     if directory_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE) != PRESENT | WRITABLE
-        || directory_entry & ADDRESS_MASK as u64 != PAGING.mmio_directory.get().cast_const() as u64
+        || directory_entry & ADDRESS_MASK as u64 != PAGING.mmio_directory.address() as u64
     {
         return false;
     }
     let table_entry = directory.get(0);
     if table_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE) != PRESENT | WRITABLE
-        || table_entry & ADDRESS_MASK as u64 != PAGING.mmio_table.get().cast_const() as u64
+        || table_entry & ADDRESS_MASK as u64 != PAGING.mmio_table.address() as u64
         || (1..ENTRY_COUNT).any(|index| directory.get(index) != 0)
     {
         return false;
@@ -1987,7 +1961,7 @@ pub(crate) fn mmio_mappings_are_exact<const N: usize>(mappings: [MmioMapping; N]
             }
         }
     }
-    let Some(table) = static_table(PAGING.mmio_table.get()) else {
+    let Some(table) = static_table(&PAGING.mmio_table) else {
         return false;
     };
     (0..ENTRY_COUNT).all(|index| {
@@ -2076,29 +2050,23 @@ const STATIC_TABLE_PAGE_COUNT: usize = 9 + 2 * DIRECTORY_COUNT + MAX_FINE_TABLES
 /// gains tables while the kernel runs.
 fn static_table_pages() -> [usize; STATIC_TABLE_PAGE_COUNT] {
     let single = [
-        PAGING.pml4.get().cast_const() as usize,
-        PAGING.pdpt.get().cast_const() as usize,
-        PAGING.direct_pdpt.get().cast_const() as usize,
-        PAGING.mmio_directory.get().cast_const() as usize,
-        PAGING.mmio_table.get().cast_const() as usize,
-        PAGING.framebuffer_directory.get().cast_const() as usize,
-        PAGING.device_directory.get().cast_const() as usize,
-        PAGING.device_table.get().cast_const() as usize,
-        PAGING.linux_low_pdpt.get().cast_const() as usize,
+        PAGING.pml4.address(),
+        PAGING.pdpt.address(),
+        PAGING.direct_pdpt.address(),
+        PAGING.mmio_directory.address(),
+        PAGING.mmio_table.address(),
+        PAGING.framebuffer_directory.address(),
+        PAGING.device_directory.address(),
+        PAGING.device_table.address(),
+        PAGING.linux_low_pdpt.address(),
     ];
     let arrays = [
+        (tables_address(&PAGING.page_directories), DIRECTORY_COUNT),
         (
-            PAGING.page_directories.get().cast_const() as usize,
+            tables_address(&PAGING.linux_low_directories),
             DIRECTORY_COUNT,
         ),
-        (
-            PAGING.linux_low_directories.get().cast_const() as usize,
-            DIRECTORY_COUNT,
-        ),
-        (
-            PAGING.fine_page_tables.get().cast_const() as usize,
-            MAX_FINE_TABLES,
-        ),
+        (tables_address(&PAGING.fine_page_tables), MAX_FINE_TABLES),
     ];
     let mut pages = [0; STATIC_TABLE_PAGE_COUNT];
     pages[..single.len()].copy_from_slice(&single);
@@ -2121,12 +2089,10 @@ fn static_table_pages() -> [usize; STATIC_TABLE_PAGE_COUNT] {
 /// kernel reaches through the direct map, and device ranges, which it
 /// reaches through its windows; it is left to Linux processes.
 ///
-/// # Safety
-///
 /// Runs once, from `install_initial_identity_map` with interrupts off,
 /// after the last change to an identity directory entry.
-unsafe fn install_linux_low_template(
-    boot_info: &BootInfo,
+fn install_linux_low_template(
+    boot_info: Handoff,
     image: &ImageSummary,
     required_addresses: &[usize],
 ) {
@@ -2144,9 +2110,7 @@ unsafe fn install_linux_low_template(
     for address in required_addresses {
         keep(*address, address.saturating_add(1));
     }
-    let descriptor_count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
-    for index in 0..descriptor_count {
-        let descriptor = read_descriptor(boot_info, index);
+    for descriptor in boot_info.memory_descriptors() {
         if !matches!(
             descriptor.memory_type,
             EFI_RUNTIME_SERVICES_CODE | EFI_RUNTIME_SERVICES_DATA
@@ -2164,32 +2128,24 @@ unsafe fn install_linux_low_template(
             );
         }
     }
-    let directories = PAGING
-        .page_directories
-        .get()
-        .cast_const()
-        .cast::<PageTable>();
-    let low_pdpt = core::ptr::addr_of_mut!((*PAGING.linux_low_pdpt.get()).0).cast::<u64>();
-    let low_directories = PAGING.linux_low_directories.get().cast::<PageTable>();
-    zero_entries(low_pdpt);
+    let directories = &PAGING.page_directories;
+    let low_pdpt = &PAGING.linux_low_pdpt;
+    let low_directories = &PAGING.linux_low_directories;
+    low_pdpt.zero();
     for directory_index in 0..DIRECTORY_COUNT {
-        let kernel = core::ptr::addr_of!((*directories.add(directory_index)).0).cast::<u64>();
-        let low = low_directories.add(directory_index);
-        let entries = core::ptr::addr_of_mut!((*low).0).cast::<u64>();
-        zero_entries(entries);
+        let kernel = &directories[directory_index];
+        let low = &low_directories[directory_index];
+        let entries = low;
+        entries.zero();
         let mut kept = false;
         for entry_index in 0..ENTRY_COUNT {
             if resident[directory_index * ENTRY_COUNT + entry_index] {
-                entries
-                    .add(entry_index)
-                    .write(kernel.add(entry_index).read());
+                entries.set(entry_index, kernel.get(entry_index));
                 kept = true;
             }
         }
         if kept {
-            low_pdpt
-                .add(directory_index)
-                .write((low as u64) | PRESENT | WRITABLE);
+            low_pdpt.set(directory_index, (low.address() as u64) | PRESENT | WRITABLE);
         }
     }
 }
@@ -2197,11 +2153,13 @@ unsafe fn install_linux_low_template(
 /// Writes the ranges of the first 4 GiB that Linux processes cannot map,
 /// the kernel's own (`install_linux_low_template`), to the kernel log.
 pub(crate) fn report_linux_low_template() {
-    let directories = PAGING.linux_low_directories.get().cast::<PageTable>();
+    let directories = &PAGING.linux_low_directories;
     // The template is read-only after boot.
     let kept = |region: usize| {
         region < DIRECTORY_COUNT * ENTRY_COUNT
-            && static_table(directories.wrapping_add(region / ENTRY_COUNT))
+            && directories
+                .get(region / ENTRY_COUNT)
+                .and_then(static_table)
                 .is_some_and(|directory| directory.get(region % ENTRY_COUNT) & PRESENT != 0)
     };
     crate::serial_write("linox: kernel ranges in Linux address spaces:");
@@ -2239,7 +2197,7 @@ pub(crate) fn static_page_tables_are_read_only() -> bool {
     })
 }
 
-pub(crate) fn identity_map_obeys_wx(boot_info: &BootInfo, image: &ImageSummary) -> bool {
+pub(crate) fn identity_map_obeys_wx(boot_info: Handoff, image: &ImageSummary) -> bool {
     for region in 0..DIRECTORY_COUNT * ENTRY_COUNT {
         let Some(entry) = identity_directory_entry(region) else {
             return false;
@@ -2337,19 +2295,6 @@ pub(crate) fn identity_range_is_read_only_data(start: usize, length: usize) -> b
     }
 }
 
-/// Descriptor `index` of the firmware's memory map.
-///
-/// # Safety
-///
-/// `index` is below `memory_map_size / memory_descriptor_size`, and the
-/// memory map the boot loader passed is still mapped.
-unsafe fn read_descriptor(boot_info: &BootInfo, index: usize) -> UefiMemoryDescriptor {
-    let address = boot_info
-        .memory_map
-        .add(index * boot_info.memory_descriptor_size);
-    core::ptr::read_unaligned(address.cast::<UefiMemoryDescriptor>())
-}
-
 fn runtime_code_bounds(
     descriptor: UefiMemoryDescriptor,
 ) -> Result<Option<(usize, usize)>, PagingError> {
@@ -2373,11 +2318,8 @@ fn runtime_code_bounds(
     Ok((start < end).then_some((start, end)))
 }
 
-fn range_contains_runtime_code(boot_info: &BootInfo, start: usize, end: usize) -> bool {
-    let descriptor_count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
-    for index in 0..descriptor_count {
-        // SAFETY: the index is below the descriptor count.
-        let descriptor = unsafe { read_descriptor(boot_info, index) };
+fn range_contains_runtime_code(boot_info: Handoff, start: usize, end: usize) -> bool {
+    for descriptor in boot_info.memory_descriptors() {
         let Ok(Some((code_start, code_end))) = runtime_code_bounds(descriptor) else {
             continue;
         };
@@ -2389,7 +2331,7 @@ fn range_contains_runtime_code(boot_info: &BootInfo, start: usize, end: usize) -
 }
 
 fn range_contains_executable(
-    boot_info: &BootInfo,
+    boot_info: Handoff,
     image: &ImageSummary,
     start: usize,
     end: usize,
@@ -2410,37 +2352,26 @@ const fn ranges_overlap_u64(left: (u64, u64), right: (u64, u64)) -> bool {
 }
 
 fn is_static_table_page(address: usize) -> bool {
-    if address == PAGING.pml4.get().cast_const() as usize
-        || address == PAGING.pdpt.get().cast_const() as usize
-        || address == PAGING.direct_pdpt.get().cast_const() as usize
-        || address == PAGING.mmio_directory.get().cast_const() as usize
-        || address == PAGING.mmio_table.get().cast_const() as usize
-        || address == PAGING.framebuffer_directory.get().cast_const() as usize
-        || address == PAGING.device_directory.get().cast_const() as usize
-        || address == PAGING.device_table.get().cast_const() as usize
-        || address == PAGING.linux_low_pdpt.get().cast_const() as usize
+    if address == PAGING.pml4.address()
+        || address == PAGING.pdpt.address()
+        || address == PAGING.direct_pdpt.address()
+        || address == PAGING.mmio_directory.address()
+        || address == PAGING.mmio_table.address()
+        || address == PAGING.framebuffer_directory.address()
+        || address == PAGING.device_directory.address()
+        || address == PAGING.device_table.address()
+        || address == PAGING.linux_low_pdpt.address()
     {
         return true;
     }
-    let low_directories = PAGING.linux_low_directories.get().cast_const() as usize;
+    let low_directories = tables_address(&PAGING.linux_low_directories);
     if (low_directories..low_directories + DIRECTORY_COUNT * PAGE_SIZE).contains(&address) {
         return true;
     }
-    let directories = PAGING.page_directories.get().cast_const() as usize;
+    let directories = tables_address(&PAGING.page_directories);
     let directories_end = directories + DIRECTORY_COUNT * PAGE_SIZE;
-    let fine_tables = PAGING.fine_page_tables.get().cast_const() as usize;
+    let fine_tables = tables_address(&PAGING.fine_page_tables);
     let fine_tables_end = fine_tables + MAX_FINE_TABLES * PAGE_SIZE;
     (directories..directories_end).contains(&address)
         || (fine_tables..fine_tables_end).contains(&address)
-}
-
-/// Clears a table during boot, before the direct map exists.
-///
-/// # Safety
-///
-/// `entries` points at a whole page table the caller owns.
-unsafe fn zero_entries(entries: *mut u64) {
-    for index in 0..ENTRY_COUNT {
-        entries.add(index).write(0);
-    }
 }

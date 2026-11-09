@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Hardware bring-up mode.
 //!
 //! The main boot path requires the QEMU reference devices (virtio block and
@@ -19,15 +21,17 @@
 mod log;
 mod trap;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::drivers::net::{self, Nic};
 use crate::drivers::{
     ahci, amd_iommu, clock, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
 };
-use crate::trusted::{dma::StaticDma, firmware, mmio::Mmio};
-use crate::{BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
+use crate::trusted::{boot::Handoff, control, dma::StaticDma, firmware, mmio::Mmio};
+use crate::{EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 
 pub use trap::report_panic;
-pub(crate) use trap::{firmware_maps, set_stage};
+pub(crate) use trap::{exception_handler, firmware_maps, set_stage};
 
 const EFI_LOADER_CODE: u32 = 1;
 const EFI_LOADER_DATA: u32 = 2;
@@ -54,7 +58,7 @@ struct Summary {
 }
 
 /// Reports the platform and runs the hardware drivers, then halts.
-pub(crate) fn run(boot_info: &BootInfo) -> ! {
+pub(crate) fn run(boot_info: Handoff) -> ! {
     trap::install();
     set_stage("bring-up start");
     crate::framebuffer::set_jump_scroll(true);
@@ -347,7 +351,7 @@ fn report_pci() {
 
 fn report_network() {
     // One probe per boot is enough to tell offers apart.
-    static mut TRANSACTION: u32 = 0x6769_6e00;
+    static TRANSACTION: AtomicU32 = AtomicU32::new(0x6769_6e00);
     pci::for_each_function(|device| {
         if device.class != 0x02 {
             return;
@@ -359,11 +363,7 @@ fn report_network() {
             address.device,
             address.function
         );
-        // SAFETY: bring-up runs on one CPU and only here uses the counter.
-        let transaction = unsafe {
-            TRANSACTION = TRANSACTION.wrapping_add(1);
-            TRANSACTION
-        };
+        let transaction = TRANSACTION.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         if e1000e::is_supported(&device) {
             // SAFETY: bring-up is the only driver of this controller, and the
             // firmware identity map covers its registers and DMA pages.
@@ -700,7 +700,7 @@ impl Input {
     }
 }
 
-fn shell(boot_info: &BootInfo, usb: UsbKeyboards, mut remapping: Remapping) -> ! {
+fn shell(boot_info: Handoff, usb: UsbKeyboards, mut remapping: Remapping) -> ! {
     set_stage("bring-up shell");
     say!("\nLinox bring-up shell. Type 'help' for commands.\n");
     let mut input = Input {
@@ -761,7 +761,7 @@ Commands:
   clear  echo TEXT  reboot  poweroff
 ";
 
-fn run_command(boot_info: &BootInfo, input: &mut Input, remapping: &mut Remapping, line: &[u8]) {
+fn run_command(boot_info: Handoff, input: &mut Input, remapping: &mut Remapping, line: &[u8]) {
     let text = core::str::from_utf8(line).unwrap_or("").trim();
     let (command, argument) = text.split_once(' ').unwrap_or((text, ""));
     match command {
@@ -816,9 +816,9 @@ fn run_command(boot_info: &BootInfo, input: &mut Input, remapping: &mut Remappin
             if argument.trim() == "panic" {
                 panic!("crash test requested in the bring-up shell");
             }
-            // SAFETY: ud2 raises #UD, which the bring-up exception table
-            // reports; the handler never returns.
-            unsafe { core::arch::asm!("ud2", options(nomem, nostack, noreturn)) };
+            // ud2 raises #UD, which the bring-up exception table reports;
+            // the handler never returns.
+            control::raise_invalid_opcode();
         }
         "clear" => crate::serial_write_raw(b"\x1b[2J\x1b[H"),
         "echo" => say!("{}\n", argument),
@@ -856,7 +856,7 @@ fn report_usb(usb: &UsbKeyboards) {
     }
 }
 
-fn reset(boot_info: &BootInfo, kind: u32) {
+fn reset(boot_info: Handoff, kind: u32) {
     set_stage("shutting down NVMe before reset");
     let (controllers, _) = functions(pci::Identity::is_nvme);
     for function in controllers.iter().flatten() {
@@ -871,24 +871,14 @@ fn reset(boot_info: &BootInfo, kind: u32) {
     }
     set_stage("UEFI ResetSystem");
     say!("linox: resetting through UEFI runtime services\n");
-    // SAFETY: bring-up never calls SetVirtualAddressMap, so the runtime
-    // services remain callable through the firmware identity map.
-    unsafe { (boot_info.reset_system)(kind, 0, 0, core::ptr::null()) };
+    // Bring-up never calls SetVirtualAddressMap, so the runtime services
+    // remain callable through the firmware identity map.
+    boot_info.reset_system(kind, 0);
 }
 
-fn report_memory(boot_info: &BootInfo) {
-    let count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
+fn report_memory(boot_info: Handoff) {
     let (mut usable, mut usable_low, mut highest) = (0_u64, 0_u64, 0_u64);
-    for index in 0..count {
-        // SAFETY: kernel_main validated the memory-map bounds and descriptor size.
-        let descriptor = unsafe {
-            core::ptr::read_unaligned(
-                boot_info
-                    .memory_map
-                    .add(index * boot_info.memory_descriptor_size)
-                    .cast::<UefiMemoryDescriptor>(),
-            )
-        };
+    for descriptor in boot_info.memory_descriptors() {
         let start = descriptor.physical_start;
         let end = start.saturating_add(descriptor.page_count.saturating_mul(4096));
         highest = highest.max(end);
