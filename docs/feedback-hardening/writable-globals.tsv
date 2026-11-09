@@ -501,8 +501,8 @@ interior-mutable	kernel/src/drivers/virtio_gpu.rs	PCI_ADDRESS	platform-device	al
 interior-mutable	kernel/src/linux_mount.rs	MOUNT_RUNTIME	domain-runtime	allowlist	none	atomic-installed-namespace-words
 interior-mutable	kernel/src/linux_mount.rs	MOUNT_TABLE	domain-runtime	allowlist	none	ranked-mount-namespace-table-leaf
 interior-mutable	kernel/src/linux_overlay.rs	OVERLAYS	domain-runtime	allowlist	none	ranked-overlay-nodes-leaf-lock-per-instance
-interior-mutable	kernel/src/linux_process.rs	PROCESS_RUNTIME	process-runtime	allowlist	none	explicit-process-runtime-owner-root
-interior-mutable	kernel/src/linux_process.rs	PROCESS_ADDRESS_SPACE_STORAGE	process-runtime	allowlist	none	demand-initialized-process-address-space-owner
+interior-mutable	kernel/src/linux_process.rs	PROCESS_RUNTIME	process-runtime	allowlist	none	atomic-process-instance-flags-and-fork-stages
+interior-mutable	kernel/src/linux_process.rs	PROCESS_TABLES	process-runtime	allowlist	none	ranked-per-instance-process-table-and-address-space-lists-lock
 interior-mutable	kernel/src/linux_signal.rs	SIGNAL_RUNTIME	process-runtime	allowlist	none	explicit-process-signal-runtime-owner-root
 interior-mutable	kernel/src/linux_socket.rs	SOCKETS	domain-runtime	allowlist	none	ranked-socket-table
 interior-mutable	kernel/src/linux_socket.rs	CLOSING_PENDING	domain-runtime	allowlist	none	atomic-hint-checked-under-socket-lock
@@ -537,7 +537,7 @@ interior-mutable	kernel/src/framebuffer.rs	READY	platform-device	allowlist	none	
 interior-mutable	kernel/src/trusted/heap.rs	HEAP_FRAMES	platform-device	allowlist	none	heap-frame-accounting-counter
 interior-mutable	kernel/src/trusted/heap.rs	SLAB_FRAMES	platform-device	allowlist	none	heap-slab-frame-accounting-counter
 interior-mutable	kernel/src/lib.rs	SERIAL_PRESENT	platform-device	allowlist	none	immutable-after-boot-serial-presence
-interior-mutable	kernel/src/linux_process.rs	PROCESS_SCRATCH	process-runtime	allowlist	none	explicit-process-fork-scratch-owner-root
+interior-mutable	kernel/src/linux_process.rs	FORK_SCRATCH	process-runtime	allowlist	none	ranked-fork-scratch-taken-and-returned-leaf-lock
 interior-mutable	kernel/src/linux_process.rs	REFRESH_REJECTIONS	process-runtime	allowlist	none	diagnostic-counter
 static-mut	boot/efi/src/main.rs	BOOT_INFO	bootstrap-init	allowlist	none	firmware-single-writer
 interior-mutable	kernel/src/bringup/mod.rs	PROBE	platform-device	allowlist	none	claimed-static-dma-pages

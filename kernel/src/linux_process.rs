@@ -1,11 +1,23 @@
+//! The Linux process table: each domain instance's processes, their
+//! address-space lists and their scheduling and wait state.
+//!
+//! Each instance's table sits behind its own lock (`PROCESS_TABLES`,
+//! `LockRank::PROCESS_TABLE`), held only for short table updates: never
+//! across a park, a copy to or from user memory, or a call into an owner
+//! ranked at or below the table (the namespaces, System V IPC, the memory
+//! areas, the swap areas through page-table teardown). Work like that runs
+//! between two holds, which look the process up again by its handle.
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
 use core::{
-    cell::UnsafeCell,
-    mem::{size_of, MaybeUninit},
+    mem::size_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
 };
 
 use crate::linux_debug_registers::{DebugRegisters, Error as DebugRegisterError};
+use crate::sync::{IrqSpinLock, LockRank};
+use crate::trusted::frame::Frame;
 use crate::{
     address_space, arch::x86_64::cpu, control_abi, linux_namespace, linux_user, memory, scheduler,
 };
@@ -35,101 +47,78 @@ const HOST_PROCESS_INSTANCE: usize = control_abi::DOMAIN_LIMIT;
 const PROCESS_INSTANCE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 1;
 const PROCESS_INSTANCE_NONE: u8 = u8::MAX;
 
+/// The work areas of a fork (`commit_cloned_fork`), each as long as the
+/// largest address space forked lately: they grow with the process instead
+/// of bounding it. A fork takes them out of `FORK_SCRATCH` and puts them back
+/// when it is done, so no lock is held across the fork's work; a fork that
+/// finds them taken works with empty ones.
 struct LiveForkScratch {
-    child_mappings: Vec<cpu::LinuxActiveImageMapping>,
-    parent_pages: Vec<memory::FrameLease>,
+    lists: ForkLists,
+    /// The frames allocated for the child's page tables and private pages.
+    hierarchy_allocation: Vec<memory::FrameLease>,
+    page_allocation: Vec<memory::FrameLease>,
 }
 
-struct ProcessRuntimeOwner(UnsafeCell<ProcessRuntimeState>);
+impl LiveForkScratch {
+    const EMPTY: Self = Self {
+        lists: ForkLists {
+            child_mappings: Vec::new(),
+            parent_pages: Vec::new(),
+            parent_mappings: Vec::new(),
+            parent_hierarchy: Vec::new(),
+        },
+        hierarchy_allocation: Vec::new(),
+        page_allocation: Vec::new(),
+    };
 
-unsafe impl Sync for ProcessRuntimeOwner {}
+    /// Takes the work areas, leaving empty ones (which allocate nothing).
+    fn take() -> Self {
+        core::mem::replace(&mut *FORK_SCRATCH.lock(), Self::EMPTY)
+    }
 
-/// Each instance's address-space storage by runtime slot, as long as the
-/// highest slot used so far.
-struct ProcessAddressSpaceStorageOwner(
-    UnsafeCell<[Vec<*mut ProcessAddressSpaceStorage>; PROCESS_INSTANCE_LIMIT]>,
-);
+    /// Puts the work areas back for the next fork. Areas another fork put
+    /// back meanwhile are freed after the lock is released.
+    fn put_back(self) {
+        let previous = core::mem::replace(&mut *FORK_SCRATCH.lock(), self);
+        drop(previous);
+    }
+}
 
-unsafe impl Sync for ProcessAddressSpaceStorageOwner {}
+/// A leaf held only to swap the work areas in or out (`LockRank::PROCESS_SCRATCH`).
+static FORK_SCRATCH: IrqSpinLock<LiveForkScratch> =
+    IrqSpinLock::new(LockRank::PROCESS_SCRATCH, LiveForkScratch::EMPTY);
 
+/// `list` resized to `count` empty leases for a fork to allocate into; false
+/// (so the allocation is not tried and the fork backs out) without the memory.
+fn fork_frame_scratch(list: &mut Vec<memory::FrameLease>, count: usize) -> bool {
+    address_space::fill_list(list, count, memory::FrameLease::EMPTY).is_some()
+}
+
+/// The fork's progress markers and the per-instance flags, all atomics.
 struct ProcessRuntimeState {
     table_initialized: [AtomicBool; PROCESS_INSTANCE_LIMIT],
     refresh_count: [AtomicU32; PROCESS_INSTANCE_LIMIT],
     active_instance: AtomicU8,
-    fork_child_executed: AtomicBool,
     fork_execution_stage: AtomicU32,
     fork_child_diagnostic: AtomicU32,
-    tables: UnsafeCell<[ProcessTable; PROCESS_INSTANCE_LIMIT]>,
-    test_table: UnsafeCell<MaybeUninit<ProcessTable>>,
 }
 
-/// Transient fork and teardown work areas, each as long as the largest
-/// address space forked lately: they grow with the process instead of
-/// bounding it.
-struct ProcessScratchState {
-    fork_scratch: UnsafeCell<LiveForkScratch>,
-    fork_allocation_scratch: UnsafeCell<Vec<memory::FrameLease>>,
-    fork_hierarchy_allocation_scratch: UnsafeCell<Vec<memory::FrameLease>>,
-}
+static PROCESS_RUNTIME: ProcessRuntimeState = ProcessRuntimeState {
+    table_initialized: [const { AtomicBool::new(false) }; PROCESS_INSTANCE_LIMIT],
+    refresh_count: [const { AtomicU32::new(0) }; PROCESS_INSTANCE_LIMIT],
+    active_instance: AtomicU8::new(PROCESS_INSTANCE_NONE),
+    fork_execution_stage: AtomicU32::new(0),
+    fork_child_diagnostic: AtomicU32::new(0),
+};
 
-struct ProcessScratchOwner(UnsafeCell<ProcessScratchState>);
-
-unsafe impl Sync for ProcessScratchOwner {}
-
-static PROCESS_SCRATCH: ProcessScratchOwner =
-    ProcessScratchOwner(UnsafeCell::new(ProcessScratchState {
-        fork_scratch: UnsafeCell::new(LiveForkScratch {
-            child_mappings: Vec::new(),
-            parent_pages: Vec::new(),
-        }),
-        fork_allocation_scratch: UnsafeCell::new(Vec::new()),
-        fork_hierarchy_allocation_scratch: UnsafeCell::new(Vec::new()),
-    }));
-
-/// `list` resized to `count` empty leases for a fork to allocate into; empty
-/// (so the allocation fails and the fork backs out) without the memory.
-fn fork_frame_scratch(
-    list: &'static mut Vec<memory::FrameLease>,
-    count: usize,
-) -> &'static mut [memory::FrameLease] {
-    if address_space::fill_list(list, count, memory::FrameLease::EMPTY).is_none() {
-        return &mut [];
-    }
-    list
-}
-
-fn process_scratch() -> &'static ProcessScratchState {
-    // SAFETY: as for process_runtime; the recursive kernel-entry boundary
-    // serializes the fork and teardown paths that use these areas.
-    unsafe { &*PROCESS_SCRATCH.0.get() }
-}
-
-// Keep the elastic process address-space registry out of the kernel image.
-// Each slot's storage is several megabytes, so it is allocated from the frame
-// allocator the first time a process occupies the slot. Every reader is
-// count-bounded and the live prefixes are written before publication.
-static PROCESS_ADDRESS_SPACE_STORAGE: ProcessAddressSpaceStorageOwner =
-    ProcessAddressSpaceStorageOwner(UnsafeCell::new(
-        [const { Vec::new() }; PROCESS_INSTANCE_LIMIT],
-    ));
-
-static PROCESS_RUNTIME: ProcessRuntimeOwner =
-    ProcessRuntimeOwner(UnsafeCell::new(ProcessRuntimeState {
-        table_initialized: [const { AtomicBool::new(false) }; PROCESS_INSTANCE_LIMIT],
-        refresh_count: [const { AtomicU32::new(0) }; PROCESS_INSTANCE_LIMIT],
-        active_instance: AtomicU8::new(PROCESS_INSTANCE_NONE),
-        fork_child_executed: AtomicBool::new(false),
-        fork_execution_stage: AtomicU32::new(0),
-        fork_child_diagnostic: AtomicU32::new(0),
-        tables: UnsafeCell::new([const { ProcessTable::new() }; PROCESS_INSTANCE_LIMIT]),
-        test_table: UnsafeCell::new(MaybeUninit::uninit()),
-    }));
+/// Each instance's process table, behind a lock of its own. The tables are
+/// const-initialized and their vectors keep their memory across domains.
+static PROCESS_TABLES: [IrqSpinLock<ProcessTable>; PROCESS_INSTANCE_LIMIT] =
+    [const { IrqSpinLock::new(LockRank::PROCESS_TABLE, ProcessTable::new()) };
+        PROCESS_INSTANCE_LIMIT];
 
 fn process_runtime() -> &'static ProcessRuntimeState {
-    // SAFETY: The owner has boot lifetime. Mutable fields use atomics or
-    // UnsafeCell and are serialized by the recursive kernel-entry boundary.
-    // Gate 9 may replace that coarse rule with finer per-owner locks.
-    unsafe { &*PROCESS_RUNTIME.0.get() }
+    &PROCESS_RUNTIME
 }
 
 fn mapping_requires_fork_copy(mapping: &cpu::LinuxActiveImageMapping) -> bool {
@@ -164,14 +153,6 @@ const CONCURRENT_PROCESS_PROGRAM: [u8; 36] = [
     0xcd, 0x80, // exit(42)
     0x0f, 0x0b, // failure: ud2
 ];
-#[allow(dead_code)]
-const LIVE_PROCESS_CHILD_PROGRAM: [u8; 16] = [
-    0xcd, 0x80, // validate the complete fork-child context
-    0xb8, 0x3c, 0, 0, 0, // mov eax, 60 (__NR_exit)
-    0xbf, 0x2a, 0, 0, 0, // mov edi, 42
-    0xcd, 0x80, // exit(42)
-    0x0f, 0x0b, // failure: ud2
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcessHandle {
@@ -199,8 +180,8 @@ struct ProcessExecutionContext {
 }
 
 impl ProcessExecutionContext {
-    fn is_valid(self, address_space: &ProcessAddressSpace) -> bool {
-        self.validation_error(address_space).is_none()
+    fn is_valid(self, address_space: &ProcessAddressSpace, lists: &SpaceLists) -> bool {
+        self.validation_error(address_space, lists).is_none()
     }
 
     /// Whether the registers alone are a context a process may resume in:
@@ -217,7 +198,11 @@ impl ProcessExecutionContext {
             || self.rflags & FORBIDDEN_RFLAGS != 0)
     }
 
-    fn validation_error(self, address_space: &ProcessAddressSpace) -> Option<u8> {
+    fn validation_error(
+        self,
+        address_space: &ProcessAddressSpace,
+        lists: &SpaceLists,
+    ) -> Option<u8> {
         if !self.registers_valid() {
             return Some(1);
         }
@@ -234,11 +219,11 @@ impl ProcessExecutionContext {
                     .is_some_and(|end| address >= start && address < end)
             })
         };
-        let executable = address_space
-            .mappings()
+        let mappings = address_space.mappings(lists);
+        let executable = mappings
             .iter()
             .any(|mapping| mapping.executable && contains(mapping, self.rip));
-        let writable_stack = address_space.mappings().iter().any(|mapping| {
+        let writable_stack = mappings.iter().any(|mapping| {
             u64::try_from(mapping.address).ok().is_some_and(|start| {
                 mapping.writable
                     && start
@@ -264,19 +249,22 @@ impl ProcessExecutionContext {
     fn scheduler_context(
         self,
         address_space: &ProcessAddressSpace,
+        lists: &SpaceLists,
     ) -> Option<scheduler::ProcessSchedulerContext> {
-        self.is_valid(address_space).then_some(())?;
+        self.is_valid(address_space, lists).then_some(())?;
         scheduler::process_user_context(
             self.general,
             self.rip,
             self.rsp,
             self.rflags,
-            address_space.root().address(),
+            address_space.root(lists).address(),
             self.fs_base,
         )
     }
 }
 
+/// A process's address space as the table records it: the slot of the
+/// table's `SpaceLists` that holds its lists, and how much of them is its.
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct ProcessAddressSpace {
     storage_slot: u16,
@@ -306,6 +294,34 @@ impl ProcessAddressSpaceStorage {
     }
 }
 
+/// A table's address-space lists by runtime slot, as long as the highest
+/// slot used so far. They live in the table, under its lock; a slot's lists
+/// are kept, and reused, until its process gives back its runtime slot.
+struct SpaceLists(Vec<ProcessAddressSpaceStorage>);
+
+impl SpaceLists {
+    const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The lists of `slot`, made on first use.
+    fn slot_mut(&mut self, slot: usize) -> Option<&mut ProcessAddressSpaceStorage> {
+        if slot >= PROCESS_RUNTIME_LIMIT {
+            return None;
+        }
+        if self.0.len() <= slot {
+            self.0.try_reserve(slot + 1 - self.0.len()).ok()?;
+            self.0
+                .resize_with(slot + 1, ProcessAddressSpaceStorage::default);
+        }
+        self.0.get_mut(slot)
+    }
+
+    fn slot(&self, slot: u16) -> Option<&ProcessAddressSpaceStorage> {
+        self.0.get(usize::from(slot))
+    }
+}
+
 /// Makes `list` a copy of `items`, reusing its buffer, and gives back memory
 /// when the list has shrunk to a fraction of it.
 fn replace_list<T: Copy>(list: &mut Vec<T>, items: &[T]) -> Option<()> {
@@ -318,69 +334,54 @@ fn replace_list<T: Copy>(list: &mut Vec<T>, items: &[T]) -> Option<()> {
     Some(())
 }
 
-/// Returns the storage for `storage_slot` of the current process instance,
-/// allocating it on first use.
-fn address_space_storage(storage_slot: usize) -> Option<&'static mut ProcessAddressSpaceStorage> {
-    if storage_slot >= PROCESS_RUNTIME_LIMIT {
-        return None;
-    }
-    // SAFETY: the table is only touched here, and the recursive kernel-entry
-    // boundary serializes process lifecycle operations.
-    let tables = unsafe { &mut *PROCESS_ADDRESS_SPACE_STORAGE.0.get() };
-    let table = tables.get_mut(current_process_instance())?;
-    if table.len() <= storage_slot {
-        table.try_reserve(storage_slot + 1 - table.len()).ok()?;
-        table.resize(storage_slot + 1, core::ptr::null_mut());
-    }
-    let entry = table.get_mut(storage_slot)?;
-    if entry.is_null() {
-        *entry = alloc::boxed::Box::into_raw(alloc::boxed::Box::default());
-    }
-    // SAFETY: the pointer comes from a Box that is never freed, and callers
-    // do not hold two references to one slot.
-    Some(unsafe { &mut **entry })
+/// Whether `hierarchy` and `mappings` are lists a process may hold: owned
+/// and distinct frames, page-aligned user pages never writable and
+/// executable at once, and page tables that map exactly those pages. Asked
+/// before the table's lock is taken: it walks the page tables.
+fn address_space_lists_valid(
+    hierarchy: &[memory::FrameLease],
+    mappings: &[cpu::LinuxActiveImageMapping],
+) -> bool {
+    !(hierarchy.len() < 4
+        || mappings.is_empty()
+        || !memory::frames_owned_by(memory::FrameOwner::KERNEL, hierarchy)
+        || hierarchy
+            .iter()
+            .enumerate()
+            .any(|(index, frame)| hierarchy[..index].contains(frame))
+        || mappings.iter().enumerate().any(|(index, mapping)| {
+            mapping.address == 0
+                || !mapping.address.is_multiple_of(PAGE_SIZE)
+                || mapping.writable && mapping.executable
+                || !(memory::frames_owned_by(memory::FrameOwner::KERNEL, &[mapping.frame])
+                    || memory::frame_lease_is_runtime(mapping.frame))
+                || hierarchy.contains(&mapping.frame)
+                || mappings[..index].iter().any(|prior| {
+                    prior.address == mapping.address
+                        || prior.frame == mapping.frame && !(mapping.shared && prior.shared)
+                })
+        })
+        || !address_space::validate_linux_process_address_space(hierarchy, mappings))
 }
 
 impl ProcessAddressSpace {
+    /// Checks `hierarchy` and `mappings` (`address_space_lists_valid`) and
+    /// stores them in `storage_slot` of `lists`.
     fn new(
+        lists: &mut SpaceLists,
         storage_slot: usize,
         hierarchy: &[memory::FrameLease],
         mappings: &[cpu::LinuxActiveImageMapping],
     ) -> Option<Self> {
-        if storage_slot >= PROCESS_RUNTIME_LIMIT
-            || hierarchy.len() < 4
-            || mappings.is_empty()
-            || !memory::frames_owned_by(memory::FrameOwner::KERNEL, hierarchy)
-            || hierarchy
-                .iter()
-                .enumerate()
-                .any(|(index, frame)| hierarchy[..index].contains(frame))
-            || mappings.iter().enumerate().any(|(index, mapping)| {
-                mapping.address == 0
-                    || !mapping.address.is_multiple_of(PAGE_SIZE)
-                    || mapping.writable && mapping.executable
-                    || !(memory::frames_owned_by(memory::FrameOwner::KERNEL, &[mapping.frame])
-                        || memory::frame_lease_is_runtime(mapping.frame))
-                    || hierarchy.contains(&mapping.frame)
-                    || mappings[..index].iter().any(|prior| {
-                        prior.address == mapping.address
-                            || prior.frame == mapping.frame && !(mapping.shared && prior.shared)
-                    })
-            })
-            || !address_space::validate_linux_process_address_space(hierarchy, mappings)
+        if storage_slot >= PROCESS_RUNTIME_LIMIT || !address_space_lists_valid(hierarchy, mappings)
         {
             return None;
         }
-        address_space_storage(storage_slot)?.store(hierarchy, mappings)?;
-        Some(Self {
-            storage_slot: u16::try_from(storage_slot).ok()?,
-            hierarchy_count: u32::try_from(hierarchy.len()).ok()?,
-            mapping_count: u32::try_from(mappings.len()).ok()?,
-            stale: false,
-        })
+        Self::from_validated_snapshot(lists, storage_slot, hierarchy, mappings)
     }
 
     fn from_validated_snapshot(
+        lists: &mut SpaceLists,
         storage_slot: usize,
         hierarchy: &[memory::FrameLease],
         mappings: &[cpu::LinuxActiveImageMapping],
@@ -388,7 +389,7 @@ impl ProcessAddressSpace {
         if storage_slot >= PROCESS_RUNTIME_LIMIT || hierarchy.len() < 4 || mappings.is_empty() {
             return None;
         }
-        address_space_storage(storage_slot)?.store(hierarchy, mappings)?;
+        lists.slot_mut(storage_slot)?.store(hierarchy, mappings)?;
         Some(Self {
             storage_slot: u16::try_from(storage_slot).ok()?,
             hierarchy_count: u32::try_from(hierarchy.len()).ok()?,
@@ -397,97 +398,84 @@ impl ProcessAddressSpace {
         })
     }
 
-    fn storage(&self) -> &'static ProcessAddressSpaceStorage {
-        // A ProcessAddressSpace exists only after its storage was allocated.
-        address_space_storage(usize::from(self.storage_slot))
-            .map(|storage| &*storage)
-            .expect("process address-space storage is allocated")
-    }
-
     // A copy of the address space made before its lists were last stored
     // can count more entries than they hold; it then sees none (and fails
     // validation) instead of reading past them.
-    fn hierarchy(&self) -> &[memory::FrameLease] {
-        self.storage()
-            .hierarchy
-            .get(..self.hierarchy_count as usize)
+    fn hierarchy<'a>(&self, lists: &'a SpaceLists) -> &'a [memory::FrameLease] {
+        lists
+            .slot(self.storage_slot)
+            .and_then(|storage| storage.hierarchy.get(..self.hierarchy_count as usize))
             .unwrap_or(&[])
     }
 
-    fn root(&self) -> memory::FrameLease {
-        self.hierarchy()
+    fn root(&self, lists: &SpaceLists) -> memory::FrameLease {
+        self.hierarchy(lists)
             .first()
             .copied()
             .unwrap_or(memory::FrameLease::EMPTY)
     }
 
-    fn mappings(&self) -> &[cpu::LinuxActiveImageMapping] {
-        self.storage()
-            .mappings
-            .get(..self.mapping_count as usize)
+    fn mappings<'a>(&self, lists: &'a SpaceLists) -> &'a [cpu::LinuxActiveImageMapping] {
+        lists
+            .slot(self.storage_slot)
+            .and_then(|storage| storage.mappings.get(..self.mapping_count as usize))
             .unwrap_or(&[])
     }
 
-    fn is_valid(&self) -> bool {
-        self.is_owned()
+    fn is_valid(&self, lists: &SpaceLists) -> bool {
+        self.is_owned(lists)
             && address_space::validate_linux_process_address_space(
-                self.hierarchy(),
-                self.mappings(),
+                self.hierarchy(lists),
+                self.mappings(lists),
             )
     }
 
-    fn is_owned(&self) -> bool {
-        memory::frames_owned_by(memory::FrameOwner::KERNEL, self.hierarchy())
-            && self.mappings().iter().all(|mapping| {
+    fn is_owned(&self, lists: &SpaceLists) -> bool {
+        memory::frames_owned_by(memory::FrameOwner::KERNEL, self.hierarchy(lists))
+            && self.mappings(lists).iter().all(|mapping| {
                 memory::frame_lease_is_runtime(mapping.frame)
                     || memory::frames_owned_by(memory::FrameOwner::KERNEL, &[mapping.frame])
             })
     }
 
-    fn hierarchy_is_owned(&self) -> bool {
-        memory::frames_owned_by(memory::FrameOwner::KERNEL, self.hierarchy())
+    fn hierarchy_is_owned(&self, lists: &SpaceLists) -> bool {
+        memory::frames_owned_by(memory::FrameOwner::KERNEL, self.hierarchy(lists))
     }
 
-    fn is_live(&self) -> bool {
-        memory::any_frame_lease_live(self.hierarchy())
-            || self.mappings().iter().any(|mapping| {
+    fn is_live(&self, lists: &SpaceLists) -> bool {
+        memory::any_frame_lease_live(self.hierarchy(lists))
+            || self.mappings(lists).iter().any(|mapping| {
                 !mapping.shared
                     && !memory::frame_lease_is_runtime(mapping.frame)
                     && memory::any_frame_lease_live(&[mapping.frame])
             })
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
-        self.hierarchy()
-            .iter()
-            .chain(
-                self.mappings()
-                    .iter()
-                    .filter(|mapping| {
-                        !mapping.shared && !memory::frame_lease_is_runtime(mapping.frame)
-                    })
-                    .map(|mapping| &mapping.frame),
-            )
-            .any(|left| {
-                other
-                    .hierarchy()
-                    .iter()
-                    .chain(
-                        other
-                            .mappings()
-                            .iter()
-                            .filter(|mapping| {
-                                !mapping.shared && !memory::frame_lease_is_runtime(mapping.frame)
-                            })
-                            .map(|mapping| &mapping.frame),
-                    )
-                    .any(|right| left.address() == right.address())
-            })
+    /// The page-table frames and private pages of the space.
+    fn private_frames<'a>(
+        &self,
+        lists: &'a SpaceLists,
+    ) -> impl Iterator<Item = &'a memory::FrameLease> + 'a {
+        self.hierarchy(lists).iter().chain(
+            self.mappings(lists)
+                .iter()
+                .filter(|mapping| !mapping.shared && !memory::frame_lease_is_runtime(mapping.frame))
+                .map(|mapping| &mapping.frame),
+        )
     }
 
-    fn scrub_and_release(&self) -> bool {
-        if !memory::frame_leases_releasable(memory::FrameOwner::KERNEL, self.hierarchy())
-            || self.mappings().iter().any(|mapping| {
+    fn overlaps(&self, other: &Self, lists: &SpaceLists) -> bool {
+        self.private_frames(lists).any(|left| {
+            other
+                .private_frames(lists)
+                .any(|right| left.address() == right.address())
+        })
+    }
+
+    fn scrub_and_release(&self, lists: &SpaceLists) -> bool {
+        let (hierarchy, mappings) = (self.hierarchy(lists), self.mappings(lists));
+        if !memory::frame_leases_releasable(memory::FrameOwner::KERNEL, hierarchy)
+            || mappings.iter().any(|mapping| {
                 !mapping.shared
                     && !memory::frame_lease_is_runtime(mapping.frame)
                     && !memory::frame_leases_releasable(
@@ -498,9 +486,8 @@ impl ProcessAddressSpace {
         {
             return false;
         }
-        let mut released =
-            memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, self.hierarchy());
-        for mapping in self.mappings() {
+        let mut released = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, hierarchy);
+        for mapping in mappings {
             if !mapping.shared && !memory::frame_lease_is_runtime(mapping.frame) {
                 released &=
                     memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[mapping.frame]);
@@ -509,7 +496,6 @@ impl ProcessAddressSpace {
         released
     }
 }
-
 #[derive(Clone, Copy)]
 struct Process {
     handle: ProcessHandle,
@@ -787,6 +773,44 @@ struct ProcessTable {
     /// runs while any of its threads can; it blocks as a whole only when
     /// all of them wait, on what any of them waits for.
     thread_blocks: Vec<ThreadBlock>,
+    /// The processes' address-space lists, by runtime slot.
+    spaces: SpaceLists,
+    /// Calls into the namespaces that table operations leave for after the
+    /// table's lock is released (`with_live_table`).
+    deferred: DeferredWork,
+}
+
+/// Namespace bookkeeping a table operation owes: the namespaces rank below
+/// the table (`LockRank::NAMESPACES`), so it is done once the table's lock
+/// is released.
+struct DeferredWork {
+    /// Processes reaped or never made, whose PID-namespace numbers go.
+    forget_pids: Vec<u32>,
+    /// The namespace sets processes still use: the others are dropped.
+    collect: Option<Vec<linux_namespace::Set>>,
+}
+
+impl DeferredWork {
+    const NONE: Self = Self {
+        forget_pids: Vec::new(),
+        collect: None,
+    };
+
+    /// Does the work, in the order it was owed: a reaped process's numbers
+    /// go before the sets are collected, which keep a namespace that still
+    /// numbers a live process.
+    fn run(self) {
+        if self.forget_pids.is_empty() && self.collect.is_none() {
+            return;
+        }
+        let instance = cpu::current_linux_execution_instance();
+        for pid in self.forget_pids {
+            linux_namespace::forget_pid(instance, pid);
+        }
+        if let Some(sets) = self.collect {
+            linux_namespace::collect(instance, &sets, crate::linux_sysv_ipc::release_instance);
+        }
+    }
 }
 
 /// A thread of a live process blocked in a system call, parked on its own
@@ -843,6 +867,19 @@ impl ProcessTable {
             sleepers_lossy: false,
             blocked: false,
             thread_blocks: Vec::new(),
+            spaces: SpaceLists::new(),
+            deferred: DeferredWork::NONE,
+        }
+    }
+
+    /// Owes `forget_pid` for `pid` (see `DeferredWork`). Only PID
+    /// namespaces number processes, so with none there is nothing to owe.
+    fn defer_forget_pid(&mut self, pid: u32) {
+        if !linux_namespace::any(linux_namespace::Kind::Pid) {
+            return;
+        }
+        if self.deferred.forget_pids.try_reserve(1).is_ok() {
+            self.deferred.forget_pids.push(pid);
         }
     }
 
@@ -871,10 +908,12 @@ impl ProcessTable {
         address_space: ProcessAddressSpace,
         context: ProcessExecutionContext,
     ) -> Option<ProcessHandle> {
+        // The page-table tree was checked as the lists were stored
+        // (`ProcessAddressSpace::new`), before the table's lock was taken.
         if self.init.is_some()
             || self.next_pid != 1
-            || !address_space.is_valid()
-            || !context.is_valid(&address_space)
+            || !address_space.is_owned(&self.spaces)
+            || !context.is_valid(&address_space, &self.spaces)
         {
             return None;
         }
@@ -949,7 +988,11 @@ impl ProcessTable {
         context: ProcessExecutionContext,
         validate_address_space: bool,
     ) -> bool {
-        if validate_address_space && !address_space.is_valid() || !context.is_valid(&address_space)
+        // The snapshot's page-table tree was checked before the table's lock
+        // was taken (`address_space_lists_valid`); its frames still have to
+        // be owned.
+        if validate_address_space && !address_space.is_owned(&self.spaces)
+            || !context.is_valid(&address_space, &self.spaces)
         {
             return false;
         }
@@ -984,17 +1027,18 @@ impl ProcessTable {
         context: ProcessExecutionContext,
         validate_address_space: bool,
     ) -> bool {
-        if !context.is_valid(&address_space)
+        let lists = &self.spaces;
+        if !context.is_valid(&address_space, lists)
             || validate_address_space
-                && (!address_space.is_valid()
+                && (!address_space.is_valid(lists)
                     || self.processes.iter().flatten().any(|process| {
                         // A stale list may name frames freed since and now
                         // another's; the live page tables are its record.
                         process.address_space.is_some_and(|existing| {
-                            !existing.stale && existing.overlaps(&address_space)
+                            !existing.stale && existing.overlaps(&address_space, lists)
                         }) || process
                             .retiring_address_space
-                            .is_some_and(|existing| existing.overlaps(&address_space))
+                            .is_some_and(|existing| existing.overlaps(&address_space, lists))
                     }))
         {
             return false;
@@ -1032,7 +1076,8 @@ impl ProcessTable {
         if process.state != ProcessState::Running || process.scheduler_thread.is_some() {
             return false;
         }
-        let Some(scheduler_context) = context.scheduler_context(&address_space) else {
+        let Some(scheduler_context) = context.scheduler_context(&address_space, &self.spaces)
+        else {
             return false;
         };
         let Some(thread) = run_queue.admit(domain, scheduler_context) else {
@@ -1087,62 +1132,65 @@ impl ProcessTable {
         true
     }
 
-    fn commit_cloned_fork(
+    /// The first part of `commit_cloned_fork`, under the table's lock:
+    /// checks the prepared child `handle`, its parent and the frames
+    /// allocated for the child, and copies what the rest needs (the
+    /// parent's lists, the child's mapping list, the parent pages to copy)
+    /// into `lists`. Backs the fork out (`abort_fork`) when it refuses.
+    fn plan_cloned_fork(
         &mut self,
         handle: ProcessHandle,
         child_hierarchy: &[memory::FrameLease],
         child_pages: &[memory::FrameLease],
         share_vm: bool,
-    ) -> bool {
+        lists: &mut ForkLists,
+    ) -> Option<ForkCopy> {
         process_runtime()
             .fork_execution_stage
             .store(1131, Ordering::Release);
-        let Some(preparing) = self.process(handle) else {
-            return false;
-        };
+        let preparing = self.process(handle)?;
         if preparing.state != ProcessState::Preparing
             || preparing.address_space.is_some()
             || preparing.retiring_address_space.is_some()
         {
-            return false;
+            return None;
         }
-        let Some(parent_handle) = preparing.parent else {
+        let Some((parent_handle, parent_space, parent_context, parent_running)) =
+            preparing.parent.and_then(|parent_handle| {
+                let parent = self.process(parent_handle)?;
+                Some((
+                    parent_handle,
+                    parent.address_space?,
+                    parent.context?,
+                    parent.state == ProcessState::Running,
+                ))
+            })
+        else {
             let _ = self.abort_fork(handle);
-            return false;
-        };
-        let Some(parent) = self.process(parent_handle) else {
-            let _ = self.abort_fork(handle);
-            return false;
-        };
-        let Some(parent_space) = parent.address_space.as_ref() else {
-            let _ = self.abort_fork(handle);
-            return false;
-        };
-        let Some(parent_context) = parent.context else {
-            let _ = self.abort_fork(handle);
-            return false;
+            return None;
         };
         process_runtime()
             .fork_execution_stage
             .store(1132, Ordering::Release);
         // Each reason the commit can refuse the prepared child has a stage
         // of its own, so a fork that fails with EAGAIN names it in the log.
-        let parent_pid = parent.handle.pid;
+        let parent_pid = parent_handle.pid;
+        let spaces = &self.spaces;
         let hierarchy_owned = if share_vm {
-            parent_space.hierarchy_is_owned()
+            parent_space.hierarchy_is_owned(spaces)
         } else {
-            parent_space.is_owned()
+            parent_space.is_owned(spaces)
         };
-        let copy_count = parent_space
-            .mappings()
+        let parent_mappings = parent_space.mappings(spaces);
+        let copy_count = parent_mappings
             .iter()
             .filter(|mapping| !mapping.dontfork && mapping_requires_fork_copy(mapping))
             .count();
-        let refused = if parent.state != ProcessState::Running {
+        let refused = if !parent_running {
             Some(1191)
         } else if !hierarchy_owned {
             Some(1192)
-        } else if child_hierarchy.len() != parent_space.hierarchy().len() {
+        } else if child_hierarchy.len() != parent_space.hierarchy(spaces).len() {
             Some(1193)
         } else if !child_pages.is_empty() && child_pages.len() != copy_count {
             Some(1194)
@@ -1154,44 +1202,40 @@ impl ProcessTable {
                 .fork_execution_stage
                 .store(stage, Ordering::Release);
             let _ = self.abort_fork(handle);
-            return false;
+            return None;
         }
         // Sets stages 1195..=1199 itself, one per check that can refuse.
         if !self.resources_available(parent_pid, child_hierarchy, child_pages) {
             let _ = self.abort_fork(handle);
-            return false;
+            return None;
         }
 
-        let scratch = unsafe { &mut *process_scratch().fork_scratch.get() };
         process_runtime()
             .fork_execution_stage
             .store(1133, Ordering::Release);
-        let parent_page_capacity = if child_pages.is_empty() {
-            0
-        } else {
-            child_pages.len()
-        };
+        let spaces = &self.spaces;
+        let parent_mappings = parent_space.mappings(spaces);
         if address_space::fill_list(
-            &mut scratch.child_mappings,
-            parent_space.mappings().len(),
+            &mut lists.child_mappings,
+            parent_mappings.len(),
             cpu::LinuxActiveImageMapping::EMPTY,
         )
         .is_none()
             || address_space::fill_list(
-                &mut scratch.parent_pages,
-                parent_page_capacity,
+                &mut lists.parent_pages,
+                child_pages.len(),
                 memory::FrameLease::EMPTY,
             )
             .is_none()
+            || replace_list(&mut lists.parent_mappings, parent_mappings).is_none()
+            || replace_list(&mut lists.parent_hierarchy, parent_space.hierarchy(spaces)).is_none()
         {
             let _ = self.abort_fork(handle);
-            return false;
+            return None;
         }
-        let child_mappings = &mut scratch.child_mappings;
-        let parent_pages = &mut scratch.parent_pages;
         let mut private_index = 0;
         let mut child_mapping_count = 0;
-        for parent in parent_space.mappings() {
+        for parent in parent_mappings {
             if parent.dontfork && !share_vm {
                 continue;
             }
@@ -1204,7 +1248,7 @@ impl ProcessTable {
                 private_index += 1;
                 frame
             };
-            child_mappings[child_mapping_count] = cpu::LinuxActiveImageMapping {
+            lists.child_mappings[child_mapping_count] = cpu::LinuxActiveImageMapping {
                 address: parent.address,
                 frame,
                 writable: parent.writable,
@@ -1216,120 +1260,85 @@ impl ProcessTable {
         }
         let mut parent_page_count = 0;
         if !child_pages.is_empty() {
-            for mapping in parent_space
-                .mappings()
+            for mapping in parent_mappings
                 .iter()
                 .filter(|mapping| !mapping.dontfork && mapping_requires_fork_copy(mapping))
             {
-                parent_pages[parent_page_count] = mapping.frame;
+                lists.parent_pages[parent_page_count] = mapping.frame;
                 parent_page_count += 1;
             }
         }
-        process_runtime()
-            .fork_execution_stage
-            .store(1134, Ordering::Release);
-        let published = child_pages.is_empty()
-            || private_index == child_pages.len()
-                && parent_page_count == child_pages.len()
-                && copy_validated_private_pages(
-                    parent_space.mappings(),
-                    parent_space.root(),
-                    &parent_pages[..parent_page_count],
-                    child_pages,
-                );
-        process_runtime()
-            .fork_execution_stage
-            .store(1135, Ordering::Release);
-        let published = published
-            && address_space::clone_validated_linux_process_hierarchy(
-                parent_space.mappings(),
-                parent_space.hierarchy(),
-                child_hierarchy,
-                child_pages,
-                share_vm,
-            );
-        process_runtime()
-            .fork_execution_stage
-            .store(1136, Ordering::Release);
-        let child_space = if published {
-            process_runtime()
-                .fork_execution_stage
-                .store(11361, Ordering::Release);
-            let Some(storage_slot) = self.free_runtime_slot() else {
-                if child_pages.is_empty() {
-                    let _ = address_space::release_linux_leaf_pages(child_hierarchy[0]);
-                }
-                let _ = scrub_candidate_resources(child_hierarchy, child_pages);
-                let _ = self.abort_fork(handle);
-                return false;
-            };
-            ProcessAddressSpace::from_validated_snapshot(
-                storage_slot,
-                child_hierarchy,
-                &child_mappings[..child_mapping_count],
-            )
-        } else {
-            None
-        };
-        process_runtime()
-            .fork_execution_stage
-            .store(1137, Ordering::Release);
-        if child_space.is_none() {
-            crate::serial_write("linox: runtime fork clone state published/hierarchy/mappings: ");
-            crate::serial_write_u64(u64::from(published));
-            crate::serial_write(" ");
-            crate::serial_write_u64(child_hierarchy.len() as u64);
-            crate::serial_write(" ");
-            crate::serial_write_u64(child_mapping_count as u64);
-            crate::serial_write("\r\n");
-        }
-        if let Some(child_space) = child_space {
-            process_runtime()
-                .fork_execution_stage
-                .store(1138, Ordering::Release);
-            let attachments_inherited =
-                crate::linux_sysv_ipc::inherit_process_attachments(parent_handle.pid, handle.pid)
-                    .is_ok();
-            process_runtime().fork_execution_stage.store(
-                if attachments_inherited { 11381 } else { 11380 },
-                Ordering::Release,
-            );
-            if attachments_inherited
-                && self.commit_fork_inner(handle, child_space, parent_context.fork_child(), false)
-            {
-                if let Some(child) = self.process_mut(handle) {
-                    child.shares_parent_vm = share_vm;
-                }
-                process_runtime()
-                    .fork_execution_stage
-                    .store(1139, Ordering::Release);
-                return true;
-            }
-            if attachments_inherited {
-                process_runtime()
-                    .fork_execution_stage
-                    .store(11382, Ordering::Release);
-                crate::serial_write("linox: runtime fork child context validation error: ");
-                crate::serial_write_u64(u64::from(
-                    parent_context
-                        .fork_child()
-                        .validation_error(&child_space)
-                        .unwrap_or(0),
-                ));
-                crate::serial_write("\r\n");
-            }
-            if attachments_inherited {
-                let _ = crate::linux_sysv_ipc::drop_process_attachments(handle.pid);
-            }
-        }
-        if published && child_pages.is_empty() {
-            let _ = address_space::release_linux_leaf_pages(child_hierarchy[0]);
-        }
-        let _ = scrub_candidate_resources(child_hierarchy, child_pages);
-        let _ = self.abort_fork(handle);
-        false
+        Some(ForkCopy {
+            parent_pid,
+            parent_root: parent_space.root(spaces),
+            parent_context,
+            child_mapping_count,
+            parent_page_count,
+            private_index,
+        })
     }
 
+    /// Stores the child's lists of a fork whose pages were copied, in the
+    /// lowest free runtime slot, which the prepared child holds from now
+    /// on so no other fork takes it. Err(()) when every slot is taken.
+    fn store_cloned_fork_space(
+        &mut self,
+        handle: ProcessHandle,
+        child_hierarchy: &[memory::FrameLease],
+        child_mappings: &[cpu::LinuxActiveImageMapping],
+    ) -> Result<Option<ProcessAddressSpace>, ()> {
+        process_runtime()
+            .fork_execution_stage
+            .store(11361, Ordering::Release);
+        let storage_slot = self.free_runtime_slot().ok_or(())?;
+        let Some(space) = ProcessAddressSpace::from_validated_snapshot(
+            &mut self.spaces,
+            storage_slot,
+            child_hierarchy,
+            child_mappings,
+        ) else {
+            return Ok(None);
+        };
+        let Some(child) = self
+            .process_mut(handle)
+            .filter(|child| child.state == ProcessState::Preparing)
+        else {
+            return Ok(None);
+        };
+        child.runtime_slot = Some(space.storage_slot);
+        Ok(Some(space))
+    }
+
+    /// The last part of `commit_cloned_fork`, under the table's lock: makes
+    /// `child_space` the prepared child's and the child runnable.
+    fn finish_cloned_fork(
+        &mut self,
+        handle: ProcessHandle,
+        child_space: ProcessAddressSpace,
+        context: ProcessExecutionContext,
+        share_vm: bool,
+    ) -> bool {
+        if self.commit_fork_inner(handle, child_space, context, false) {
+            if let Some(child) = self.process_mut(handle) {
+                child.shares_parent_vm = share_vm;
+            }
+            process_runtime()
+                .fork_execution_stage
+                .store(1139, Ordering::Release);
+            return true;
+        }
+        process_runtime()
+            .fork_execution_stage
+            .store(11382, Ordering::Release);
+        crate::serial_write("linox: runtime fork child context validation error: ");
+        crate::serial_write_u64(u64::from(
+            context
+                .validation_error(&child_space, &self.spaces)
+                .unwrap_or(0),
+        ));
+        crate::serial_write("\r\n");
+        false
+    }
     fn resources_available(
         &self,
         parent_pid: u32,
@@ -1381,8 +1390,8 @@ impl ProcessTable {
             .filter(checked)
             .all(|process| {
                 process.address_space.into_iter().all(|space| {
-                    !space.hierarchy().iter().any(candidate)
-                        && !space.mappings().iter().any(|mapping| {
+                    !space.hierarchy(&self.spaces).iter().any(candidate)
+                        && !space.mappings(&self.spaces).iter().any(|mapping| {
                             !mapping.shared
                                 && !memory::frame_lease_is_runtime(mapping.frame)
                                 && candidate(&mapping.frame)
@@ -1413,8 +1422,11 @@ impl ProcessTable {
             // yet when the allocator hands its frames to this fork.
             let listed = self.processes.iter().flatten().find_map(|process| {
                 let space = process.address_space.as_ref()?;
-                let in_hierarchy = space.hierarchy().iter().find(|frame| candidate(frame));
-                let in_mappings = space.mappings().iter().find(|mapping| {
+                let in_hierarchy = space
+                    .hierarchy(&self.spaces)
+                    .iter()
+                    .find(|frame| candidate(frame));
+                let in_mappings = space.mappings(&self.spaces).iter().find(|mapping| {
                     !mapping.shared
                         && !memory::frame_lease_is_runtime(mapping.frame)
                         && candidate(&mapping.frame)
@@ -1436,10 +1448,15 @@ impl ProcessTable {
                     .as_ref()
                     .and_then(|space| {
                         space
-                            .hierarchy()
+                            .hierarchy(&self.spaces)
                             .iter()
                             .copied()
-                            .chain(space.mappings().iter().map(|mapping| mapping.frame))
+                            .chain(
+                                space
+                                    .mappings(&self.spaces)
+                                    .iter()
+                                    .map(|mapping| mapping.frame),
+                            )
                             .find(|lease| lease.address() == frame)
                     })
                     .map_or(0, |lease| u64::from(lease.generation()));
@@ -1487,7 +1504,7 @@ impl ProcessTable {
         self.forget_pid_slot(handle.pid);
         self.groups[usize::from(handle.slot)] = Vec::new();
         self.roots[usize::from(handle.slot)] = Vec::new();
-        linux_namespace::forget_pid(cpu::current_linux_execution_instance(), handle.pid);
+        self.defer_forget_pid(handle.pid);
         true
     }
 
@@ -1496,13 +1513,15 @@ impl ProcessTable {
         handle: ProcessHandle,
         expected_space: ProcessAddressSpace,
     ) -> Option<ProcessAddressSpace> {
+        if !expected_space.is_owned(&self.spaces) {
+            return None;
+        }
         let process = self.process_mut(handle)?;
         if process.state != ProcessState::Running
             || process.address_space != Some(expected_space)
             || process.retiring_address_space.is_some()
             || process.context.is_none()
             || process.scheduler_thread.is_some()
-            || !expected_space.is_owned()
         {
             return None;
         }
@@ -1558,7 +1577,7 @@ impl ProcessTable {
     }
 
     fn exit(&mut self, handle: ProcessHandle, status: u8) -> bool {
-        let Some(process) = self.process_mut(handle) else {
+        let Some(process) = self.process(handle) else {
             return false;
         };
         if process.state != ProcessState::Exiting
@@ -1571,9 +1590,12 @@ impl ProcessTable {
         let Some(retiring) = process.retiring_address_space else {
             return false;
         };
-        if retiring.is_live() {
+        if retiring.is_live(&self.spaces) {
             return false;
         }
+        let Some(process) = self.process_mut(handle) else {
+            return false;
+        };
         process.retiring_address_space = None;
         process.wait_event = None;
         process.state = ProcessState::Zombie { status };
@@ -1672,7 +1694,7 @@ impl ProcessTable {
             || process.context.is_some()
             || process.scheduler_thread.is_some()
             || expected_space
-                .hierarchy()
+                .hierarchy(&self.spaces)
                 .iter()
                 .any(|frame| memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]))
         {
@@ -1735,7 +1757,7 @@ impl ProcessTable {
         {
             let _ = linux_user::retire(process.user_namespace);
         }
-        linux_namespace::forget_pid(cpu::current_linux_execution_instance(), pid);
+        self.defer_forget_pid(pid);
         self.collect_namespaces();
         Some(WaitResult { pid, status })
     }
@@ -1996,12 +2018,13 @@ impl ProcessTable {
         let process = self.process(handle)?;
         let address_space = process.address_space.as_ref()?;
         let context = process.context?;
-        if process.state != ProcessState::Running || !context.is_valid(address_space) {
+        if process.state != ProcessState::Running || !context.is_valid(address_space, &self.spaces)
+        {
             return None;
         }
         Some(LiveProcessDispatch {
             pid: handle.pid,
-            root: address_space.root(),
+            root: address_space.root(&self.spaces),
             general: context.general,
             rip: context.rip,
             rsp: context.rsp,
@@ -2085,12 +2108,10 @@ impl ProcessTable {
             None => linux_namespace::Set::default(),
         };
         // A child born into a PID namespace gets its numbers there, and the
-        // time namespace it enters keeps its offsets from now on.
-        let instance = cpu::current_linux_execution_instance();
-        linux_namespace::enter_pid(instance, namespaces.pid, pid).ok()?;
-        if namespaces.time != 0 {
-            linux_namespace::freeze_time(instance, namespaces.time);
-        }
+        // time namespace it enters keeps its offsets from now on: the caller
+        // enters them once the table's lock is released (`enter_namespaces`),
+        // and backs the child out if that fails. A process without a parent
+        // starts in the initial ones, which need neither.
         // A new process's groups are its parent's; the first is in group 0.
         let inherited: &[u32] = match parent {
             Some(parent) => self.groups.get(usize::from(parent.slot))?,
@@ -2170,8 +2191,9 @@ impl ProcessTable {
         Some(handle)
     }
 
-    /// Drops the namespaces no process of the table uses any more.
-    fn collect_namespaces(&self) {
+    /// Drops the namespaces no process of the table uses any more, once
+    /// the table's lock is released (`DeferredWork`).
+    fn collect_namespaces(&mut self) {
         let mut sets = Vec::new();
         if sets.try_reserve(self.processes.len()).is_err() {
             return;
@@ -2182,11 +2204,8 @@ impl ProcessTable {
                 .flatten()
                 .map(|process| process.namespaces),
         );
-        linux_namespace::collect(
-            cpu::current_linux_execution_instance(),
-            &sets,
-            crate::linux_sysv_ipc::release_instance,
-        );
+        // A later collection sees every set an earlier one would have.
+        self.deferred.collect = Some(sets);
     }
 
     fn process_group(&self, pid: u32) -> Option<(u32, u32)> {
@@ -2290,12 +2309,6 @@ impl ProcessTable {
         let Some(handle) = self.handle_by_pid(pid) else {
             return false;
         };
-        let Some(process) = self
-            .process_mut(handle)
-            .filter(|process| process.state == ProcessState::Running)
-        else {
-            return false;
-        };
         let context = ProcessExecutionContext {
             general: [0; 15],
             rip,
@@ -2303,13 +2316,17 @@ impl ProcessTable {
             rflags: (1 << 1) | (1 << 9),
             fs_base: 0,
         };
-        if process
-            .address_space
-            .as_ref()
-            .is_none_or(|space| !context.is_valid(space))
+        if self
+            .process(handle)
+            .filter(|process| process.state == ProcessState::Running)
+            .and_then(|process| process.address_space)
+            .is_none_or(|space| !context.is_valid(&space, &self.spaces))
         {
             return false;
         }
+        let Some(process) = self.process_mut(handle) else {
+            return false;
+        };
         process.context = Some(context);
         process.executed = true;
         process.posix_timers = [None; POSIX_TIMER_LIMIT];
@@ -2322,6 +2339,25 @@ impl ProcessTable {
         // A vfork parent waits for this.
         self.wake_state_waiters(handle);
         true
+    }
+
+    /// Process `pid`'s address space and its lists, to change both.
+    fn space_lists_mut(
+        &mut self,
+        pid: u32,
+    ) -> Option<(&mut ProcessAddressSpace, &mut ProcessAddressSpaceStorage)> {
+        let handle = self.handle_by_pid(pid)?;
+        let Self {
+            processes, spaces, ..
+        } = self;
+        let space = processes
+            .get_mut(usize::from(handle.slot))?
+            .as_mut()
+            .filter(|process| process.handle == handle)?
+            .address_space
+            .as_mut()?;
+        let storage = spaces.slot_mut(usize::from(space.storage_slot))?;
+        Some((space, storage))
     }
 
     fn process(&self, handle: ProcessHandle) -> Option<&Process> {
@@ -2337,6 +2373,169 @@ impl ProcessTable {
             .as_mut()
             .filter(|process| process.handle == handle)
     }
+}
+
+/// How fork code reaches a table: a domain's live table through its lock
+/// (`LiveTable`), or a table the caller owns (the lifecycle check's).
+trait TableAccess {
+    /// Runs `f` on the table, then the namespace work it owes; None when
+    /// there is no table.
+    fn with<R>(&mut self, f: impl FnOnce(&mut ProcessTable) -> R) -> Option<R>;
+}
+
+/// The active instance's live table, through `with_live_table`.
+struct LiveTable;
+
+impl TableAccess for LiveTable {
+    fn with<R>(&mut self, f: impl FnOnce(&mut ProcessTable) -> R) -> Option<R> {
+        with_live_table(f)
+    }
+}
+
+impl TableAccess for ProcessTable {
+    fn with<R>(&mut self, f: impl FnOnce(&mut ProcessTable) -> R) -> Option<R> {
+        let result = f(self);
+        core::mem::replace(&mut self.deferred, DeferredWork::NONE).run();
+        Some(result)
+    }
+}
+
+/// The lists a fork works from (see `LiveForkScratch`).
+struct ForkLists {
+    /// The child's mapping list, built from the parent's.
+    child_mappings: Vec<cpu::LinuxActiveImageMapping>,
+    /// The parent's pages the child gets copies of.
+    parent_pages: Vec<memory::FrameLease>,
+    /// The parent's lists as the fork found them, for the page copies and
+    /// the page-table clone made with the table's lock released.
+    parent_mappings: Vec<cpu::LinuxActiveImageMapping>,
+    parent_hierarchy: Vec<memory::FrameLease>,
+}
+
+/// What `ProcessTable::plan_cloned_fork` found, for the copy made with the
+/// table's lock released.
+struct ForkCopy {
+    parent_pid: u32,
+    parent_root: memory::FrameLease,
+    parent_context: ProcessExecutionContext,
+    /// How much of `ForkLists::child_mappings` and `parent_pages` is filled.
+    child_mapping_count: usize,
+    parent_page_count: usize,
+    /// The private pages handed to the child's mappings.
+    private_index: usize,
+}
+
+/// Commits the prepared fork child `handle`: copies its parent's private
+/// pages into `child_pages` (none: the child maps the parent's
+/// copy-on-write, or all of them with `share_vm`), clones the parent's page
+/// tables into `child_hierarchy`, registers the child's lists and makes it
+/// runnable. The table's lock is held only to check and to record: the
+/// page copies, the page-table clone (which duplicates swap entries) and the
+/// System V attachments the child inherits are done between holds. On
+/// failure the child's frames are released and the fork backed out.
+fn commit_cloned_fork(
+    table: &mut impl TableAccess,
+    handle: ProcessHandle,
+    child_hierarchy: &[memory::FrameLease],
+    child_pages: &[memory::FrameLease],
+    share_vm: bool,
+    lists: &mut ForkLists,
+) -> bool {
+    let Some(copy) = table
+        .with(|table| table.plan_cloned_fork(handle, child_hierarchy, child_pages, share_vm, lists))
+        .flatten()
+    else {
+        return false;
+    };
+    process_runtime()
+        .fork_execution_stage
+        .store(1134, Ordering::Release);
+    let published = child_pages.is_empty()
+        || copy.private_index == child_pages.len()
+            && copy.parent_page_count == child_pages.len()
+            && copy_validated_private_pages(
+                &lists.parent_mappings,
+                copy.parent_root,
+                &lists.parent_pages[..copy.parent_page_count],
+                child_pages,
+            );
+    process_runtime()
+        .fork_execution_stage
+        .store(1135, Ordering::Release);
+    let published = published
+        && address_space::clone_validated_linux_process_hierarchy(
+            &lists.parent_mappings,
+            &lists.parent_hierarchy,
+            child_hierarchy,
+            child_pages,
+            share_vm,
+        );
+    process_runtime()
+        .fork_execution_stage
+        .store(1136, Ordering::Release);
+    let child_mappings = &lists.child_mappings[..copy.child_mapping_count];
+    let child_space = if published {
+        let stored = table
+            .with(|table| table.store_cloned_fork_space(handle, child_hierarchy, child_mappings))
+            .unwrap_or(Ok(None));
+        let Ok(child_space) = stored else {
+            if child_pages.is_empty() {
+                let _ = address_space::release_linux_leaf_pages(child_hierarchy[0]);
+            }
+            let _ = scrub_candidate_resources(child_hierarchy, child_pages);
+            let _ = table.with(|table| table.abort_fork(handle));
+            return false;
+        };
+        child_space
+    } else {
+        None
+    };
+    process_runtime()
+        .fork_execution_stage
+        .store(1137, Ordering::Release);
+    if child_space.is_none() {
+        crate::serial_write("linox: runtime fork clone state published/hierarchy/mappings: ");
+        crate::serial_write_u64(u64::from(published));
+        crate::serial_write(" ");
+        crate::serial_write_u64(child_hierarchy.len() as u64);
+        crate::serial_write(" ");
+        crate::serial_write_u64(copy.child_mapping_count as u64);
+        crate::serial_write("\r\n");
+    }
+    if let Some(child_space) = child_space {
+        process_runtime()
+            .fork_execution_stage
+            .store(1138, Ordering::Release);
+        let attachments_inherited =
+            crate::linux_sysv_ipc::inherit_process_attachments(copy.parent_pid, handle.pid).is_ok();
+        process_runtime().fork_execution_stage.store(
+            if attachments_inherited { 11381 } else { 11380 },
+            Ordering::Release,
+        );
+        if attachments_inherited
+            && table
+                .with(|table| {
+                    table.finish_cloned_fork(
+                        handle,
+                        child_space,
+                        copy.parent_context.fork_child(),
+                        share_vm,
+                    )
+                })
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        if attachments_inherited {
+            let _ = crate::linux_sysv_ipc::drop_process_attachments(handle.pid);
+        }
+    }
+    if published && child_pages.is_empty() {
+        let _ = address_space::release_linux_leaf_pages(child_hierarchy[0]);
+    }
+    let _ = scrub_candidate_resources(child_hierarchy, child_pages);
+    let _ = table.with(|table| table.abort_fork(handle));
+    false
 }
 
 fn test_mapping(
@@ -2362,13 +2561,15 @@ fn write_test_hierarchy(
     if hierarchy.len() != 4 || mappings.is_empty() {
         return false;
     }
-    let mut tables = [core::ptr::null_mut::<u64>(); 4];
+    let mut tables = [None; 4];
     for (table, frame) in tables.iter_mut().zip(hierarchy) {
-        let Some(address) = frame.direct_map_address() else {
-            return false;
-        };
-        *table = address as *mut u64;
-        unsafe { core::ptr::write_bytes(*table, 0, PAGE_SIZE / size_of::<u64>()) };
+        *table = Frame::leased(*frame);
+    }
+    let [Some(top), Some(upper), Some(middle), Some(leaf)] = tables else {
+        return false;
+    };
+    for table in tables.into_iter().flatten() {
+        table.zero();
     }
     let branch_flags = PRESENT | WRITABLE | USER;
     for mapping in mappings {
@@ -2378,24 +2579,17 @@ fn write_test_hierarchy(
             (mapping.address >> 21) & 0x1ff,
             (mapping.address >> 12) & 0x1ff,
         ];
-        unsafe {
-            tables[0]
-                .add(indexes[0])
-                .write(hierarchy[1].address() | branch_flags);
-            tables[1]
-                .add(indexes[1])
-                .write(hierarchy[2].address() | branch_flags);
-            tables[2]
-                .add(indexes[2])
-                .write(hierarchy[3].address() | branch_flags);
-            tables[3].add(indexes[3]).write(
-                mapping.frame.address()
-                    | PRESENT
-                    | USER
-                    | if mapping.writable { WRITABLE } else { 0 }
-                    | if mapping.executable { 0 } else { NO_EXECUTE },
-            );
-        }
+        top.write_u64(indexes[0], hierarchy[1].address() | branch_flags);
+        upper.write_u64(indexes[1], hierarchy[2].address() | branch_flags);
+        middle.write_u64(indexes[2], hierarchy[3].address() | branch_flags);
+        leaf.write_u64(
+            indexes[3],
+            mapping.frame.address()
+                | PRESENT
+                | USER
+                | if mapping.writable { WRITABLE } else { 0 }
+                | if mapping.executable { 0 } else { NO_EXECUTE },
+        );
     }
     true
 }
@@ -2411,22 +2605,24 @@ fn test_context() -> ProcessExecutionContext {
 }
 
 fn verify_user_kernel_mapping_rejected(root: memory::FrameLease) -> bool {
-    let Some(address) = root.direct_map_address() else {
+    let Some(table) = Frame::leased(root) else {
         return false;
     };
-    let entry = unsafe { (address as *mut u64).add(256) };
-    let original = unsafe { entry.read() };
-    unsafe { entry.write(original | USER) };
+    let original = table.read_u64(256);
+    table.write_u64(256, original | USER);
     let rejected = !address_space::verify_linux_process_root_activation(root);
-    unsafe { entry.write(original) };
-    rejected && unsafe { entry.read() } == original
+    table.write_u64(256, original);
+    rejected && table.read_u64(256) == original
 }
 
 pub(crate) fn verify_lifecycle_contract() -> bool {
-    // Address-space storage is allocated on first use and kept. Allocate the
-    // slots this check uses (0 to 5) first, so the frame count it compares
-    // at the end covers only the frames the lifecycle takes and returns.
-    if (0..6).any(|slot| address_space_storage(slot).is_none()) {
+    // The check's own table, which only it reaches. Its address-space lists
+    // are allocated on first use: allocate the slots this check uses (0 to
+    // 5) first, so the frame count it compares at the end covers only the
+    // frames the lifecycle takes and returns.
+    let mut table = ProcessTable::new();
+    let mut fork_lists = LiveForkScratch::EMPTY.lists;
+    if table.spaces.slot_mut(5).is_none() {
         return false;
     }
     // The heap keeps the frames it grows by (the test table's slots live
@@ -2459,13 +2655,12 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         crate::serial_write("linox: lifecycle stage kernel inheritance failed\r\n");
         return false;
     }
-    let Some(init_space) = ProcessAddressSpace::new(0, &frames[0..4], &init_mappings) else {
+    let Some(init_space) =
+        ProcessAddressSpace::new(&mut table.spaces, 0, &frames[0..4], &init_mappings)
+    else {
         return false;
     };
     let init_context = test_context();
-    let table = process_runtime().test_table.get().cast::<ProcessTable>();
-    unsafe { table.write(ProcessTable::new()) };
-    let table = unsafe { &mut *table };
     let mut invalid_context = init_context;
     invalid_context.rip = (TEST_USER_ADDRESS + PAGE_SIZE) as u64;
     if table.create_init(init_space, invalid_context).is_some() {
@@ -2489,7 +2684,8 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     let Some(init) = table.create_init(init_space, init_context) else {
         return false;
     };
-    let Some(init_scheduler_context) = init_context.scheduler_context(&init_space) else {
+    let Some(init_scheduler_context) = init_context.scheduler_context(&init_space, &table.spaces)
+    else {
         return false;
     };
     let mut run_queue = scheduler::ProcessScheduler::new();
@@ -2512,7 +2708,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         return false;
     }
     let Some(shared_page_space) =
-        ProcessAddressSpace::new(1, &frames[6..10], &shared_page_mappings)
+        ProcessAddressSpace::new(&mut table.spaces, 1, &frames[6..10], &shared_page_mappings)
     else {
         return false;
     };
@@ -2540,16 +2736,16 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     wrong_permission[0].executable = false;
     let mut wrong_address = first_mappings;
     wrong_address[0].address += 2 * PAGE_SIZE;
-    if ProcessAddressSpace::new(4, &frames[6..10], &wrong_permission)
-        .is_some_and(|space| space.is_valid())
-        || ProcessAddressSpace::new(5, &frames[6..10], &wrong_address)
-            .is_some_and(|space| space.is_valid())
+    if ProcessAddressSpace::new(&mut table.spaces, 4, &frames[6..10], &wrong_permission)
+        .is_some_and(|space| space.is_valid(&table.spaces))
+        || ProcessAddressSpace::new(&mut table.spaces, 5, &frames[6..10], &wrong_address)
+            .is_some_and(|space| space.is_valid(&table.spaces))
     {
         return false;
     }
     let (Some(first_space), Some(mut second_space)) = (
-        ProcessAddressSpace::new(1, &frames[6..10], &first_mappings),
-        ProcessAddressSpace::new(2, &frames[12..16], &second_mappings),
+        ProcessAddressSpace::new(&mut table.spaces, 1, &frames[6..10], &first_mappings),
+        ProcessAddressSpace::new(&mut table.spaces, 2, &frames[12..16], &second_mappings),
     ) else {
         return false;
     };
@@ -2563,7 +2759,8 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     let mut stale_hierarchy: [memory::FrameLease; 4] =
         core::array::from_fn(|index| frames[6 + index]);
     stale_hierarchy[0] = stale_root;
-    let stale_space = ProcessAddressSpace::new(3, &stale_hierarchy, &first_mappings);
+    let stale_space =
+        ProcessAddressSpace::new(&mut table.spaces, 3, &stale_hierarchy, &first_mappings);
     let stale_expected = ProcessAddressSpace {
         storage_slot: 3,
         hierarchy_count: first_space.hierarchy_count,
@@ -2576,12 +2773,19 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         || table.create_session(init.pid) != Err(ProcessGroupError::Permission)
         || table.create_init(first_space, init_context).is_some()
         || table.commit_fork(rejected_child, init_space, init_context.fork_child())
-        || stale_space.is_some_and(|space| space.is_valid())
+        || stale_space.is_some_and(|space| space.is_valid(&table.spaces))
         || address_space::verify_linux_process_root_activation(stale_root)
         || table.wait(init, rejected_child.pid).is_some()
         || table.exit(rejected_child, 1)
-        || table.commit_cloned_fork(rejected_child, &frames[0..4], &frames[4..6], false)
-        || !init_space.is_valid()
+        || commit_cloned_fork(
+            &mut table,
+            rejected_child,
+            &frames[0..4],
+            &frames[4..6],
+            false,
+            &mut fork_lists,
+        )
+        || !init_space.is_valid(&table.spaces)
         || table.commit_fork(rejected_child, first_space, init_context.fork_child())
         || table.abort_fork(rejected_child)
     {
@@ -2591,33 +2795,33 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         return false;
     };
     let (Some(parent_page), Some(parent_stack), Some(child_page), Some(child_stack)) = (
-        frames[4].direct_map_address(),
-        frames[5].direct_map_address(),
-        frames[10].direct_map_address(),
-        frames[11].direct_map_address(),
+        Frame::leased(frames[4]),
+        Frame::leased(frames[5]),
+        Frame::leased(frames[10]),
+        Frame::leased(frames[11]),
     ) else {
         return false;
     };
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            PROCESS_CHILD_PROGRAM.as_ptr(),
-            parent_page as *mut u8,
-            PROCESS_CHILD_PROGRAM.len(),
-        );
-        (parent_page as *mut u8).add(PAGE_SIZE - 1).write(0x32);
-        (parent_stack as *mut u8).write(0x44);
-    }
+    parent_page.write_bytes(0, &PROCESS_CHILD_PROGRAM);
+    parent_page.write_u8(PAGE_SIZE - 1, 0x32);
+    parent_stack.write_u8(0, 0x44);
     if first_child.pid != 3 {
         crate::serial_write("linox: lifecycle stage child identity failed\r\n");
         return false;
     }
-    if !table.commit_cloned_fork(first_child, &frames[6..10], &frames[10..12], false) {
+    if !commit_cloned_fork(
+        &mut table,
+        first_child,
+        &frames[6..10],
+        &frames[10..12],
+        false,
+        &mut fork_lists,
+    ) {
         crate::serial_write("linox: lifecycle stage cloned fork failed\r\n");
         return false;
     }
-    if unsafe { core::slice::from_raw_parts(child_page as *const u8, PROCESS_CHILD_PROGRAM.len()) }
-        != PROCESS_CHILD_PROGRAM
-        || unsafe { (child_page as *const u8).add(PAGE_SIZE - 1).read() } != 0x32
+    if !child_page.bytes_match(0, &PROCESS_CHILD_PROGRAM)
+        || child_page.read_u8(PAGE_SIZE - 1) != 0x32
         || table.commit_fork(first_child, second_space, init_context.fork_child())
         || table.wait(init, first_child.pid).is_some()
         || table.exit(first_child, 42)
@@ -2627,7 +2831,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         crate::serial_write("linox: lifecycle stage cloned fork state failed\r\n");
         return false;
     }
-    if unsafe { (child_stack as *const u8).read() } != 0 {
+    if child_stack.read_u8(0) != 0 {
         crate::serial_write("linox: lifecycle stage wipe contents failed\r\n");
         return false;
     }
@@ -2686,7 +2890,9 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     {
         return false;
     }
-    let Some(child_scheduler_context) = child_context.scheduler_context(&first_space) else {
+    let Some(child_scheduler_context) =
+        child_context.scheduler_context(&first_space, &table.spaces)
+    else {
         return false;
     };
     if !table.admit_to_scheduler(first_child, &mut run_queue, 1)
@@ -2718,7 +2924,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     let child_exit_status = if crate::arch::x86_64::smp::online_count() > 1 {
         crate::arch::x86_64::smp::execute_linux_process(
             1,
-            first_space.root(),
+            first_space.root(&table.spaces),
             child_context.rip,
             child_context.rsp,
             child_context.fs_base,
@@ -2726,7 +2932,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         )
     } else {
         address_space::execute_linux_process_child(
-            first_space.root(),
+            first_space.root(&table.spaces),
             child_context.rip,
             child_context.rsp,
             child_context.fs_base,
@@ -2739,18 +2945,15 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     if crate::arch::x86_64::smp::online_count() > 1 {
         crate::serial_write("linox: scheduled Linux child executed on application processor\r\n");
     }
-    if child_exit_status != 42
-        || unsafe { (child_stack as *const u8).read() } != 0x5a
-        || unsafe { (parent_stack as *const u8).read() } != 0x44
+    if child_exit_status != 42 || child_stack.read_u8(0) != 0x5a || parent_stack.read_u8(0) != 0x44
     {
         crate::serial_write("linox: lifecycle stage wipe execution failed\r\n");
         return false;
     }
     if crate::arch::x86_64::smp::online_count() > 1 {
-        let (Some(second_page), Some(shared_page)) = (
-            frames[16].direct_map_address(),
-            frames[11].direct_map_address(),
-        ) else {
+        let (Some(second_page), Some(shared_page)) =
+            (Frame::leased(frames[16]), Frame::leased(frames[11]))
+        else {
             return false;
         };
         let concurrent_second_mappings = [
@@ -2766,28 +2969,21 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         {
             return false;
         }
-        let Some(concurrent_second_space) =
-            ProcessAddressSpace::new(2, &frames[12..16], &concurrent_second_mappings)
-        else {
+        let Some(concurrent_second_space) = ProcessAddressSpace::new(
+            &mut table.spaces,
+            2,
+            &frames[12..16],
+            &concurrent_second_mappings,
+        ) else {
             return false;
         };
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                CONCURRENT_PROCESS_PROGRAM.as_ptr(),
-                child_page as *mut u8,
-                CONCURRENT_PROCESS_PROGRAM.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                CONCURRENT_PROCESS_PROGRAM.as_ptr(),
-                second_page as *mut u8,
-                CONCURRENT_PROCESS_PROGRAM.len(),
-            );
-            (shared_page as *mut u32).write(0);
-        }
+        child_page.write_bytes(0, &CONCURRENT_PROCESS_PROGRAM);
+        second_page.write_bytes(0, &CONCURRENT_PROCESS_PROGRAM);
+        shared_page.write_bytes(0, &0_u32.to_ne_bytes());
         let concurrent_context = init_context.fork_child();
         let ticket = crate::arch::x86_64::smp::begin_linux_process(
             1,
-            first_space.root(),
+            first_space.root(&table.spaces),
             concurrent_context.rip,
             concurrent_context.rsp,
             concurrent_context.fs_base,
@@ -2799,7 +2995,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         };
         let mut remote_entered = false;
         for _ in 0..20_000_000 {
-            if unsafe { (shared_page as *const u32).read_volatile() } == 1 {
+            if shared_page.read_volatile_u32(0) == 1 {
                 remote_entered = true;
                 break;
             }
@@ -2811,7 +3007,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
             return false;
         }
         let local_status = address_space::execute_linux_process_child(
-            concurrent_second_space.root(),
+            concurrent_second_space.root(&table.spaces),
             concurrent_context.rip,
             concurrent_context.rsp,
             concurrent_context.fs_base,
@@ -2820,7 +3016,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
         let remote_status = crate::arch::x86_64::smp::finish_linux_process(ticket);
         if local_status != Some(42)
             || remote_status != Some(42)
-            || unsafe { (shared_page as *const u32).read() } != 2
+            || shared_page.read_volatile_u32(0) != 2
         {
             return false;
         }
@@ -2831,7 +3027,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
             return false;
         }
         let Some(restored_second_space) =
-            ProcessAddressSpace::new(2, &frames[12..16], &second_mappings)
+            ProcessAddressSpace::new(&mut table.spaces, 2, &frames[12..16], &second_mappings)
         else {
             return false;
         };
@@ -2853,25 +3049,33 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     {
         return false;
     }
-    if unsafe { (parent_page as *const u8).read() } != PROCESS_CHILD_PROGRAM[0] {
+    if parent_page.read_u8(0) != PROCESS_CHILD_PROGRAM[0] {
         return false;
     }
     let Some(first_resources) = table.begin_exit(first_child, first_space) else {
         return false;
     };
-    let first_root = first_resources.hierarchy()[0];
+    let Some(first_root) = first_resources.hierarchy(&table.spaces).first().copied() else {
+        return false;
+    };
     if table.exit(first_child, child_exit_status)
         || !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[first_root])
         || table.exit(first_child, child_exit_status)
         || !memory::scrub_and_release_frames(
             memory::FrameOwner::KERNEL,
-            &first_resources.hierarchy()[1..],
+            &first_resources.hierarchy(&table.spaces)[1..],
         )
-        || first_resources.mappings().iter().any(|mapping| {
-            !mapping.shared
-                && !memory::frame_lease_is_runtime(mapping.frame)
-                && !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[mapping.frame])
-        })
+        || first_resources
+            .mappings(&table.spaces)
+            .iter()
+            .any(|mapping| {
+                !mapping.shared
+                    && !memory::frame_lease_is_runtime(mapping.frame)
+                    && !memory::scrub_and_release_frames(
+                        memory::FrameOwner::KERNEL,
+                        &[mapping.frame],
+                    )
+            })
         || !table.exit(first_child, child_exit_status)
         || table.child_wait_state(init, Some(first_child.pid), false, false)
             != Some(ChildWaitState::Exited {
@@ -2911,7 +3115,7 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     let Some(second_resources) = table.begin_exit(second_child, second_space) else {
         return false;
     };
-    if !second_resources.scrub_and_release()
+    if !second_resources.scrub_and_release(&table.spaces)
         || !table.exit(second_child, 7)
         || table.wait(init, second_child.pid) != Some(WaitResult { pid: 4, status: 7 })
     {
@@ -2920,9 +3124,11 @@ pub(crate) fn verify_lifecycle_contract() -> bool {
     let Some(init_resources) = table.begin_exit(init, init_space) else {
         return false;
     };
-    init_resources.scrub_and_release()
-        && table.exit(init, 0)
-        && crate::heap::kernel_frames_outside_heap() == Some(before)
+    let released = init_resources.scrub_and_release(&table.spaces) && table.exit(init, 0);
+    // The namespace work the table owes (none for the initial namespaces
+    // its processes were in).
+    core::mem::replace(&mut table.deferred, DeferredWork::NONE).run();
+    released && crate::heap::kernel_frames_outside_heap() == Some(before)
 }
 
 pub(crate) fn install_live_process_registry(
@@ -2939,11 +3145,10 @@ pub(crate) fn install_live_process_registry(
     {
         return false;
     }
-    let Some(address_space) =
-        ProcessAddressSpace::new(0, snapshot.hierarchy(), snapshot.mappings())
-    else {
+    // The page-table tree is walked before the table's lock is taken.
+    if !address_space_lists_valid(snapshot.hierarchy(), snapshot.mappings()) {
         return false;
-    };
+    }
     let context = ProcessExecutionContext {
         general,
         rip,
@@ -2951,37 +3156,40 @@ pub(crate) fn install_live_process_registry(
         rflags,
         fs_base,
     };
-    let mut invalid = context;
-    invalid.rip = 0;
-    if invalid.is_valid(&address_space) || !context.is_valid(&address_space) {
-        return false;
-    }
-    let table = unsafe {
-        process_runtime()
-            .tables
-            .get()
-            .cast::<ProcessTable>()
-            .add(instance)
+    let owner_domain = cpu::current_container_slot()
+        .and_then(cpu::container_domain_id)
+        .unwrap_or(0);
+    let installed = {
+        let mut table = PROCESS_TABLES[instance].lock();
+        let table = &mut *table;
+        let Some(address_space) = ProcessAddressSpace::from_validated_snapshot(
+            &mut table.spaces,
+            0,
+            snapshot.hierarchy(),
+            snapshot.mappings(),
+        ) else {
+            return false;
+        };
+        let mut invalid = context;
+        invalid.rip = 0;
+        if invalid.is_valid(&address_space, &table.spaces)
+            || !context.is_valid(&address_space, &table.spaces)
+        {
+            return false;
+        }
+        table.owner_domain = owner_domain;
+        // Emptying the vectors keeps their memory for the next domain.
+        table.processes.clear();
+        table.pid_slots.clear();
+        table.generations.clear();
+        table.groups.clear();
+        table.roots.clear();
+        table.seccomp_filters.clear();
+        table.next_pid = 1;
+        table.init = None;
+        table.create_init(address_space, context).is_some()
     };
-    unsafe {
-        core::ptr::addr_of_mut!((*table).owner_domain).write(
-            cpu::current_container_slot()
-                .and_then(cpu::container_domain_id)
-                .unwrap_or(0),
-        );
-        // The tables start const-initialized, so the vectors are valid here;
-        // emptying them keeps their memory for the next domain.
-        (*table).processes.clear();
-        (*table).pid_slots.clear();
-        (*table).generations.clear();
-        (*table).groups.clear();
-        (*table).roots.clear();
-        (*table).seccomp_filters.clear();
-        core::ptr::addr_of_mut!((*table).next_pid).write(1);
-        core::ptr::addr_of_mut!((*table).init).write(None);
-    }
-    let table = unsafe { &mut *table };
-    if table.create_init(address_space, context).is_none() {
+    if !installed {
         return false;
     }
     process_runtime().refresh_count[instance].store(0, Ordering::Release);
@@ -2991,7 +3199,6 @@ pub(crate) fn install_live_process_registry(
         .store(instance as u8, Ordering::Release);
     true
 }
-
 pub(crate) fn refresh_live_process_registry(
     pid: u32,
     snapshot: &cpu::LinuxProcessAddressSpaceSnapshot,
@@ -3034,15 +3241,6 @@ pub(crate) fn refresh_live_process_context_from_syscall_entry(
     let Some(stack_mapping) = address_space::current_linux_active_mapping(stack_address) else {
         return false;
     };
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
     let context = ProcessExecutionContext {
         general,
         rip,
@@ -3050,58 +3248,73 @@ pub(crate) fn refresh_live_process_context_from_syscall_entry(
         rflags,
         fs_base,
     };
-    if process.state != ProcessState::Running {
-        return false;
-    }
-    let Some(space) = process.address_space.as_mut() else {
-        return false;
-    };
-    let Some(storage) = address_space_storage(usize::from(space.storage_slot)) else {
-        return false;
-    };
-    let mut count = space.mapping_count as usize;
-    if count != storage.mappings.len() {
-        return false;
-    }
-    let context_mappings = [instruction_mapping, stack_mapping];
-    let missing = context_mappings
-        .iter()
-        .enumerate()
-        .filter(|(index, mapping)| {
-            context_mappings[..*index]
-                .iter()
-                .all(|prior| prior.address != mapping.address)
-                && storage.mappings[..count]
-                    .iter()
-                    .all(|existing| existing.address != mapping.address)
-        })
-        .count();
-    if storage.mappings.try_reserve(missing).is_err() {
-        return false;
-    }
-    for mapping in context_mappings {
-        if let Some(existing) = storage.mappings[..count]
-            .iter_mut()
-            .find(|existing| existing.address == mapping.address)
-        {
-            let shared = existing.shared;
-            let dontfork = existing.dontfork;
-            *existing = mapping;
-            existing.shared = shared;
-            existing.dontfork = dontfork;
-        } else {
-            storage.mappings.push(mapping);
-            count += 1;
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let ProcessTable {
+            processes, spaces, ..
+        } = table;
+        let Some(process) = processes
+            .get_mut(usize::from(handle.slot))
+            .and_then(Option::as_mut)
+            .filter(|process| process.handle == handle)
+        else {
+            return false;
+        };
+        if process.state != ProcessState::Running {
+            return false;
         }
-    }
-    space.mapping_count = count as u32;
-    if !context.is_valid(space) {
-        return false;
-    }
-    process.context = Some(context);
-    true
+        let Some(space) = process.address_space.as_mut() else {
+            return false;
+        };
+        let Some(storage) = spaces.slot_mut(usize::from(space.storage_slot)) else {
+            return false;
+        };
+        let mut count = space.mapping_count as usize;
+        if count != storage.mappings.len() {
+            return false;
+        }
+        let context_mappings = [instruction_mapping, stack_mapping];
+        let missing = context_mappings
+            .iter()
+            .enumerate()
+            .filter(|(index, mapping)| {
+                context_mappings[..*index]
+                    .iter()
+                    .all(|prior| prior.address != mapping.address)
+                    && storage.mappings[..count]
+                        .iter()
+                        .all(|existing| existing.address != mapping.address)
+            })
+            .count();
+        if storage.mappings.try_reserve(missing).is_err() {
+            return false;
+        }
+        for mapping in context_mappings {
+            if let Some(existing) = storage.mappings[..count]
+                .iter_mut()
+                .find(|existing| existing.address == mapping.address)
+            {
+                let shared = existing.shared;
+                let dontfork = existing.dontfork;
+                *existing = mapping;
+                existing.shared = shared;
+                existing.dontfork = dontfork;
+            } else {
+                storage.mappings.push(mapping);
+                count += 1;
+            }
+        }
+        space.mapping_count = count as u32;
+        if !context.is_valid(space, spaces) {
+            return false;
+        }
+        process.context = Some(context);
+        true
+    })
+    .unwrap_or(false)
 }
-
 /// Records the context the current process `pid` waits in, checked against
 /// its live page tables (the instruction executable, the stack writable)
 /// rather than its registered mapping list, which this marks stale: a wait
@@ -3157,57 +3370,57 @@ pub(crate) fn set_live_process_thread_context(
 /// Makes `context` running process `pid`'s registry context, its mapping
 /// list stale.
 fn set_live_process_context(pid: u32, context: ProcessExecutionContext) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    if process.state != ProcessState::Running {
-        return false;
-    }
-    let Some(space) = process.address_space.as_mut() else {
-        return false;
-    };
-    space.stale = true;
-    process.context = Some(context);
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        if process.state != ProcessState::Running {
+            return false;
+        }
+        let Some(space) = process.address_space.as_mut() else {
+            return false;
+        };
+        space.stale = true;
+        process.context = Some(context);
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn refresh_live_process_hierarchy(pid: u32, hierarchy: &[memory::FrameLease]) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(space) = table
-        .process(handle)
-        .and_then(|process| process.address_space)
-    else {
-        return false;
-    };
     if hierarchy.len() < 4 || !memory::frames_owned_by(memory::FrameOwner::KERNEL, hierarchy) {
         return false;
     }
-    let Some(storage) = address_space_storage(usize::from(space.storage_slot)) else {
-        return false;
-    };
-    if replace_list(&mut storage.hierarchy, hierarchy).is_none() {
-        return false;
-    }
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    let Some(mut updated) = process.address_space else {
-        return false;
-    };
-    updated.hierarchy_count = hierarchy.len() as u32;
-    process.address_space = Some(updated);
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(space) = table
+            .process(handle)
+            .and_then(|process| process.address_space)
+        else {
+            return false;
+        };
+        let Some(storage) = table.spaces.slot_mut(usize::from(space.storage_slot)) else {
+            return false;
+        };
+        if replace_list(&mut storage.hierarchy, hierarchy).is_none() {
+            return false;
+        }
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        let Some(mut updated) = process.address_space else {
+            return false;
+        };
+        updated.hierarchy_count = hierarchy.len() as u32;
+        process.address_space = Some(updated);
+        true
+    })
+    .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3221,35 +3434,10 @@ fn refresh_live_process_registry_inner(
     fs_base: u64,
     validate_address_space: bool,
 ) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        crate::serial_write("linox: live registry refresh has no table\r\n");
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        crate::serial_write("linox: live registry refresh has no process\r\n");
-        return false;
-    };
-    let Some(storage_slot) = table
-        .process(handle)
-        .and_then(|process| process.address_space)
-        .map(|space| usize::from(space.storage_slot))
-    else {
-        crate::serial_write("linox: live registry refresh has no address space\r\n");
-        return false;
-    };
-    let address_space = if validate_address_space {
-        ProcessAddressSpace::new(storage_slot, snapshot.hierarchy(), snapshot.mappings())
-    } else {
-        ProcessAddressSpace::from_validated_snapshot(
-            storage_slot,
-            snapshot.hierarchy(),
-            snapshot.mappings(),
-        )
-    };
-    let Some(address_space) = address_space else {
-        crate::serial_write("linox: live registry refresh rejected address space\r\n");
-        return false;
-    };
+    // The snapshot's page-table tree is walked before the table's lock is
+    // taken; the lists stored under it are copies of what was checked.
+    let snapshot_valid = !validate_address_space
+        || address_space_lists_valid(snapshot.hierarchy(), snapshot.mappings());
     let context = ProcessExecutionContext {
         general,
         rip,
@@ -3257,56 +3445,58 @@ fn refresh_live_process_registry_inner(
         rflags,
         fs_base,
     };
-    let context_error = context.validation_error(&address_space);
-    let refreshed =
-        table.refresh_process_inner(handle, address_space, context, validate_address_space);
+    let refreshed = with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            crate::serial_write("linox: live registry refresh has no process\r\n");
+            return (false, false);
+        };
+        let Some(storage_slot) = table
+            .process(handle)
+            .and_then(|process| process.address_space)
+            .map(|space| usize::from(space.storage_slot))
+        else {
+            crate::serial_write("linox: live registry refresh has no address space\r\n");
+            return (false, false);
+        };
+        let address_space = if snapshot_valid {
+            ProcessAddressSpace::from_validated_snapshot(
+                &mut table.spaces,
+                storage_slot,
+                snapshot.hierarchy(),
+                snapshot.mappings(),
+            )
+        } else {
+            None
+        };
+        let Some(address_space) = address_space else {
+            crate::serial_write("linox: live registry refresh rejected address space\r\n");
+            return (false, false);
+        };
+        let context_error = context.validation_error(&address_space, &table.spaces);
+        let refreshed =
+            table.refresh_process_inner(handle, address_space, context, validate_address_space);
+        // Reported for the first few only: a call that retries after a
+        // rejection would otherwise flood the serial console.
+        let reported = !refreshed && REFRESH_REJECTIONS.fetch_add(1, Ordering::Relaxed) < 8;
+        if reported {
+            report_refresh_rejection(table, handle, &address_space, context_error, &context);
+        }
+        (refreshed, reported)
+    });
+    let Some((refreshed, reported)) = refreshed else {
+        crate::serial_write("linox: live registry refresh has no table\r\n");
+        return false;
+    };
     if refreshed {
         let instance = active_process_instance().unwrap_or(HOST_PROCESS_INSTANCE);
         process_runtime().refresh_count[instance].fetch_add(1, Ordering::SeqCst);
-    } else if REFRESH_REJECTIONS.fetch_add(1, Ordering::Relaxed) < 8 {
-        // Reported for the first few only: a call that retries after a
-        // rejection would otherwise flood the serial console.
-        crate::serial_write(
-            "linox: live registry refresh rejected process context pid/state/error/rip/rsp/rflags: ",
-        );
-        let (state, retiring) = table
-            .process(handle)
-            .map(|process| {
-                (
-                    match process.state {
-                        ProcessState::Preparing => 1,
-                        ProcessState::Running => 2,
-                        ProcessState::Stopped { .. } => 3,
-                        ProcessState::Exiting => 4,
-                        ProcessState::Zombie { .. } => 5,
-                    },
-                    u64::from(process.retiring_address_space.is_some()),
-                )
-            })
-            .unwrap_or((0, 0));
-        let error =
-            u64::from(context_error.unwrap_or(0))
-                | u64::from(table.process(handle).is_some_and(|process| {
-                    linux_user::credentials(process.user_namespace).is_none()
-                })) << 4
-                | (address_space.mapping_count as u64) << 16;
-        for value in [
-            u64::from(pid),
-            state,
-            error | retiring << 8,
-            rip,
-            rsp,
-            rflags,
-        ] {
-            crate::serial_write_u64(value);
-            crate::serial_write(" ");
-        }
+    } else if reported {
         let (root, leaf) = address_space::current_linux_leaf_report(rsp.wrapping_sub(1));
         let snapshot_root = snapshot
             .hierarchy()
             .first()
             .map_or(0, |frame| frame.address());
-        crate::serial_write("cr3/snapshot-root/stack-leaf: ");
+        crate::serial_write("linox: live registry refresh cr3/snapshot-root/stack-leaf: ");
         for value in [root, snapshot_root, leaf] {
             crate::serial_write_u64(value);
             crate::serial_write(" ");
@@ -3316,6 +3506,52 @@ fn refresh_live_process_registry_inner(
     refreshed
 }
 
+/// Says why the table refused process `handle`'s refreshed context.
+fn report_refresh_rejection(
+    table: &ProcessTable,
+    handle: ProcessHandle,
+    address_space: &ProcessAddressSpace,
+    context_error: Option<u8>,
+    context: &ProcessExecutionContext,
+) {
+    crate::serial_write(
+        "linox: live registry refresh rejected process context pid/state/error/rip/rsp/rflags: ",
+    );
+    let (state, retiring) = table
+        .process(handle)
+        .map(|process| {
+            (
+                match process.state {
+                    ProcessState::Preparing => 1,
+                    ProcessState::Running => 2,
+                    ProcessState::Stopped { .. } => 3,
+                    ProcessState::Exiting => 4,
+                    ProcessState::Zombie { .. } => 5,
+                },
+                u64::from(process.retiring_address_space.is_some()),
+            )
+        })
+        .unwrap_or((0, 0));
+    let error = u64::from(context_error.unwrap_or(0))
+        | u64::from(
+            table
+                .process(handle)
+                .is_some_and(|process| linux_user::credentials(process.user_namespace).is_none()),
+        ) << 4
+        | (address_space.mapping_count as u64) << 16;
+    for value in [
+        u64::from(handle.pid),
+        state,
+        error | retiring << 8,
+        context.rip,
+        context.rsp,
+        context.rflags,
+    ] {
+        crate::serial_write_u64(value);
+        crate::serial_write(" ");
+    }
+    crate::serial_write("\r\n");
+}
 /// Registry refreshes rejected, for the report above.
 static REFRESH_REJECTIONS: AtomicU32 = AtomicU32::new(0);
 
@@ -3334,68 +3570,90 @@ pub(crate) fn force_stop_runtime_process_registry() -> bool {
     if !process_runtime().table_initialized[instance].load(Ordering::Acquire) {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
+    let withdrawn = with_live_table(|table| {
+        let init = table.init?;
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        run_queue.retire_all();
+        table.thread_blocks.clear();
+        for process in table.processes.iter_mut().flatten() {
+            process.scheduler_thread = None;
+        }
+        scheduler::release_process_scheduler_workspace().then_some(init)
+    })
+    .flatten();
+    let Some(init) = withdrawn else {
         return false;
     };
-    let Some(init) = table.init else {
-        return false;
-    };
-    let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
-        return false;
-    };
-    run_queue.retire_all();
-    table.thread_blocks.clear();
-    for process in table.processes.iter_mut().flatten() {
-        process.scheduler_thread = None;
-    }
-    if !scheduler::release_process_scheduler_workspace() {
-        return false;
-    }
-
-    for slot in 0..table.processes.len() {
-        let Some(process) = table.processes[slot] else {
-            continue;
+    // Every process but init goes, one at a time: its memory and its
+    // System V attachments with the table's lock released, then its record.
+    let mut slot = 0;
+    loop {
+        let next = with_live_table(|table| {
+            let (index, process) = table
+                .processes
+                .iter()
+                .enumerate()
+                .skip(slot)
+                .filter_map(|(index, process)| Some((index, (*process)?)))
+                .find(|(_, process)| process.handle != init)?;
+            let spaces = [process.address_space, process.retiring_address_space]
+                .map(|space| space.map(|space| (space, space.root(&table.spaces))));
+            Some((index, process.handle, spaces))
+        })
+        .flatten();
+        let Some((index, handle, spaces)) = next else {
+            break;
         };
-        if process.handle == init {
-            continue;
-        }
-        if let Some(space) = process.address_space {
-            if !release_live_process_address_space(space) {
+        slot = index + 1;
+        for (space, root) in spaces.into_iter().flatten() {
+            if !retire_live_process_page_tables(root)
+                || !with_live_table(|table| release_space_hierarchy(&space, &table.spaces))
+                    .unwrap_or(false)
+            {
                 return false;
             }
         }
-        if let Some(space) = process.retiring_address_space {
-            if !release_live_process_address_space(space) {
-                return false;
-            }
-        }
-        if crate::linux_sysv_ipc::drop_process_attachments(process.handle.pid).is_err() {
+        if crate::linux_sysv_ipc::drop_process_attachments(handle.pid).is_err() {
             return false;
         }
-        table.processes[slot] = None;
-        table.forget_pid_slot(process.handle.pid);
-        table.groups[slot] = Vec::new();
-        table.roots[slot] = Vec::new();
-        if table
-            .processes
-            .iter()
-            .flatten()
-            .all(|candidate| candidate.user_namespace != process.user_namespace)
-        {
-            let _ = linux_user::retire(process.user_namespace);
+        let removed = with_live_table(|table| {
+            if table.process(handle).is_none() {
+                return false;
+            }
+            let Some(process) = table.processes[usize::from(handle.slot)].take() else {
+                return false;
+            };
+            table.forget_pid_slot(handle.pid);
+            table.groups[usize::from(handle.slot)] = Vec::new();
+            table.roots[usize::from(handle.slot)] = Vec::new();
+            if table
+                .processes
+                .iter()
+                .flatten()
+                .all(|candidate| candidate.user_namespace != process.user_namespace)
+            {
+                let _ = linux_user::retire(process.user_namespace);
+            }
+            true
+        })
+        .unwrap_or(false);
+        if !removed {
+            return false;
         }
     }
-    let Some(process) = table.process_mut(init) else {
-        return false;
-    };
-    process.parent = None;
-    process.retiring_address_space = None;
-    process.scheduler_thread = None;
-    process.state = ProcessState::Running;
-    process.wait_event = None;
-    true
+    with_live_table(|table| {
+        let Some(process) = table.process_mut(init) else {
+            return false;
+        };
+        process.parent = None;
+        process.retiring_address_space = None;
+        process.scheduler_thread = None;
+        process.state = ProcessState::Running;
+        process.wait_event = None;
+        true
+    })
+    .unwrap_or(false)
 }
-
 pub(crate) fn suspend_runtime_process_registry() -> bool {
     let Some(instance) = active_process_instance() else {
         return false;
@@ -3426,13 +3684,11 @@ pub(crate) fn resume_runtime_process_registry() -> bool {
     {
         return false;
     }
-    let valid = live_process_table_mut().is_some_and(|table| {
-        table.owner_domain
-            == cpu::current_container_slot()
-                .and_then(cpu::container_domain_id)
-                .unwrap_or(0)
-            && table.init.is_some()
-    });
+    let owner_domain = cpu::current_container_slot()
+        .and_then(cpu::container_domain_id)
+        .unwrap_or(0);
+    let valid = with_live_table(|table| table.owner_domain == owner_domain && table.init.is_some())
+        .unwrap_or(false);
     if !valid {
         process_runtime()
             .active_instance
@@ -3448,32 +3704,34 @@ fn finish_live_process_registry_with_refresh_floor(refresh_floor: u32) -> bool {
     if !process_runtime().table_initialized[instance].load(Ordering::Acquire) {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let valid = table.reap_init_zombies()
-        && table.reap_all_zombies()
-        && table.init.is_some()
-        && process_runtime().refresh_count[instance].load(Ordering::Acquire) >= refresh_floor
-        && table.processes.iter().flatten().count() == 1
-        && table.processes.iter().flatten().all(|process| {
-            process.parent.is_none()
-                && linux_user::credentials(process.user_namespace).is_some()
-                && process.state == ProcessState::Running
-                && process.retiring_address_space.is_none()
-                && process.scheduler_thread.is_none()
-        });
-    if !valid {
-        crate::serial_write("linox: live process registry finish state: ");
-        crate::serial_write_u64(u64::from(table.init.is_some()));
-        crate::serial_write(" ");
-        crate::serial_write_u64(u64::from(
-            process_runtime().refresh_count[instance].load(Ordering::Acquire),
-        ));
-        crate::serial_write(" ");
-        crate::serial_write_u64(table.processes.iter().flatten().count() as u64);
-        crate::serial_write("\r\n");
-        write_process_table(table);
+    let valid = with_live_table(|table| {
+        let valid = table.reap_init_zombies()
+            && table.reap_all_zombies()
+            && table.init.is_some()
+            && process_runtime().refresh_count[instance].load(Ordering::Acquire) >= refresh_floor
+            && table.processes.iter().flatten().count() == 1
+            && table.processes.iter().flatten().all(|process| {
+                process.parent.is_none()
+                    && linux_user::credentials(process.user_namespace).is_some()
+                    && process.state == ProcessState::Running
+                    && process.retiring_address_space.is_none()
+                    && process.scheduler_thread.is_none()
+            });
+        if !valid {
+            crate::serial_write("linox: live process registry finish state: ");
+            crate::serial_write_u64(u64::from(table.init.is_some()));
+            crate::serial_write(" ");
+            crate::serial_write_u64(u64::from(
+                process_runtime().refresh_count[instance].load(Ordering::Acquire),
+            ));
+            crate::serial_write(" ");
+            crate::serial_write_u64(table.processes.iter().flatten().count() as u64);
+            crate::serial_write("\r\n");
+            write_process_table(table);
+        }
+        valid
+    });
+    if valid != Some(true) {
         return false;
     }
     process_runtime().table_initialized[instance].store(false, Ordering::Release);
@@ -3485,85 +3743,94 @@ fn finish_live_process_registry_with_refresh_floor(refresh_floor: u32) -> bool {
 }
 
 pub(crate) fn live_process_user_namespace(pid: u32) -> Option<linux_user::UserNamespaceHandle> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let namespace = table.process(handle)?.user_namespace;
-    linux_user::credentials(namespace).map(|_| namespace)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let namespace = table.process(handle)?.user_namespace;
+        linux_user::credentials(namespace).map(|_| namespace)
+    })
+    .flatten()
 }
 
 pub(crate) fn live_process_credentials(pid: u32) -> Option<linux_user::Credentials> {
-    let table = live_process_table_mut()?;
-    Some(table.process(table.handle_by_pid(pid)?)?.credentials)
+    with_live_table(|table| Some(table.process(table.handle_by_pid(pid)?)?.credentials)).flatten()
 }
 
 pub(crate) fn set_live_process_credentials(pid: u32, credentials: linux_user::Credentials) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.credentials = credentials;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.credentials = credentials;
+        true
+    })
+    .unwrap_or(false)
 }
 
-/// Runs `inspect` on the supplementary groups of `pid`, sorted.
+/// Runs `inspect` on the supplementary groups of `pid`, sorted. It runs
+/// under the process table's lock, so it may only look at them (or copy
+/// them): no copy to user memory, no lock ranked at or below the table, no
+/// call back into this module.
 pub(crate) fn with_live_process_groups<R>(
     pid: u32,
     inspect: impl FnOnce(&[u32]) -> R,
 ) -> Option<R> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    table.process(handle)?;
-    Some(inspect(table.groups.get(usize::from(handle.slot))?))
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table.process(handle)?;
+        Some(inspect(table.groups.get(usize::from(handle.slot))?))
+    })
+    .flatten()
 }
 
 /// Runs `inspect` on the root directory of `pid` (its chroot, a canonical
-/// path without a leading slash; empty for the domain's root).
+/// path without a leading slash; empty for the domain's root), under the
+/// process table's lock as `with_live_process_groups` runs its `inspect`.
 pub(crate) fn with_live_process_root<R>(pid: u32, inspect: impl FnOnce(&[u8]) -> R) -> Option<R> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    table.process(handle)?;
-    Some(inspect(table.roots.get(usize::from(handle.slot))?))
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table.process(handle)?;
+        Some(inspect(table.roots.get(usize::from(handle.slot))?))
+    })
+    .flatten()
 }
 
 /// Makes `root` the root directory of `pid` (chroot).
 pub(crate) fn set_live_process_root(pid: u32, root: Vec<u8>) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    if table.process(handle).is_none() {
-        return false;
-    }
-    let Some(slot) = table.roots.get_mut(usize::from(handle.slot)) else {
-        return false;
-    };
-    *slot = root;
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        if table.process(handle).is_none() {
+            return false;
+        }
+        let Some(slot) = table.roots.get_mut(usize::from(handle.slot)) else {
+            return false;
+        };
+        *slot = root;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Replaces the supplementary groups of `pid` with `groups`, sorted.
 pub(crate) fn set_live_process_groups(pid: u32, groups: Vec<u32>) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    if table.process(handle).is_none() {
-        return false;
-    }
-    let Some(slot) = table.groups.get_mut(usize::from(handle.slot)) else {
-        return false;
-    };
-    *slot = groups;
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        if table.process(handle).is_none() {
+            return false;
+        }
+        let Some(slot) = table.groups.get_mut(usize::from(handle.slot)) else {
+            return false;
+        };
+        *slot = groups;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Sets the namespaces process `pid`'s next child is made in (`None`:
@@ -3572,43 +3839,42 @@ pub(crate) fn set_live_process_child_namespaces(
     pid: u32,
     namespaces: Option<linux_namespace::Set>,
 ) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.child_namespaces = namespaces;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.child_namespaces = namespaces;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Process `pid`'s UTS, IPC, PID and time namespaces.
 pub(crate) fn live_process_namespaces(pid: u32) -> Option<linux_namespace::Set> {
-    let table = live_process_table_mut()?;
-    Some(table.process(table.handle_by_pid(pid)?)?.namespaces)
+    with_live_table(|table| Some(table.process(table.handle_by_pid(pid)?)?.namespaces)).flatten()
 }
 
 /// Moves running process `pid` to `namespaces`, then drops the ones it
 /// left that nothing else uses.
 pub(crate) fn set_live_process_namespaces(pid: u32, namespaces: linux_namespace::Set) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    if process.state != ProcessState::Running {
-        return false;
-    }
-    process.namespaces = namespaces;
-    table.collect_namespaces();
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        if process.state != ProcessState::Running {
+            return false;
+        }
+        process.namespaces = namespaces;
+        table.collect_namespaces();
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn set_live_process_user_namespace(
@@ -3618,39 +3884,41 @@ pub(crate) fn set_live_process_user_namespace(
     if linux_user::credentials(namespace).is_none() {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    if process.state != ProcessState::Running {
-        return false;
-    }
-    process.user_namespace = namespace;
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        if process.state != ProcessState::Running {
+            return false;
+        }
+        process.user_namespace = namespace;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn live_process_status(pid: u32) -> Option<LiveProcessStatus> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    let state = match process.state {
-        ProcessState::Running if process.stopped_in_call => LiveProcessState::Stopped,
-        ProcessState::Running if process.waiting => LiveProcessState::Sleeping,
-        ProcessState::Running => LiveProcessState::Running,
-        ProcessState::Stopped { .. } => LiveProcessState::Stopped,
-        ProcessState::Zombie { .. } => LiveProcessState::Zombie,
-        ProcessState::Preparing | ProcessState::Exiting => return None,
-    };
-    Some(LiveProcessStatus {
-        pid: process.handle.pid,
-        parent_pid: process.parent.map_or(0, |parent| parent.pid),
-        state,
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        let state = match process.state {
+            ProcessState::Running if process.stopped_in_call => LiveProcessState::Stopped,
+            ProcessState::Running if process.waiting => LiveProcessState::Sleeping,
+            ProcessState::Running => LiveProcessState::Running,
+            ProcessState::Stopped { .. } => LiveProcessState::Stopped,
+            ProcessState::Zombie { .. } => LiveProcessState::Zombie,
+            ProcessState::Preparing | ProcessState::Exiting => return None,
+        };
+        Some(LiveProcessStatus {
+            pid: process.handle.pid,
+            parent_pid: process.parent.map_or(0, |parent| parent.pid),
+            state,
+        })
     })
+    .flatten()
 }
 
 /// Charges the CPU time since the last charge to the process that ran
@@ -3666,39 +3934,36 @@ pub(crate) fn charge_live_process_cpu(now: u64) {
 }
 
 fn charge_process_interval(interval: crate::cpu_time::ProcessInterval) {
-    if let Some(process) = live_process_table_mut().and_then(|table| {
-        let handle = table.handle_by_pid(interval.pid)?;
-        table.process_mut(handle)
-    }) {
+    let _ = with_live_process(interval.pid, |process| {
         process.cpu_cycles = process.cpu_cycles.saturating_add(interval.total);
         process.user_cycles = process.user_cycles.saturating_add(interval.user);
         for (total, added) in process.task_events.iter_mut().zip(interval.events) {
             *total = total.saturating_add(added);
         }
-    }
+    });
 }
 
 /// The task events of the live processes of the domain `pid` is in, the
 /// open interval on this CPU included (a CPU-wide perf event's counts).
 pub(crate) fn live_domain_task_events(pid: u32, now: u64) -> [u64; crate::cpu_time::TASK_EVENTS] {
-    let mut events = [0; crate::cpu_time::TASK_EVENTS];
-    let Some(table) = live_process_table_mut() else {
-        return events;
-    };
-    if table.handle_by_pid(pid).is_none() {
-        return events;
-    }
-    for process in table.processes.iter().flatten() {
-        for (total, added) in events.iter_mut().zip(process.task_events) {
-            *total = total.saturating_add(added);
+    let mut events = [0_u64; crate::cpu_time::TASK_EVENTS];
+    with_live_table(|table| {
+        if table.handle_by_pid(pid).is_none() {
+            return events;
         }
-    }
-    if let Some(interval) = crate::cpu_time::process_interval(now, false) {
-        for (total, added) in events.iter_mut().zip(interval.events) {
-            *total = total.saturating_add(added);
+        for process in table.processes.iter().flatten() {
+            for (total, added) in events.iter_mut().zip(process.task_events) {
+                *total = total.saturating_add(added);
+            }
         }
-    }
-    events
+        if let Some(interval) = crate::cpu_time::process_interval(now, false) {
+            for (total, added) in events.iter_mut().zip(interval.events) {
+                *total = total.saturating_add(added);
+            }
+        }
+        events
+    })
+    .unwrap_or(events)
 }
 
 /// The task events of `pid` (`cpu_time::TaskEvent`), its open interval on
@@ -3710,24 +3975,26 @@ pub(crate) fn live_process_task_events(
     children: bool,
     now: u64,
 ) -> Option<[u64; crate::cpu_time::TASK_EVENTS]> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    let mut events = process.task_events;
-    if children {
-        for (total, added) in events.iter_mut().zip(process.children_task_events) {
-            *total = total.saturating_add(added);
-        }
-    }
-    if running {
-        if let Some(interval) =
-            crate::cpu_time::process_interval(now, false).filter(|interval| interval.pid == pid)
-        {
-            for (total, added) in events.iter_mut().zip(interval.events) {
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        let mut events = process.task_events;
+        if children {
+            for (total, added) in events.iter_mut().zip(process.children_task_events) {
                 *total = total.saturating_add(added);
             }
         }
-    }
-    Some(events)
+        if running {
+            if let Some(interval) =
+                crate::cpu_time::process_interval(now, false).filter(|interval| interval.pid == pid)
+            {
+                for (total, added) in events.iter_mut().zip(interval.events) {
+                    *total = total.saturating_add(added);
+                }
+            }
+        }
+        Some(events)
+    })
+    .flatten()
 }
 
 /// Starts the CPU interval of process `pid`, switched in at timestamp
@@ -3740,12 +4007,14 @@ pub(crate) fn start_live_process_cpu(pid: u32, now: u64) {
 
 /// When `pid` was created, in nanoseconds since boot.
 pub(crate) fn live_process_started_nanoseconds(pid: u32) -> Option<u64> {
-    let table = live_process_table_mut()?;
-    Some(
-        table
-            .process(table.handle_by_pid(pid)?)?
-            .started_nanoseconds,
-    )
+    with_live_table(|table| {
+        Some(
+            table
+                .process(table.handle_by_pid(pid)?)?
+                .started_nanoseconds,
+        )
+    })
+    .flatten()
 }
 
 /// The CPU time `pid` has used, in timestamp-counter cycles, at `now`; for
@@ -3757,32 +4026,34 @@ pub(crate) fn live_process_cpu_cycles(pid: u32, running: bool, now: u64) -> Opti
 /// The user and system time `pid` has used, in timestamp-counter cycles,
 /// at `now`, as `live_process_cpu_cycles` counts it.
 pub(crate) fn live_process_cpu_times(pid: u32, running: bool, now: u64) -> Option<(u64, u64)> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    let (mut total, mut user) = (process.cpu_cycles, process.user_cycles);
-    if running {
-        if let Some(interval) =
-            crate::cpu_time::process_interval(now, false).filter(|interval| interval.pid == pid)
-        {
-            total = total.saturating_add(interval.total);
-            user = user.saturating_add(interval.user);
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        let (mut total, mut user) = (process.cpu_cycles, process.user_cycles);
+        if running {
+            if let Some(interval) =
+                crate::cpu_time::process_interval(now, false).filter(|interval| interval.pid == pid)
+            {
+                total = total.saturating_add(interval.total);
+                user = user.saturating_add(interval.user);
+            }
         }
-    }
-    let user = user.min(total);
-    Some((user, total - user))
+        let user = user.min(total);
+        Some((user, total - user))
+    })
+    .flatten()
 }
 
 /// The user and system time of the children `pid` waited for, theirs
 /// included, in timestamp-counter cycles.
 pub(crate) fn live_process_children_cpu_times(pid: u32) -> Option<(u64, u64)> {
-    let table = live_process_table_mut()?;
-    Some(table.process(table.handle_by_pid(pid)?)?.children_cycles)
+    with_live_table(|table| Some(table.process(table.handle_by_pid(pid)?)?.children_cycles))
+        .flatten()
 }
 
 /// Records whether a process waits in a blocking system call: set when it
 /// gives up the CPU there, cleared when it is woken or next dispatched.
 pub(crate) fn set_live_process_waiting(pid: u32, waiting: bool) {
-    if let Some(table) = live_process_table_mut() {
+    let _ = with_live_table(|table| {
         if let Some(process) = table
             .handle_by_pid(pid)
             .and_then(|handle| table.process_mut(handle))
@@ -3796,7 +4067,7 @@ pub(crate) fn set_live_process_waiting(pid: u32, waiting: bool) {
         } else {
             table.wake_threads(pid, None);
         }
-    }
+    });
 }
 
 /// Blocks thread `tid` (in thread slot `slot`) of process `pid` in its
@@ -3810,73 +4081,75 @@ pub(crate) fn block_live_thread(
     slot: u8,
     wait: crate::linux_wait_queue::WaitOn,
 ) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    if table.handle_by_pid(pid).is_none() {
-        return false;
-    }
-    let block = ThreadBlock {
-        pid,
-        tid,
-        slot,
-        wait,
-        waiting: true,
-    };
-    match table
-        .thread_blocks
-        .iter_mut()
-        .find(|block| block.pid == pid && block.tid == tid)
-    {
-        Some(existing) => *existing = block,
-        None => {
-            if table.thread_blocks.try_reserve(1).is_err() {
-                return false;
-            }
-            table.thread_blocks.push(block);
+    with_live_table(|table| {
+        if table.handle_by_pid(pid).is_none() {
+            return false;
         }
-    }
-    table.blocked = true;
-    table.push_sleeper(pid, wait.deadline());
-    true
+        let block = ThreadBlock {
+            pid,
+            tid,
+            slot,
+            wait,
+            waiting: true,
+        };
+        match table
+            .thread_blocks
+            .iter_mut()
+            .find(|block| block.pid == pid && block.tid == tid)
+        {
+            Some(existing) => *existing = block,
+            None => {
+                if table.thread_blocks.try_reserve(1).is_err() {
+                    return false;
+                }
+                table.thread_blocks.push(block);
+            }
+        }
+        table.blocked = true;
+        table.push_sleeper(pid, wait.deadline());
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Ends the block of thread `tid` of process `pid`, which runs again;
 /// false when it had none.
 pub(crate) fn take_live_thread_block(pid: u32, tid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(index) = table
-        .thread_blocks
-        .iter()
-        .position(|block| block.pid == pid && block.tid == tid)
-    else {
-        return false;
-    };
-    table.thread_blocks.remove(index);
-    true
+    with_live_table(|table| {
+        let Some(index) = table
+            .thread_blocks
+            .iter()
+            .position(|block| block.pid == pid && block.tid == tid)
+        else {
+            return false;
+        };
+        table.thread_blocks.remove(index);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Drops the blocks of process `pid`'s threads: thread `tid`'s, or with
 /// None all of them (the threads ended).
 pub(crate) fn drop_live_thread_blocks(pid: u32, tid: Option<u32>) {
-    if let Some(table) = live_process_table_mut() {
+    let _ = with_live_table(|table| {
         table
             .thread_blocks
             .retain(|block| block.pid != pid || tid.is_some_and(|tid| block.tid != tid));
-    }
+    });
 }
 
 /// The thread of process `pid` blocked in a call whose wait is over by
 /// `now` (woken, or its deadline passed), the longest blocked first.
 pub(crate) fn due_live_thread(pid: u32, now: u64) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    table
-        .thread_blocks
-        .iter()
-        .find(|block| block.pid == pid && block.due(now))
-        .map(|block| block.tid)
+    with_live_table(|table| {
+        table
+            .thread_blocks
+            .iter()
+            .find(|block| block.pid == pid && block.due(now))
+            .map(|block| block.tid)
+    })
+    .flatten()
 }
 
 /// Blocks process `pid`, none of whose threads can run, as a whole: on
@@ -3889,108 +4162,89 @@ pub(crate) fn block_live_process_threads(
     others: crate::linux_wait_queue::WaitOn,
     now: u64,
 ) {
-    let Some(table) = live_process_table_mut() else {
-        return;
-    };
-    let mut wait = others;
-    for block in table.thread_blocks.iter().filter(|block| block.pid == pid) {
-        if block.due(now) {
-            return;
+    let _ = with_live_table(|table| {
+        let mut wait = others;
+        for block in table.thread_blocks.iter().filter(|block| block.pid == pid) {
+            if block.due(now) {
+                return;
+            }
+            wait = wait.and(block.wait);
         }
-        wait = wait.and(block.wait);
-    }
-    block_live_process(pid, wait);
+        table.block_process(pid, wait);
+    });
 }
 
 /// Makes thread `tid` of process `pid` due to run if it is blocked, and
 /// its process ready: a futex wake of its record.
 pub(crate) fn wake_live_thread(pid: u32, tid: u32) {
-    let Some(table) = live_process_table_mut() else {
-        return;
-    };
-    for block in table
-        .thread_blocks
-        .iter_mut()
-        .filter(|block| block.pid == pid && block.tid == tid)
-    {
-        block.waiting = false;
-    }
-    if let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    {
-        process.waiting = false;
-    }
-}
-
-/// Blocks process `pid` in its system call until `wait` ends: it waits
-/// (`set_live_process_waiting`) and the scheduler passes over it until a
-/// waker, a signal or the wait's deadline makes it ready again.
-pub(crate) fn block_live_process(pid: u32, wait: crate::linux_wait_queue::WaitOn) {
-    if let Some(table) = live_process_table_mut() {
+    let _ = with_live_table(|table| {
+        for block in table
+            .thread_blocks
+            .iter_mut()
+            .filter(|block| block.pid == pid && block.tid == tid)
+        {
+            block.waiting = false;
+        }
         if let Some(process) = table
             .handle_by_pid(pid)
             .and_then(|handle| table.process_mut(handle))
         {
-            process.waiting = true;
-            process.block = Some(wait);
-        } else {
-            return;
+            process.waiting = false;
         }
-        table.blocked = true;
-        table.note_sleeper(pid);
-    }
+    });
 }
 
 /// What process `pid` is blocked on, if it is (waiting, not yet woken).
 pub(crate) fn live_process_block(pid: u32) -> Option<crate::linux_wait_queue::WaitOn> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    process.block.filter(|_| process.waiting)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        process.block.filter(|_| process.waiting)
+    })
+    .flatten()
 }
 
 /// Makes every process blocked in a wait that event `events` on `key` ends
 /// ready again (None: every key); returns how many it woke.
 pub(crate) fn wake_live_processes(events: u16, key: Option<u64>) -> u32 {
-    let Some(table) = live_process_table_mut() else {
-        return 0;
-    };
-    if !table.blocked {
-        return 0;
-    }
-    let mut woken = 0;
-    let mut blocked = false;
-    for index in 0..table.thread_blocks.len() {
-        let block = table.thread_blocks[index];
-        if !block.waiting {
-            continue;
+    with_live_table(|table| {
+        if !table.blocked {
+            return 0;
         }
-        if block.wait.woken_by(events, key) {
-            table.thread_blocks[index].waiting = false;
-            if let Some(process) = table
-                .handle_by_pid(block.pid)
-                .and_then(|handle| table.process_mut(handle))
-            {
-                process.waiting = false;
+        let mut woken = 0;
+        let mut blocked = false;
+        for index in 0..table.thread_blocks.len() {
+            let block = table.thread_blocks[index];
+            if !block.waiting {
+                continue;
             }
-            woken += 1;
-        } else {
-            blocked = true;
+            if block.wait.woken_by(events, key) {
+                table.thread_blocks[index].waiting = false;
+                if let Some(process) = table
+                    .handle_by_pid(block.pid)
+                    .and_then(|handle| table.process_mut(handle))
+                {
+                    process.waiting = false;
+                }
+                woken += 1;
+            } else {
+                blocked = true;
+            }
         }
-    }
-    for process in table.processes.iter_mut().flatten() {
-        let Some(block) = process.block.filter(|_| process.waiting) else {
-            continue;
-        };
-        if block.woken_by(events, key) {
-            process.waiting = false;
-            woken += 1;
-        } else {
-            blocked = true;
+        for process in table.processes.iter_mut().flatten() {
+            let Some(block) = process.block.filter(|_| process.waiting) else {
+                continue;
+            };
+            if block.woken_by(events, key) {
+                process.waiting = false;
+                woken += 1;
+            } else {
+                blocked = true;
+            }
         }
-    }
-    table.blocked = blocked;
-    woken
+        table.blocked = blocked;
+        woken
+    })
+    .unwrap_or(0)
 }
 
 /// Makes every blocked process ready again, to look at its wait once more:
@@ -4003,13 +4257,14 @@ pub(crate) fn wake_all_live_processes() -> u32 {
 /// Whether process `pid` is parked asleep with its block's deadline passed
 /// by `now`: due to run, to find its wait over.
 pub(crate) fn live_process_sleep_due(pid: u32, now: u64) -> bool {
-    live_process_table_mut().is_some_and(|table| {
+    with_live_table(|table| {
         table
             .handle_by_pid(pid)
             .and_then(|handle| table.process(handle))
             .and_then(Process::marked_asleep_until)
             .is_some_and(|deadline| deadline <= now)
     })
+    .unwrap_or(false)
 }
 
 /// The earliest deadline a process marked asleep in a wait of its own
@@ -4018,31 +4273,50 @@ pub(crate) fn live_process_sleep_due(pid: u32, now: u64) -> bool {
 /// it due (its deadline came between the look for work and the halt) a
 /// whole tick late.
 pub(crate) fn next_live_block_deadline() -> Option<u64> {
-    let table = live_process_table_mut()?;
-    if table.sleepers_lossy {
-        table.rebuild_sleepers();
-    }
-    if table.sleepers_lossy {
-        return table
-            .processes
-            .iter()
-            .flatten()
-            .filter_map(|process| process.marked_asleep_until())
-            .chain(
-                table
-                    .thread_blocks
-                    .iter()
-                    .filter_map(ThreadBlock::marked_until),
-            )
-            .min();
-    }
-    let mut sleepers = core::mem::take(&mut table.sleepers);
-    let earliest = sleepers.earliest(|pid, deadline| table.sleeper_holds(pid, deadline));
-    table.sleepers = sleepers;
-    earliest.map(|(deadline, _)| deadline)
+    with_live_table(|table| {
+        if table.sleepers_lossy {
+            table.rebuild_sleepers();
+        }
+        if table.sleepers_lossy {
+            return table
+                .processes
+                .iter()
+                .flatten()
+                .filter_map(|process| process.marked_asleep_until())
+                .chain(
+                    table
+                        .thread_blocks
+                        .iter()
+                        .filter_map(ThreadBlock::marked_until),
+                )
+                .min();
+        }
+        let mut sleepers = core::mem::take(&mut table.sleepers);
+        let earliest = sleepers.earliest(|pid, deadline| table.sleeper_holds(pid, deadline));
+        table.sleepers = sleepers;
+        earliest.map(|(deadline, _)| deadline)
+    })
+    .flatten()
 }
 
 impl ProcessTable {
+    /// Blocks process `pid` in its system call until `wait` ends: it waits
+    /// (`set_live_process_waiting`) and the scheduler passes over it until a
+    /// waker, a signal or the wait's deadline makes it ready again.
+    fn block_process(&mut self, pid: u32, wait: crate::linux_wait_queue::WaitOn) {
+        if let Some(process) = self
+            .handle_by_pid(pid)
+            .and_then(|handle| self.process_mut(handle))
+        {
+            process.waiting = true;
+            process.block = Some(wait);
+        } else {
+            return;
+        }
+        self.blocked = true;
+        self.note_sleeper(pid);
+    }
+
     /// Records `pid`'s deadline if it is now marked asleep (both its mark
     /// and its `waiting`, which are set apart, hold), dropping the entries
     /// no longer marked once they outnumber the processes.
@@ -4169,20 +4443,19 @@ pub(crate) struct PosixTimer {
 /// on, as Linux freezes it at delivery (timer_settime03 reads it in the
 /// handler).
 pub(crate) fn note_posix_timer_delivery(pid: u32, signal: u8, value: u64) {
-    let Some(table) = live_process_table_mut() else {
-        return;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return;
-    };
-    for timer in process.posix_timers.iter_mut().flatten() {
-        if timer.signal == signal && timer.value == value {
-            timer.delivered_overrun = timer.overrun;
+    let _ = with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return;
+        };
+        for timer in process.posix_timers.iter_mut().flatten() {
+            if timer.signal == signal && timer.value == value {
+                timer.delivered_overrun = timer.overrun;
+            }
         }
-    }
+    });
 }
 
 /// What an expired timer delivers.
@@ -4213,84 +4486,91 @@ impl PosixTimerExpiry {
 
 /// Creates a POSIX timer for `pid`: its id, from 1, the first free one.
 pub(crate) fn create_posix_timer(pid: u32, timer: PosixTimer) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process_mut(handle)?;
-    let index = process.posix_timers.iter().position(Option::is_none)?;
-    process.posix_timers[index] = Some(timer);
-    Some(index as u32 + 1)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process_mut(handle)?;
+        let index = process.posix_timers.iter().position(Option::is_none)?;
+        process.posix_timers[index] = Some(timer);
+        Some(index as u32 + 1)
+    })
+    .flatten()
 }
 
 /// Timer `id` of `pid`.
 pub(crate) fn posix_timer(pid: u32, id: u32) -> Option<PosixTimer> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    let index = usize::try_from(id.checked_sub(1)?).ok()?;
-    process.posix_timers.get(index).copied().flatten()
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        let index = usize::try_from(id.checked_sub(1)?).ok()?;
+        process.posix_timers.get(index).copied().flatten()
+    })
+    .flatten()
 }
 
 /// Changes timer `id` of `pid` with `change`; None without such a timer.
+/// `change` runs under the process table's lock: it only sets fields.
 pub(crate) fn update_posix_timer(
     pid: u32,
     id: u32,
     change: impl FnOnce(&mut PosixTimer),
 ) -> Option<PosixTimer> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process_mut(handle)?;
-    let index = usize::try_from(id.checked_sub(1)?).ok()?;
-    let timer = process.posix_timers.get_mut(index)?.as_mut()?;
-    change(timer);
-    Some(*timer)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process_mut(handle)?;
+        let index = usize::try_from(id.checked_sub(1)?).ok()?;
+        let timer = process.posix_timers.get_mut(index)?.as_mut()?;
+        change(timer);
+        Some(*timer)
+    })
+    .flatten()
 }
 
 /// Deletes timer `id` of `pid`.
 pub(crate) fn delete_posix_timer(pid: u32, id: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    let Some(index) = id
-        .checked_sub(1)
-        .and_then(|index| usize::try_from(index).ok())
-    else {
-        return false;
-    };
-    match process.posix_timers.get_mut(index) {
-        Some(slot @ Some(_)) => {
-            *slot = None;
-            true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        let Some(index) = id
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return false;
+        };
+        match process.posix_timers.get_mut(index) {
+            Some(slot @ Some(_)) => {
+                *slot = None;
+                true
+            }
+            _ => false,
         }
-        _ => false,
-    }
+    })
+    .unwrap_or(false)
 }
 
 /// The earliest armed deadline among `pid`'s timers, 0 with none armed.
 pub(crate) fn earliest_posix_timer_deadline(pid: u32) -> u64 {
-    let Some(table) = live_process_table_mut() else {
-        return 0;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-    else {
-        return 0;
-    };
-    process
-        .posix_timers
-        .iter()
-        .chain(process.itimers.iter())
-        .flatten()
-        .map(|timer| timer.deadline)
-        .filter(|deadline| *deadline != 0)
-        .min()
-        .unwrap_or(0)
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+        else {
+            return 0;
+        };
+        process
+            .posix_timers
+            .iter()
+            .chain(process.itimers.iter())
+            .flatten()
+            .map(|timer| timer.deadline)
+            .filter(|deadline| *deadline != 0)
+            .min()
+            .unwrap_or(0)
+    })
+    .unwrap_or(0)
 }
 
 /// Expires `pid`'s timers whose deadline passed by `now`: a periodic one
@@ -4315,10 +4595,12 @@ pub(crate) fn posix_clock_is_thread_cpu(clock: u32) -> bool {
 /// setitimer's ITIMER_VIRTUAL (`which` 1) or ITIMER_PROF (2) of `pid`:
 /// its interval and its deadline on the process CPU clock (0: disarmed).
 pub(crate) fn live_process_interval_timer(pid: u32, which: usize) -> Option<(u64, u64)> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    let timer = process.itimers.get(which.checked_sub(1)?)?;
-    Some(timer.map_or((0, 0), |timer| (timer.interval, timer.deadline)))
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        let timer = process.itimers.get(which.checked_sub(1)?)?;
+        Some(timer.map_or((0, 0), |timer| (timer.interval, timer.deadline)))
+    })
+    .flatten()
 }
 
 /// Arms (`deadline` nonzero, on the process CPU clock) or disarms
@@ -4329,34 +4611,34 @@ pub(crate) fn set_live_process_interval_timer(
     signal: u8,
     (interval, deadline): (u64, u64),
 ) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    let Some(timer) = which
-        .checked_sub(1)
-        .and_then(|index| process.itimers.get_mut(index))
-    else {
-        return false;
-    };
-    // CLOCK_PROCESS_CPUTIME_ID, signalled as SIGEV_SIGNAL.
-    *timer = (deadline != 0).then_some(PosixTimer {
-        clock: 2,
-        notify: 0,
-        signal,
-        tid: 0,
-        value: 0,
-        deadline,
-        interval,
-        overrun: 0,
-        delivered_overrun: 0,
-    });
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        let Some(timer) = which
+            .checked_sub(1)
+            .and_then(|index| process.itimers.get_mut(index))
+        else {
+            return false;
+        };
+        // CLOCK_PROCESS_CPUTIME_ID, signalled as SIGEV_SIGNAL.
+        *timer = (deadline != 0).then_some(PosixTimer {
+            clock: 2,
+            notify: 0,
+            signal,
+            tid: 0,
+            value: 0,
+            deadline,
+            interval,
+            overrun: 0,
+            delivered_overrun: 0,
+        });
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Fires process `pid`'s timers whose deadline passed: `now` on the
@@ -4368,74 +4650,76 @@ pub(crate) fn expire_posix_timers(
     pending: u64,
     expiries: &mut [PosixTimerExpiry; TIMER_EXPIRY_LIMIT],
 ) -> usize {
-    let Some(table) = live_process_table_mut() else {
-        return 0;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return 0;
-    };
-    let mut count = 0;
-    let posix_count = process.posix_timers.len();
-    for (index, timer) in process
-        .posix_timers
-        .iter_mut()
-        .chain(process.itimers.iter_mut())
-        .enumerate()
-        .filter_map(|(index, timer)| Some((index, timer.as_mut()?)))
-    {
-        let now = if posix_clock_is_thread_cpu(timer.clock) {
-            thread_now
-        } else if posix_clock_is_cpu(timer.clock) {
-            cpu_now
-        } else {
-            monotonic_now
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return 0;
         };
-        if timer.deadline == 0 || now < timer.deadline {
-            continue;
-        }
-        let expirations = match (now - timer.deadline).checked_div(timer.interval) {
-            // A one-shot timer (no interval) disarms.
-            None => {
-                timer.deadline = 0;
-                1
+        let mut count = 0;
+        let posix_count = process.posix_timers.len();
+        for (index, timer) in process
+            .posix_timers
+            .iter_mut()
+            .chain(process.itimers.iter_mut())
+            .enumerate()
+            .filter_map(|(index, timer)| Some((index, timer.as_mut()?)))
+        {
+            let now = if posix_clock_is_thread_cpu(timer.clock) {
+                thread_now
+            } else if posix_clock_is_cpu(timer.clock) {
+                cpu_now
+            } else {
+                monotonic_now
+            };
+            if timer.deadline == 0 || now < timer.deadline {
+                continue;
             }
-            Some(missed) => {
-                timer.deadline = timer
-                    .deadline
-                    .saturating_add((missed + 1).saturating_mul(timer.interval));
-                missed + 1
+            let expirations = match (now - timer.deadline).checked_div(timer.interval) {
+                // A one-shot timer (no interval) disarms.
+                None => {
+                    timer.deadline = 0;
+                    1
+                }
+                Some(missed) => {
+                    timer.deadline = timer
+                        .deadline
+                        .saturating_add((missed + 1).saturating_mul(timer.interval));
+                    missed + 1
+                }
+            };
+            let overrun = u32::try_from(expirations - 1).unwrap_or(u32::MAX);
+            if timer.signal != 0 && pending & (1_u64 << (timer.signal - 1)) != 0 {
+                timer.overrun = timer.overrun.saturating_add(overrun).saturating_add(1);
+                continue;
             }
-        };
-        let overrun = u32::try_from(expirations - 1).unwrap_or(u32::MAX);
-        if timer.signal != 0 && pending & (1_u64 << (timer.signal - 1)) != 0 {
-            timer.overrun = timer.overrun.saturating_add(overrun).saturating_add(1);
-            continue;
+            timer.overrun = overrun;
+            expiries[count] = PosixTimerExpiry {
+                notify: timer.notify,
+                signal: timer.signal,
+                tid: timer.tid,
+                value: timer.value,
+                interval_timer: index >= posix_count,
+            };
+            count += 1;
         }
-        timer.overrun = overrun;
-        expiries[count] = PosixTimerExpiry {
-            notify: timer.notify,
-            signal: timer.signal,
-            tid: timer.tid,
-            value: timer.value,
-            interval_timer: index >= posix_count,
-        };
-        count += 1;
-    }
-    count
+        count
+    })
+    .unwrap_or(0)
 }
 
 pub(crate) fn live_process_cpu_affinity(pid: u32) -> Option<u64> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
-    )
-    .then_some(process.cpu_affinity)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
+        )
+        .then_some(process.cpu_affinity)
+    })
+    .flatten()
 }
 
 /// Stops process `pid` with stop signal `signal` (SIGSTOP, SIGTSTP, SIGTTIN
@@ -4443,13 +4727,13 @@ pub(crate) fn live_process_cpu_affinity(pid: u32) -> Option<u64> {
 /// process parking in its kill call until SIGCONT; otherwise the scheduler
 /// no longer dispatches it. False unless it was running.
 pub(crate) fn stop_live_process(pid: u32, signal: u8, in_call: bool) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    table.stop(handle, signal, in_call)
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        table.stop(handle, signal, in_call)
+    })
+    .unwrap_or(false)
 }
 
 /// Whether process `pid` is stopped (by a stop signal, until SIGCONT).
@@ -4460,13 +4744,13 @@ pub(crate) fn live_process_stopped(pid: u32) -> bool {
 /// Continues stopped process `pid` (SIGCONT): it runs again, and its
 /// parent's wait (WCONTINUED) reports it. False unless it was stopped.
 pub(crate) fn continue_live_process(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    table.continue_process(handle)
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        table.continue_process(handle)
+    })
+    .unwrap_or(false)
 }
 
 /// Set in a process's policy byte by SCHED_RESET_ON_FORK: its children
@@ -4475,34 +4759,36 @@ pub(crate) const SCHED_RESET_ON_FORK: u8 = 0x80;
 
 /// sched_getscheduler and sched_getparam: `pid`'s policy and priority.
 pub(crate) fn live_process_scheduling(pid: u32) -> Option<(u8, u8)> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
-    )
-    .then_some(process.scheduling)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
+        )
+        .then_some(process.scheduling)
+    })
+    .flatten()
 }
 
 /// sched_setscheduler: gives `pid` `policy` and `priority`.
 pub(crate) fn set_live_process_scheduling(pid: u32, policy: u8, priority: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    if !matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. }
-    ) {
-        return false;
-    }
-    process.scheduling = (policy, priority);
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        if !matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. }
+        ) {
+            return false;
+        }
+        process.scheduling = (policy, priority);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Linux's timer slack for a new process, in nanoseconds.
@@ -4617,50 +4903,51 @@ pub(crate) fn install_live_process_seccomp_filter(
     pid: u32,
     program: linox_seccomp::Program,
 ) -> Result<(), SeccompError> {
-    live_process_table_mut()
+    with_live_table(|table| table.install_seccomp_filter(pid, program))
         .ok_or(SeccompError::NoProcess)?
-        .install_seccomp_filter(pid, program)
 }
 
 /// What `pid`'s seccomp filters return for a system call, or None without
 /// filters.
 pub(crate) fn live_process_seccomp_return(pid: u32, data: &linox_seccomp::Data) -> Option<u32> {
-    live_process_table_mut()?.seccomp_return(pid, data)
+    with_live_table(|table| table.seccomp_return(pid, data)).flatten()
 }
 
 pub(crate) fn live_process_timer_slack(pid: u32) -> Option<u64> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. }
-    )
-    .then_some(process.timer_slack.0)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. }
+        )
+        .then_some(process.timer_slack.0)
+    })
+    .flatten()
 }
 
 /// prctl(PR_SET_TIMERSLACK): 0 restores the process's default.
 pub(crate) fn set_live_process_timer_slack(pid: u32, slack: u64) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    if !matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. }
-    ) {
-        return false;
-    }
-    process.timer_slack.0 = if slack == 0 {
-        process.timer_slack.1
-    } else {
-        slack
-    };
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        if !matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. }
+        ) {
+            return false;
+        }
+        process.timer_slack.0 = if slack == 0 {
+            process.timer_slack.1
+        } else {
+            slack
+        };
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// A process's I/O as `/proc/PID/io` counts it (Linux's task_io_accounting):
@@ -4679,138 +4966,142 @@ pub(crate) struct IoAccounting {
 
 /// The I/O process `pid` did (`/proc/PID/io`).
 pub(crate) fn live_process_io(pid: u32) -> Option<IoAccounting> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.io)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.io)
+    })
+    .flatten()
 }
 
-/// Adds to the I/O counts of process `pid`.
+/// Adds to the I/O counts of process `pid`; `account` runs under the
+/// process table's lock and only adds.
 pub(crate) fn account_live_process_io(pid: u32, account: impl FnOnce(&mut IoAccounting)) {
-    if let Some(process) = live_process_table_mut().and_then(|table| {
-        table
-            .handle_by_pid(pid)
-            .and_then(|handle| table.process_mut(handle))
-    }) {
-        account(&mut process.io);
-    }
+    // `account` only adds to the counts.
+    let _ = with_live_process(pid, |process| account(&mut process.io));
 }
 
 pub(crate) fn live_process_oom_score_adj(pid: u32) -> Option<i16> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
-    )
-    .then_some(process.oom_score_adj)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Zombie { .. }
+        )
+        .then_some(process.oom_score_adj)
+    })
+    .flatten()
 }
 
 /// Whether `pid` is marked a child subreaper (PR_GET_CHILD_SUBREAPER).
 pub(crate) fn live_process_child_subreaper(pid: u32) -> Option<bool> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.child_subreaper)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.child_subreaper)
+    })
+    .flatten()
 }
 
 /// Marks `pid` a child subreaper or not (PR_SET_CHILD_SUBREAPER).
 pub(crate) fn set_live_process_child_subreaper(pid: u32, marked: bool) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.child_subreaper = marked;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.child_subreaper = marked;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The memory policy of `pid` (set_mempolicy).
 pub(crate) fn live_process_memory_policy(pid: u32) -> Option<crate::linux_areas::Policy> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.memory_policy)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.memory_policy)
+    })
+    .flatten()
 }
 
 /// Sets the memory policy of `pid` (set_mempolicy).
 pub(crate) fn set_live_process_memory_policy(pid: u32, policy: crate::linux_areas::Policy) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.memory_policy = policy;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.memory_policy = policy;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Records that a signal's default action is terminating `pid`, so its
 /// parent's wait reports it as killed by that signal rather than as an exit.
 pub(crate) fn set_live_process_killed_by_signal(pid: u32, signal: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.killed_by_signal = signal;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.killed_by_signal = signal;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Sets `/proc/PID/oom_score_adj`; the caller has checked the Linux range
 /// -1000..=1000.
 pub(crate) fn set_live_process_oom_score_adj(pid: u32, value: i16) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    if !matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. }
-    ) {
-        return false;
-    }
-    process.oom_score_adj = value;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        if !matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. }
+        ) {
+            return false;
+        }
+        process.oom_score_adj = value;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn set_live_process_cpu_affinity(pid: u32, mask: u64) -> bool {
     if mask == 0 {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    if !matches!(
-        process.state,
-        ProcessState::Running | ProcessState::Stopped { .. }
-    ) {
-        return false;
-    }
-    process.cpu_affinity = mask;
-    process.scheduler_thread.is_none_or(|thread| {
-        scheduler::active_process_scheduler_workspace()
-            .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        if !matches!(
+            process.state,
+            ProcessState::Running | ProcessState::Stopped { .. }
+        ) {
+            return false;
+        }
+        process.cpu_affinity = mask;
+        process.scheduler_thread.is_none_or(|thread| {
+            scheduler::active_process_scheduler_workspace()
+                .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
+        })
     })
+    .unwrap_or(false)
 }
 
 /// Lets only CPU `cpu` run process `pid` (`Some`), or again the CPUs its
@@ -4819,109 +5110,107 @@ pub(crate) fn set_live_process_cpu_affinity(pid: u32, mask: u64) -> bool {
 /// other CPU takes it meanwhile. Its affinity as the process sees it does
 /// not change.
 pub(crate) fn pin_live_process(pid: u32, cpu: Option<usize>) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-    else {
-        return false;
-    };
-    let mask = cpu.map_or(process.cpu_affinity, |cpu| 1_u64 << cpu);
-    process.scheduler_thread.is_none_or(|thread| {
-        scheduler::active_process_scheduler_workspace()
-            .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+        else {
+            return false;
+        };
+        let mask = cpu.map_or(process.cpu_affinity, |cpu| 1_u64 << cpu);
+        process.scheduler_thread.is_none_or(|thread| {
+            scheduler::active_process_scheduler_workspace()
+                .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
+        })
     })
+    .unwrap_or(false)
 }
 
 pub(crate) fn set_live_process_scheduler_nice(pid: u32, nice: u8) -> bool {
     if nice > 39 {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(thread) = table
-        .process(handle)
-        .and_then(|process| process.scheduler_thread)
-    else {
-        return true;
-    };
-    let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
-        return false;
-    };
-    run_queue.set_priority(thread, 39_i8 - nice as i8)
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(thread) = table
+            .process(handle)
+            .and_then(|process| process.scheduler_thread)
+        else {
+            return true;
+        };
+        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+            return false;
+        };
+        run_queue.set_priority(thread, 39_i8 - nice as i8)
+    })
+    .unwrap_or(false)
 }
 
 /// The pid of the process tracing `pid` (ptrace), if one is.
 pub(crate) fn live_process_tracer(pid: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let tracer = table.process(table.handle_by_pid(pid)?)?.tracer;
-    (tracer != 0).then_some(tracer)
+    with_live_table(|table| {
+        let tracer = table.process(table.handle_by_pid(pid)?)?.tracer;
+        (tracer != 0).then_some(tracer)
+    })
+    .flatten()
 }
 
 /// Makes `tracer` (0: none) trace `pid`, clearing any resume signal.
 pub(crate) fn set_live_process_tracer(pid: u32, tracer: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    process.tracer = tracer;
-    process.ptrace_resume_signal = 0;
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        process.tracer = tracer;
+        process.ptrace_resume_signal = 0;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Records the signal a tracee delivers as it resumes (PTRACE_CONT).
 pub(crate) fn set_live_process_ptrace_resume_signal(pid: u32, signal: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.ptrace_resume_signal = signal;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.ptrace_resume_signal = signal;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Takes the signal a tracee resuming from its trace stop delivers.
 pub(crate) fn take_live_process_ptrace_resume_signal(pid: u32) -> u8 {
-    live_process_table_mut()
-        .and_then(|table| {
-            let handle = table.handle_by_pid(pid)?;
-            let process = table.process_mut(handle)?;
-            Some(core::mem::take(&mut process.ptrace_resume_signal))
-        })
-        .unwrap_or(0)
+    with_live_process(pid, |process| {
+        core::mem::take(&mut process.ptrace_resume_signal)
+    })
+    .unwrap_or(0)
 }
 
 /// Marks (or, taking it, reads and clears) that the tracee's next signal
 /// delivery is the one its tracer let through, which does not stop again.
 pub(crate) fn set_live_process_ptrace_bypass(pid: u32, bypass: bool) {
-    if let Some(process) = live_process_table_mut().and_then(|table| {
-        let handle = table.handle_by_pid(pid)?;
-        table.process_mut(handle)
-    }) {
+    let _ = with_live_process(pid, |process| {
         process.ptrace_bypass = bypass;
-    }
+    });
 }
 
 /// Tracee `pid`'s debug register `index` (PTRACE_PEEKUSER).
 pub(crate) fn live_process_debug_register(pid: u32, index: usize) -> Option<u64> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.debug_registers.read(index))
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.debug_registers.read(index))
+    })
+    .flatten()
 }
 
 /// Writes tracee `pid`'s debug register `index` (PTRACE_POKEUSER); None
@@ -4931,49 +5220,51 @@ pub(crate) fn set_live_process_debug_register(
     index: usize,
     value: u64,
 ) -> Option<Result<(), DebugRegisterError>> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process_mut(handle)?;
-    Some(process.debug_registers.write(index, value))
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process_mut(handle)?;
+        Some(process.debug_registers.write(index, value))
+    })
+    .flatten()
 }
 
 pub(crate) fn take_live_process_ptrace_bypass(pid: u32) -> bool {
-    live_process_table_mut()
-        .and_then(|table| {
-            let handle = table.handle_by_pid(pid)?;
-            let process = table.process_mut(handle)?;
-            Some(core::mem::take(&mut process.ptrace_bypass))
-        })
-        .unwrap_or(false)
+    with_live_process(pid, |process| core::mem::take(&mut process.ptrace_bypass)).unwrap_or(false)
 }
 
 pub(crate) fn live_process_parent_pid(pid: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    Some(
-        process
-            .parent
-            .and_then(|parent| table.process(parent).map(|parent| parent.handle.pid))
-            .unwrap_or(0),
-    )
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        Some(
+            process
+                .parent
+                .and_then(|parent| table.process(parent).map(|parent| parent.handle.pid))
+                .unwrap_or(0),
+        )
+    })
+    .flatten()
 }
 
 pub(crate) fn live_running_child_pid(parent_pid: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let parent = table.handle_by_pid(parent_pid)?;
-    table
-        .processes
-        .iter()
-        .flatten()
-        .find(|process| process.parent == Some(parent) && process.state == ProcessState::Running)
-        .map(|process| process.handle.pid)
+    with_live_table(|table| {
+        let parent = table.handle_by_pid(parent_pid)?;
+        table
+            .processes
+            .iter()
+            .flatten()
+            .find(|process| {
+                process.parent == Some(parent) && process.state == ProcessState::Running
+            })
+            .map(|process| process.handle.pid)
+    })
+    .flatten()
 }
 
 /// Whether a child of `parent_pid` can run: running and not waiting in a
 /// system call.
 pub(crate) fn live_runnable_child_exists(parent_pid: u32) -> bool {
-    live_process_table_mut().is_some_and(|table| {
+    with_live_table(|table| {
         table.handle_by_pid(parent_pid).is_some_and(|parent| {
             table.processes.iter().flatten().any(|process| {
                 process.parent == Some(parent)
@@ -4982,17 +5273,18 @@ pub(crate) fn live_runnable_child_exists(parent_pid: u32) -> bool {
             })
         })
     })
+    .unwrap_or(false)
 }
 
 pub(crate) fn live_process_group(pid: u32) -> Option<u32> {
-    live_process_table_mut()?
-        .process_group(pid)
+    with_live_table(|table| table.process_group(pid))
+        .flatten()
         .map(|group| group.0)
 }
 
 pub(crate) fn live_process_session(pid: u32) -> Option<u32> {
-    live_process_table_mut()?
-        .process_group(pid)
+    with_live_table(|table| table.process_group(pid))
+        .flatten()
         .map(|group| group.1)
 }
 
@@ -5001,23 +5293,20 @@ pub(crate) fn set_live_process_group(
     target_pid: u32,
     process_group: u32,
 ) -> Result<(), ProcessGroupError> {
-    live_process_table_mut()
+    with_live_table(|table| table.set_process_group(caller_pid, target_pid, process_group))
         .ok_or(ProcessGroupError::NoSuchProcess)?
-        .set_process_group(caller_pid, target_pid, process_group)
 }
 
 pub(crate) fn create_live_process_session(pid: u32) -> Result<u32, ProcessGroupError> {
-    live_process_table_mut()
-        .ok_or(ProcessGroupError::NoSuchProcess)?
-        .create_session(pid)
+    with_live_table(|table| table.create_session(pid)).ok_or(ProcessGroupError::NoSuchProcess)?
 }
 
 pub(crate) fn mark_live_process_executed(pid: u32) -> bool {
-    live_process_table_mut().is_some_and(|table| table.mark_executed(pid))
+    with_live_table(|table| table.mark_executed(pid)).unwrap_or(false)
 }
 
 pub(crate) fn set_live_process_exec_context(pid: u32, rip: u64, rsp: u64) -> bool {
-    live_process_table_mut().is_some_and(|table| table.set_exec_context(pid, rip, rsp))
+    with_live_table(|table| table.set_exec_context(pid, rip, rsp)).unwrap_or(false)
 }
 
 /// Makes the process in table slot `slot` ready if it waits in a call: a
@@ -5026,132 +5315,131 @@ pub(crate) fn set_live_process_exec_context(pid: u32, rip: u64, rsp: u64) -> boo
 /// for the process ends every thread's block, since any thread that does
 /// not block it may take it.
 pub(crate) fn wake_live_process_at_slot(slot: usize, thread: Option<u8>) {
-    let Some(table) = live_process_table_mut() else {
-        return;
-    };
-    let Some(process) = table.processes.get_mut(slot).and_then(Option::as_mut) else {
-        return;
-    };
-    process.waiting = false;
-    let pid = process.handle.pid;
-    table.wake_threads(pid, thread);
+    let _ = with_live_table(|table| {
+        let Some(process) = table.processes.get_mut(slot).and_then(Option::as_mut) else {
+            return;
+        };
+        process.waiting = false;
+        let pid = process.handle.pid;
+        table.wake_threads(pid, thread);
+    });
 }
 
 pub(crate) fn live_process_slot(pid: u32) -> Option<usize> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    Some(usize::from(handle.slot))
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        Some(usize::from(handle.slot))
+    })
+    .flatten()
 }
 
 pub(crate) fn live_process_runtime_slot(pid: u32) -> Option<usize> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    table.process(handle)?.runtime_slot.map(usize::from)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table.process(handle)?.runtime_slot.map(usize::from)
+    })
+    .flatten()
 }
 
 pub(crate) fn release_live_process_runtime_slot(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    if !matches!(process.state, ProcessState::Zombie { .. }) || process.runtime_slot.is_none() {
-        return false;
-    }
-    let slot = process.runtime_slot.take();
-    // Give back the slot's lists: a large process's are many megabytes and
-    // would otherwise stay until another process takes the slot.
-    let referenced = table.processes.iter().flatten().any(|process| {
-        process.runtime_slot == slot
-            || [process.address_space, process.retiring_address_space]
-                .into_iter()
-                .flatten()
-                .any(|space| Some(space.storage_slot) == slot)
-    });
-    if let (false, Some(slot)) = (referenced, slot) {
-        if let Some(storage) = address_space_storage(usize::from(slot)) {
-            *storage = ProcessAddressSpaceStorage::default();
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(process) = table.process_mut(handle) else {
+            return false;
+        };
+        if !matches!(process.state, ProcessState::Zombie { .. }) || process.runtime_slot.is_none() {
+            return false;
         }
-    }
-    true
+        let slot = process.runtime_slot.take();
+        // Give back the slot's lists: a large process's are many megabytes and
+        // would otherwise stay until another process takes the slot.
+        let referenced = table.processes.iter().flatten().any(|process| {
+            process.runtime_slot == slot
+                || [process.address_space, process.retiring_address_space]
+                    .into_iter()
+                    .flatten()
+                    .any(|space| Some(space.storage_slot) == slot)
+        });
+        if let (false, Some(slot)) = (referenced, slot) {
+            if let Some(storage) = table.spaces.slot_mut(usize::from(slot)) {
+                *storage = ProcessAddressSpaceStorage::default();
+            }
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn live_process_generation(pid: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    Some(table.handle_by_pid(pid)?.generation)
+    with_live_table(|table| Some(table.handle_by_pid(pid)?.generation)).flatten()
 }
 
 /// How many slots the process table has now (`live_process_pid_at` is
 /// None at and past them).
 pub(crate) fn live_process_slots() -> usize {
-    live_process_table_mut().map_or(0, |table| table.processes.len())
+    with_live_table(|table| table.processes.len()).unwrap_or(0)
 }
 
 pub(crate) fn live_process_pid_at(slot: usize) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    table
-        .processes
-        .get(slot)?
-        .as_ref()
-        .map(|process| process.handle.pid)
+    with_live_table(|table| {
+        table
+            .processes
+            .get(slot)?
+            .as_ref()
+            .map(|process| process.handle.pid)
+    })
+    .flatten()
 }
 
 /// The smallest pid at least `from` of a process in the table, as /proc
 /// lists them (zombies included, processes still being made or ended not).
 pub(crate) fn next_live_pid(from: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let start = table.pid_slots.partition_point(|(pid, _)| *pid < from);
-    table.pid_slots[start..].iter().find_map(|(pid, slot)| {
-        table
-            .processes
-            .get(usize::from(*slot))?
-            .as_ref()
-            .filter(|process| {
-                process.handle.pid == *pid
-                    && !matches!(
-                        process.state,
-                        ProcessState::Preparing | ProcessState::Exiting
-                    )
-            })
-            .map(|_| *pid)
+    with_live_table(|table| {
+        let start = table.pid_slots.partition_point(|(pid, _)| *pid < from);
+        table.pid_slots[start..].iter().find_map(|(pid, slot)| {
+            table
+                .processes
+                .get(usize::from(*slot))?
+                .as_ref()
+                .filter(|process| {
+                    process.handle.pid == *pid
+                        && !matches!(
+                            process.state,
+                            ProcessState::Preparing | ProcessState::Exiting
+                        )
+                })
+                .map(|_| *pid)
+        })
     })
+    .flatten()
 }
 
 pub(crate) fn live_process_count() -> Option<u16> {
-    let table = live_process_table_mut()?;
-    table
-        .processes
-        .iter()
-        .filter(|process| process.is_some())
-        .count()
-        .try_into()
-        .ok()
+    with_live_table(|table| {
+        table
+            .processes
+            .iter()
+            .filter(|process| process.is_some())
+            .count()
+            .try_into()
+            .ok()
+    })
+    .flatten()
 }
 
 pub(crate) fn host_live_process_count() -> Option<u16> {
     let mut count = 0_usize;
     for (instance, initialized) in process_runtime().table_initialized.iter().enumerate() {
         if initialized.load(Ordering::Acquire) {
-            // Linux process-table mutation and host inspection are serialized
-            // by the recursive kernel-entry boundary.
-            let table = unsafe {
-                &*process_runtime()
-                    .tables
-                    .get()
-                    .cast::<ProcessTable>()
-                    .add(instance)
-            };
-            count = count.checked_add(
-                table
-                    .processes
-                    .iter()
-                    .filter(|process| process.is_some())
-                    .count(),
-            )?;
+            let processes = PROCESS_TABLES[instance]
+                .lock()
+                .processes
+                .iter()
+                .filter(|process| process.is_some())
+                .count();
+            count = count.checked_add(processes)?;
         }
     }
     count.try_into().ok()
@@ -5161,79 +5449,97 @@ pub(crate) fn live_process_mapping(
     pid: u32,
     address: usize,
 ) -> Option<cpu::LinuxActiveImageMapping> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let space = table.process(handle)?.address_space?;
     // A stale list lacks pages mapped since its snapshot; the live page
-    // tables have them.
-    if space.stale {
-        return address_space::linux_active_mapping_in_root(space.root(), address as u64);
+    // tables have them, walked with the table's lock released.
+    enum Found {
+        Listed(Option<cpu::LinuxActiveImageMapping>),
+        Stale(memory::FrameLease),
     }
-    space
-        .mappings()
-        .iter()
-        .copied()
-        .find(|mapping| mapping.address == address)
+    let found = with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let space = table.process(handle)?.address_space?;
+        if space.stale {
+            return Some(Found::Stale(space.root(&table.spaces)));
+        }
+        Some(Found::Listed(
+            space
+                .mappings(&table.spaces)
+                .iter()
+                .copied()
+                .find(|mapping| mapping.address == address),
+        ))
+    })
+    .flatten()?;
+    match found {
+        Found::Listed(mapping) => mapping,
+        Found::Stale(root) => address_space::linux_active_mapping_in_root(root, address as u64),
+    }
 }
 
 /// Takes the next process ID for a new thread, so thread and process IDs
 /// never repeat each other, as in Linux's shared PID space.
 pub(crate) fn allocate_live_thread_id() -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let tid = table.next_pid;
-    table.next_pid = tid.checked_add(1)?;
-    Some(tid)
+    with_live_table(|table| {
+        let tid = table.next_pid;
+        table.next_pid = tid.checked_add(1)?;
+        Some(tid)
+    })
+    .flatten()
 }
 
 /// Marks `pid`'s registered address space as older than its mappings, when
 /// a final snapshot could not be taken, so its release frees only what the
 /// live page tables show.
 pub(crate) fn mark_live_process_address_space_stale(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(space) = table
-        .process_mut(handle)
-        .and_then(|process| process.address_space.as_mut())
-    else {
-        return false;
-    };
-    space.stale = true;
-    true
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let Some(space) = table
+            .process_mut(handle)
+            .and_then(|process| process.address_space.as_mut())
+        else {
+            return false;
+        };
+        space.stale = true;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Whether `pid`'s registered mapping list is stale (see
 /// `refresh_live_process_context_for_wait`), so a fork must snapshot its
 /// address space before copying the list.
 pub(crate) fn live_process_address_space_stale(pid: u32) -> bool {
-    live_process_table_mut().is_some_and(|table| {
+    with_live_table(|table| {
         table
             .handle_by_pid(pid)
             .and_then(|handle| table.process(handle))
             .and_then(|process| process.address_space)
             .is_some_and(|space| space.stale)
     })
+    .unwrap_or(false)
 }
 
 /// Whether `pid` is a child forked onto its parent's pages that has not
 /// executed yet, whose pages all belong to its parent.
 pub(crate) fn live_process_shares_parent_vm(pid: u32) -> bool {
-    live_process_table_mut().is_some_and(|table| {
+    with_live_table(|table| {
         table
             .handle_by_pid(pid)
             .and_then(|handle| table.process(handle))
             .is_some_and(|process| process.shares_parent_vm)
     })
+    .unwrap_or(false)
 }
 
 /// The id of the `resource` process `pid` uses (`SharedResource`).
 pub(crate) fn live_process_shared_id(pid: u32, resource: SharedResource) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.shared[resource as usize])
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.shared[resource as usize])
+    })
+    .flatten()
 }
 
 /// Makes process `pid` use `resource` of process `owner` (a clone that
@@ -5243,68 +5549,68 @@ pub(crate) fn share_live_process_resource(
     resource: SharedResource,
     owner: Option<u32>,
 ) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let id = match owner {
-        Some(owner) => {
-            let Some(owner) = table
-                .handle_by_pid(owner)
-                .and_then(|handle| table.process(handle))
-            else {
-                return false;
-            };
-            owner.shared[resource as usize]
-        }
-        None => table.new_shared_id(),
-    };
-    table.sharing |= owner.is_some()
-        && matches!(
-            resource,
-            SharedResource::Descriptors
-                | SharedResource::Filesystem
-                | SharedResource::SignalHandlers
-        );
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.shared[resource as usize] = id;
-    true
+    with_live_table(|table| {
+        let id = match owner {
+            Some(owner) => {
+                let Some(owner) = table
+                    .handle_by_pid(owner)
+                    .and_then(|handle| table.process(handle))
+                else {
+                    return false;
+                };
+                owner.shared[resource as usize]
+            }
+            None => table.new_shared_id(),
+        };
+        table.sharing |= owner.is_some()
+            && matches!(
+                resource,
+                SharedResource::Descriptors
+                    | SharedResource::Filesystem
+                    | SharedResource::SignalHandlers
+            );
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.shared[resource as usize] = id;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The other processes that share `resource` with process `pid` and have
 /// not ended (a zombie holds nothing any more), by pid; empty when memory
 /// for the list runs out.
 pub(crate) fn live_processes_sharing(pid: u32, resource: SharedResource) -> Vec<u32> {
-    let mut sharing = Vec::new();
-    let Some(table) = live_process_table_mut() else {
-        return sharing;
-    };
-    let Some(id) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-        .map(|process| process.shared[resource as usize])
-    else {
-        return sharing;
-    };
-    for process in table.processes.iter().flatten() {
-        if process.handle.pid != pid
-            && process.shared[resource as usize] == id
-            && matches!(
-                process.state,
-                ProcessState::Running | ProcessState::Stopped { .. }
-            )
-        {
-            if sharing.try_reserve(1).is_err() {
-                return Vec::new();
+    with_live_table(|table| {
+        let mut sharing = Vec::new();
+        let Some(id) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+            .map(|process| process.shared[resource as usize])
+        else {
+            return sharing;
+        };
+        for process in table.processes.iter().flatten() {
+            if process.handle.pid != pid
+                && process.shared[resource as usize] == id
+                && matches!(
+                    process.state,
+                    ProcessState::Running | ProcessState::Stopped { .. }
+                )
+            {
+                if sharing.try_reserve(1).is_err() {
+                    return Vec::new();
+                }
+                sharing.push(process.handle.pid);
             }
-            sharing.push(process.handle.pid);
         }
-    }
-    sharing
+        sharing
+    })
+    .unwrap_or_default()
 }
 
 /// Whether process `pid` shares `resource` with another that has not ended.
@@ -5313,62 +5619,67 @@ pub(crate) fn live_process_resource_shared(pid: u32, resource: SharedResource) -
         resource,
         SharedResource::Memory | SharedResource::Io | SharedResource::SemaphoreUndo
     ) || live_processes_share_state();
-    let Some(table) = live_process_table_mut().filter(|_| tracked) else {
+    if !tracked {
         return false;
-    };
-    let Some(id) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-        .map(|process| process.shared[resource as usize])
-    else {
-        return false;
-    };
-    table.processes.iter().flatten().any(|process| {
-        process.handle.pid != pid
-            && process.shared[resource as usize] == id
-            && matches!(
-                process.state,
-                ProcessState::Running | ProcessState::Stopped { .. }
-            )
+    }
+    with_live_table(|table| {
+        let Some(id) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+            .map(|process| process.shared[resource as usize])
+        else {
+            return false;
+        };
+        table.processes.iter().flatten().any(|process| {
+            process.handle.pid != pid
+                && process.shared[resource as usize] == id
+                && matches!(
+                    process.state,
+                    ProcessState::Running | ProcessState::Stopped { .. }
+                )
+        })
     })
+    .unwrap_or(false)
 }
 
 /// Whether any process of the domain was ever cloned to share runtime
 /// state (descriptors, filesystem context, signal handlers) with another:
 /// until then no system call needs to keep any in step.
 pub(crate) fn live_processes_share_state() -> bool {
-    live_process_table_mut().is_some_and(|table| table.sharing)
+    with_live_table(|table| table.sharing).unwrap_or(false)
 }
 
 /// Places process `pid` in the cgroup of generation `generation` (0: the
 /// root), whose memory cgroup is `memcg`, and gives back the one it was in.
 pub(crate) fn replace_live_process_cgroup(pid: u32, generation: u32, memcg: u16) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let process = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))?;
-    process.memcg = memcg;
-    Some(core::mem::replace(
-        &mut process.cgroup_generation,
-        generation,
-    ))
+    with_live_table(|table| {
+        let process = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))?;
+        process.memcg = memcg;
+        Some(core::mem::replace(
+            &mut process.cgroup_generation,
+            generation,
+        ))
+    })
+    .flatten()
 }
 
 /// Marks process `pid` as an OOM victim (`oom_victim`).
 pub(crate) fn note_live_process_killed(pid: u32) {
-    if let Some(table) = live_process_table_mut() {
+    let _ = with_live_table(|table| {
         if let Some(process) = table
             .handle_by_pid(pid)
             .and_then(|handle| table.process_mut(handle))
         {
             process.oom_victim = true;
         }
-    }
+    });
 }
 
 /// Whether process `pid` is an OOM victim not yet gone.
 pub(crate) fn live_process_killed(pid: u32) -> bool {
-    live_process_table_mut().is_some_and(|table| {
+    with_live_table(|table| {
         table
             .handle_by_pid(pid)
             .and_then(|handle| table.process(handle))
@@ -5380,125 +5691,168 @@ pub(crate) fn live_process_killed(pid: u32) -> bool {
                     )
             })
     })
+    .unwrap_or(false)
 }
 
 /// The memory cgroup process `pid`'s pages are charged to (0: not known).
 pub(crate) fn live_process_memcg(pid: u32) -> Option<u16> {
-    let table = live_process_table_mut()?;
-    Some(table.process(table.handle_by_pid(pid)?)?.memcg)
+    with_live_table(|table| Some(table.process(table.handle_by_pid(pid)?)?.memcg)).flatten()
 }
 
 /// The running or stopped processes charged to memory cgroups for which
 /// `within` holds, with their `oom_score_adj`.
 pub(crate) fn live_memcg_members(within: impl Fn(u16) -> bool) -> impl Iterator<Item = (u32, i32)> {
-    live_process_table_mut()
-        .into_iter()
-        .flat_map(|table| table.processes.iter().flatten())
-        .filter(move |process| {
-            within(process.memcg)
-                && matches!(
-                    process.state,
-                    ProcessState::Running | ProcessState::Stopped { .. }
-                )
-        })
-        .map(|process| (process.handle.pid, i32::from(process.oom_score_adj)))
+    LiveMemcgMembers {
+        next_slot: 0,
+        within,
+    }
+}
+
+/// `live_memcg_members`' iterator: each step takes the table's lock to find
+/// the next running or stopped process by slot, and asks `within` with the
+/// lock released, so its user may call into the table between steps (and
+/// nothing is allocated, which an OOM killer that walks it needs).
+struct LiveMemcgMembers<F> {
+    next_slot: usize,
+    within: F,
+}
+
+impl<F: Fn(u16) -> bool> Iterator for LiveMemcgMembers<F> {
+    type Item = (u32, i32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let start = self.next_slot;
+            let (slot, memcg, member) = with_live_table(|table| {
+                table
+                    .processes
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find_map(|(slot, process)| {
+                        let process = process.as_ref().filter(|process| {
+                            matches!(
+                                process.state,
+                                ProcessState::Running | ProcessState::Stopped { .. }
+                            )
+                        })?;
+                        Some((
+                            slot,
+                            process.memcg,
+                            (process.handle.pid, i32::from(process.oom_score_adj)),
+                        ))
+                    })
+            })
+            .flatten()?;
+            self.next_slot = slot + 1;
+            if (self.within)(memcg) {
+                return Some(member);
+            }
+        }
+    }
 }
 
 /// The signal process `pid`'s end sends its parent (clone's exit signal).
 pub(crate) fn live_process_exit_signal(pid: u32) -> Option<u8> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.exit_signal)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.exit_signal)
+    })
+    .flatten()
 }
 
 /// Process `pid` ended while its parent reaped its children automatically.
 pub(crate) fn set_live_process_reaped_by_parent(pid: u32) {
-    if let Some(table) = live_process_table_mut() {
+    let _ = with_live_table(|table| {
         if let Some(process) = table
             .handle_by_pid(pid)
             .and_then(|handle| table.process_mut(handle))
         {
             process.reaped_by_parent = true;
         }
-    }
+    });
 }
 
 pub(crate) fn set_live_process_exit_signal(pid: u32, signal: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.exit_signal = signal;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.exit_signal = signal;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Makes process `pid`, a child just cloned, the child of its parent's
 /// parent instead (CLONE_PARENT): that process waits for it and gets its
 /// exit signal.
 pub(crate) fn adopt_live_process_by_grandparent(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(grandparent) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-        .and_then(|process| process.parent)
-        .and_then(|parent| table.process(parent))
-        .and_then(|parent| parent.parent)
-    else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.cloned_by = process.parent;
-    process.parent = Some(grandparent);
-    true
+    with_live_table(|table| {
+        let Some(grandparent) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+            .and_then(|process| process.parent)
+            .and_then(|parent| table.process(parent))
+            .and_then(|parent| parent.parent)
+        else {
+            return false;
+        };
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.cloned_by = process.parent;
+        process.parent = Some(grandparent);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Records that process `parent` is suspended in a vfork until `child`
 /// executes or exits (0: no longer).
 pub(crate) fn set_live_process_vfork_child(parent: u32, child: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(parent)
-        .and_then(|handle| table.process_mut(handle))
-    else {
-        return false;
-    };
-    process.vfork_child = child;
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(parent)
+            .and_then(|handle| table.process_mut(handle))
+        else {
+            return false;
+        };
+        process.vfork_child = child;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The vfork child process `parent` is suspended for, and whether it still
 /// is: true until the child has executed or ended.
 pub(crate) fn live_process_vfork_child(parent: u32) -> Option<(u32, bool)> {
-    let table = live_process_table_mut()?;
-    let child = table.process(table.handle_by_pid(parent)?)?.vfork_child;
-    if child == 0 {
-        return None;
-    }
-    let pending = table
-        .handle_by_pid(child)
-        .and_then(|handle| table.process(handle))
-        .is_some_and(|process| {
-            !process.executed
-                && matches!(
-                    process.state,
-                    ProcessState::Running | ProcessState::Stopped { .. } | ProcessState::Preparing
-                )
-        });
-    Some((child, pending))
+    with_live_table(|table| {
+        let child = table.process(table.handle_by_pid(parent)?)?.vfork_child;
+        if child == 0 {
+            return None;
+        }
+        let pending = table
+            .handle_by_pid(child)
+            .and_then(|handle| table.process(handle))
+            .is_some_and(|process| {
+                !process.executed
+                    && matches!(
+                        process.state,
+                        ProcessState::Running
+                            | ProcessState::Stopped { .. }
+                            | ProcessState::Preparing
+                    )
+            });
+        Some((child, pending))
+    })
+    .flatten()
 }
 
 pub(crate) fn replace_live_process_mapping(
@@ -5553,38 +5907,29 @@ fn replace_live_process_mapping_inner(
     {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    let Some(space) = process.address_space.as_mut() else {
-        return false;
-    };
-    let Some(storage) = address_space_storage(usize::from(space.storage_slot)) else {
-        return false;
-    };
-    let Some(mapping) = storage
-        .mappings
-        .get_mut(..space.mapping_count as usize)
-        .into_iter()
-        .flatten()
-        .find(|mapping| mapping.address == address && mapping.frame == expected)
-    else {
-        return false;
-    };
-    mapping.frame = replacement;
-    mapping.writable = writable;
-    mapping.executable = executable;
-    if private_exec_mapping {
-        mapping.shared = false;
-        mapping.dontfork = false;
-    }
-    true
+    with_live_table(|table| {
+        let Some((space, storage)) = table.space_lists_mut(pid) else {
+            return false;
+        };
+        let Some(mapping) = storage
+            .mappings
+            .get_mut(..space.mapping_count as usize)
+            .into_iter()
+            .flatten()
+            .find(|mapping| mapping.address == address && mapping.frame == expected)
+        else {
+            return false;
+        };
+        mapping.frame = replacement;
+        mapping.writable = writable;
+        mapping.executable = executable;
+        if private_exec_mapping {
+            mapping.shared = false;
+            mapping.dontfork = false;
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Drops `pid`'s registered mapping at `address`, whose page its page
@@ -5623,16 +5968,16 @@ fn with_live_process_mappings<T>(
     pid: u32,
     change: impl FnOnce(&mut Vec<cpu::LinuxActiveImageMapping>) -> Option<T>,
 ) -> Option<T> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let space = table.process_mut(handle)?.address_space.as_mut()?;
-    let storage = address_space_storage(usize::from(space.storage_slot))?;
-    if space.mapping_count as usize != storage.mappings.len() {
-        return None;
-    }
-    let result = change(&mut storage.mappings)?;
-    space.mapping_count = storage.mappings.len().try_into().ok()?;
-    Some(result)
+    with_live_table(|table| {
+        let (space, storage) = table.space_lists_mut(pid)?;
+        if space.mapping_count as usize != storage.mappings.len() {
+            return None;
+        }
+        let result = change(&mut storage.mappings)?;
+        space.mapping_count = storage.mappings.len().try_into().ok()?;
+        Some(result)
+    })
+    .flatten()
 }
 
 pub(crate) fn add_live_process_mapping(pid: u32, mapping: cpu::LinuxActiveImageMapping) -> bool {
@@ -5644,34 +5989,25 @@ pub(crate) fn add_live_process_mapping(pid: u32, mapping: cpu::LinuxActiveImageM
     {
         return false;
     }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process_mut(handle) else {
-        return false;
-    };
-    let Some(space) = process.address_space.as_mut() else {
-        return false;
-    };
-    let Some(storage) = address_space_storage(usize::from(space.storage_slot)) else {
-        return false;
-    };
-    let count = space.mapping_count as usize;
-    if count != storage.mappings.len()
-        || storage
-            .mappings
-            .iter()
-            .any(|existing| existing.address == mapping.address)
-        || storage.mappings.try_reserve(1).is_err()
-    {
-        return false;
-    }
-    storage.mappings.push(mapping);
-    space.mapping_count += 1;
-    true
+    with_live_table(|table| {
+        let Some((space, storage)) = table.space_lists_mut(pid) else {
+            return false;
+        };
+        let count = space.mapping_count as usize;
+        if count != storage.mappings.len()
+            || storage
+                .mappings
+                .iter()
+                .any(|existing| existing.address == mapping.address)
+            || storage.mappings.try_reserve(1).is_err()
+        {
+            return false;
+        }
+        storage.mappings.push(mapping);
+        space.mapping_count += 1;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn import_live_process_mapping_from_hardware(pid: u32, address: u64) -> bool {
@@ -5687,14 +6023,16 @@ pub(crate) fn import_live_process_mapping_from_hardware(pid: u32, address: u64) 
 }
 
 pub(crate) fn live_process_hierarchy_frame(pid: u32, index: usize) -> Option<memory::FrameLease> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    table
-        .process(handle)?
-        .address_space?
-        .hierarchy()
-        .get(index)
-        .copied()
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table
+            .process(handle)?
+            .address_space?
+            .hierarchy(&table.spaces)
+            .get(index)
+            .copied()
+    })
+    .flatten()
 }
 
 pub(crate) fn write_live_process_u32(pid: u32, address: u64, value: u32) -> bool {
@@ -5709,24 +6047,23 @@ pub(crate) fn write_live_process_u32(pid: u32, address: u64, value: u32) -> bool
     let Some(mapping) = live_process_mapping(pid, page).filter(|mapping| mapping.writable) else {
         return false;
     };
-    let Some(frame) = mapping.frame.direct_map_address() else {
+    let Some(frame) = Frame::leased(mapping.frame) else {
         return false;
     };
-    unsafe {
-        (frame as *mut u8)
-            .add(offset)
-            .cast::<u32>()
-            .write_unaligned(value)
-    };
+    frame.write_bytes(offset, &value.to_ne_bytes());
     true
 }
 
 pub(crate) fn copy_from_live_process(pid: u32, address: u64, output: &mut [u8]) -> bool {
-    copy_live_process_bytes(pid, address, output.as_mut_ptr(), output.len(), false)
+    for_each_live_process_page(pid, address, output.len(), false, |frame, offset, range| {
+        frame.read_bytes(offset, &mut output[range]);
+    })
 }
 
 pub(crate) fn copy_to_live_process(pid: u32, address: u64, input: &[u8]) -> bool {
-    copy_live_process_bytes(pid, address, input.as_ptr().cast_mut(), input.len(), true)
+    for_each_live_process_page(pid, address, input.len(), true, |frame, offset, range| {
+        frame.write_bytes(offset, &input[range]);
+    })
 }
 
 pub(crate) fn live_process_range_mapped(
@@ -5757,21 +6094,27 @@ pub(crate) fn live_process_range_mapped(
     true
 }
 
-fn copy_live_process_bytes(
+/// Runs `copy` on each page of process `pid`'s `length` bytes from
+/// `address`, with the offset in the page and the part of the caller's
+/// buffer that page holds. `write` makes each page the process's own first
+/// (a copy-on-write page is copied). Each page is looked up in the table
+/// and copied with the table's lock released: the kernel-entry lock keeps
+/// the page the process's meanwhile.
+fn for_each_live_process_page(
     pid: u32,
     address: u64,
-    buffer: *mut u8,
-    buffer_length: usize,
+    length: usize,
     write: bool,
+    mut copy: impl FnMut(Frame, usize, core::ops::Range<usize>),
 ) -> bool {
     let Ok(mut address) = usize::try_from(address) else {
         return false;
     };
     let mut copied = 0;
-    while copied < buffer_length {
+    while copied < length {
         let page = address & !(PAGE_SIZE - 1);
         let offset = address & (PAGE_SIZE - 1);
-        let length = (buffer_length - copied).min(PAGE_SIZE - offset);
+        let chunk = (length - copied).min(PAGE_SIZE - offset);
         if write && !prepare_live_process_write(pid, page) {
             return false;
         }
@@ -5780,22 +6123,12 @@ fn copy_live_process_bytes(
         else {
             return false;
         };
-        let Some(frame) = mapping.frame.direct_map_address() else {
+        let Some(frame) = Frame::leased(mapping.frame) else {
             return false;
         };
-        // SAFETY: the generation-bound process mapping owns a live page. The
-        // bounds above keep each copy within that page, and syscall execution
-        // serializes live-process table access on the current CPU.
-        unsafe {
-            let process = (frame as *mut u8).add(offset);
-            if write {
-                core::ptr::copy_nonoverlapping(buffer.add(copied), process, length);
-            } else {
-                core::ptr::copy_nonoverlapping(process, buffer.add(copied), length);
-            }
-        }
-        copied += length;
-        address += length;
+        copy(frame, offset, copied..copied + chunk);
+        copied += chunk;
+        address += chunk;
     }
     true
 }
@@ -5847,47 +6180,72 @@ pub(crate) fn prepare_live_process_write(pid: u32, address: usize) -> bool {
 }
 
 pub(crate) fn live_process_root(pid: u32) -> Option<memory::FrameLease> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    Some(table.process(handle)?.address_space?.root())
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        Some(table.process(handle)?.address_space?.root(&table.spaces))
+    })
+    .flatten()
 }
 
 /// Whether `visit` holds for the page-table root of some process of the
 /// domain (zombies whose memory has not gone yet included).
+///
+/// Each process's roots are looked up under the table's lock and visited
+/// with it released (`visit` walks page tables).
 pub(crate) fn any_live_process_root(mut visit: impl FnMut(u64) -> bool) -> bool {
-    live_process_table_mut().is_some_and(|table| {
-        table.processes.iter().flatten().any(|process| {
-            [&process.address_space, &process.retiring_address_space]
-                .into_iter()
-                .flatten()
-                .any(|space| visit(space.root().address()))
+    let mut next_slot = 0;
+    loop {
+        let found = with_live_table(|table| {
+            table
+                .processes
+                .iter()
+                .enumerate()
+                .skip(next_slot)
+                .find_map(|(slot, process)| {
+                    let process = process.as_ref()?;
+                    let roots = [process.address_space, process.retiring_address_space]
+                        .map(|space| space.map(|space| space.root(&table.spaces).address()));
+                    Some((slot, roots))
+                })
         })
-    })
+        .flatten();
+        let Some((slot, roots)) = found else {
+            return false;
+        };
+        if roots.into_iter().flatten().any(&mut visit) {
+            return true;
+        }
+        next_slot = slot + 1;
+    }
 }
 
 pub(crate) fn dispatch_live_init_with_return(value: u64) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let init = table.init?;
-    if !table.set_return_value(init, value) {
-        return None;
-    }
-    table.dispatch(init)
+    with_live_table(|table| {
+        let init = table.init?;
+        if !table.set_return_value(init, value) {
+            return None;
+        }
+        table.dispatch(init)
+    })
+    .flatten()
 }
 
 /// Sets the value a running process's interrupted system call returns.
 pub(crate) fn set_live_process_return_value(pid: u32, value: u64) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    table
-        .handle_by_pid(pid)
-        .is_some_and(|handle| table.set_return_value(handle, value))
+    with_live_table(|table| {
+        table
+            .handle_by_pid(pid)
+            .is_some_and(|handle| table.set_return_value(handle, value))
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn dispatch_live_process(pid: u32) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    table.dispatch(handle)
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table.dispatch(handle)
+    })
+    .flatten()
 }
 
 #[inline(never)]
@@ -5957,26 +6315,25 @@ fn write_process_table(table: &ProcessTable) {
     }
 }
 
-/// Creates a forked child of `parent_pid`. With `child_first` the run queue
-/// switches to the child, which the caller runs before resuming the parent;
-/// otherwise the parent stays current and the child waits, ready, for its
-/// turn.
-pub(crate) fn begin_live_fork(
+/// A fork child `begin_live_fork` prepared: its parent, itself, the
+/// namespaces it was made in and how many frames its copy needs.
+struct PreparedFork {
+    parent: ProcessHandle,
+    child: ProcessHandle,
+    namespaces: linux_namespace::Set,
+    hierarchy_count: usize,
+    private_count: usize,
+}
+
+/// The first part of `begin_live_fork`, under the table's lock: checks the
+/// parent and prepares the child's record. Sets the fork stage that says
+/// why it refused.
+fn prepare_live_fork(
+    table: &mut ProcessTable,
     parent_pid: u32,
     eager_private_copy: bool,
     share_vm: bool,
-    child_stack: Option<u64>,
-    child_first: bool,
-) -> Option<LiveProcessDispatch> {
-    process_runtime()
-        .fork_execution_stage
-        .store(10, Ordering::Release);
-    let Some(table) = live_process_table_mut() else {
-        process_runtime()
-            .fork_execution_stage
-            .store(101, Ordering::Release);
-        return None;
-    };
+) -> Option<PreparedFork> {
     let Some(parent_handle) = table.handle_by_pid(parent_pid) else {
         process_runtime()
             .fork_execution_stage
@@ -5995,10 +6352,11 @@ pub(crate) fn begin_live_fork(
             .store(104, Ordering::Release);
         return None;
     };
+    let spaces = &table.spaces;
     let parent_space_owned = if share_vm {
-        parent_space.hierarchy_is_owned()
+        parent_space.hierarchy_is_owned(spaces)
     } else {
-        parent_space.is_owned()
+        parent_space.is_owned(spaces)
     };
     if parent.state != ProcessState::Running || !parent_space_owned {
         crate::serial_write("linox: fork parent ownership pid/state/hierarchy/mappings: ");
@@ -6006,12 +6364,12 @@ pub(crate) fn begin_live_fork(
         crate::serial_write(" ");
         crate::serial_write_u64(u64::from(parent.state == ProcessState::Running));
         crate::serial_write(" ");
-        crate::serial_write_u64(u64::from(parent_space.hierarchy_is_owned()));
+        crate::serial_write_u64(u64::from(parent_space.hierarchy_is_owned(spaces)));
         crate::serial_write(" ");
-        crate::serial_write_u64(parent_space.mappings().len() as u64);
+        crate::serial_write_u64(parent_space.mappings(spaces).len() as u64);
         crate::serial_write("\r\n");
         for mapping in parent_space
-            .mappings()
+            .mappings(spaces)
             .iter()
             .filter(|mapping| {
                 !memory::frame_lease_is_runtime(mapping.frame)
@@ -6037,14 +6395,16 @@ pub(crate) fn begin_live_fork(
         );
         return None;
     }
-    let hierarchy_count = parent_space.hierarchy().len();
-    let private_count = (eager_private_copy && !share_vm).then(|| {
+    let hierarchy_count = parent_space.hierarchy(spaces).len();
+    let private_count = if eager_private_copy && !share_vm {
         parent_space
-            .mappings()
+            .mappings(spaces)
             .iter()
             .filter(|mapping| !mapping.dontfork && mapping_requires_fork_copy(mapping))
             .count()
-    });
+    } else {
+        0
+    };
     process_runtime()
         .fork_execution_stage
         .store(11, Ordering::Release);
@@ -6052,52 +6412,112 @@ pub(crate) fn begin_live_fork(
         report_fork_preparation_failure(table, parent_handle);
         return None;
     };
+    let namespaces = table.process(child_handle)?.namespaces;
+    Some(PreparedFork {
+        parent: parent_handle,
+        child: child_handle,
+        namespaces,
+        hierarchy_count,
+        private_count,
+    })
+}
+
+/// Enters new process `pid` in its PID namespace (where it gets its
+/// numbers) and freezes the offsets of its time namespace, as `allocate`
+/// leaves for after the table's lock is released.
+fn enter_namespaces(pid: u32, namespaces: linux_namespace::Set) -> bool {
+    let instance = cpu::current_linux_execution_instance();
+    if linux_namespace::enter_pid(instance, namespaces.pid, pid).is_err() {
+        return false;
+    }
+    if namespaces.time != 0 {
+        linux_namespace::freeze_time(instance, namespaces.time);
+    }
+    true
+}
+
+/// Creates a forked child of `parent_pid`. With `child_first` the run queue
+/// switches to the child, which the caller runs before resuming the parent;
+/// otherwise the parent stays current and the child waits, ready, for its
+/// turn.
+pub(crate) fn begin_live_fork(
+    parent_pid: u32,
+    eager_private_copy: bool,
+    share_vm: bool,
+    child_stack: Option<u64>,
+    child_first: bool,
+) -> Option<LiveProcessDispatch> {
+    process_runtime()
+        .fork_execution_stage
+        .store(10, Ordering::Release);
+    let Some(prepared) =
+        with_live_table(|table| prepare_live_fork(table, parent_pid, eager_private_copy, share_vm))
+    else {
+        process_runtime()
+            .fork_execution_stage
+            .store(101, Ordering::Release);
+        return None;
+    };
+    let PreparedFork {
+        parent: parent_handle,
+        child: child_handle,
+        namespaces,
+        hierarchy_count,
+        private_count,
+    } = prepared?;
     process_runtime()
         .fork_execution_stage
         .store(111, Ordering::Release);
-    let child_hierarchy = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_hierarchy_allocation_scratch.get() },
-        hierarchy_count,
-    );
-    if !memory::allocate_frame_prefix_into(
-        memory::FrameOwner::KERNEL,
-        child_hierarchy,
-        hierarchy_count,
-    ) {
-        let _ = table.abort_fork(child_handle);
+    let abort = || {
+        let _ = with_live_table(|table| table.abort_fork(child_handle));
+    };
+    if !enter_namespaces(child_handle.pid, namespaces) {
+        abort();
         return None;
     }
-    process_runtime()
-        .fork_execution_stage
-        .store(112, Ordering::Release);
-    let private_count = private_count.unwrap_or(0);
-    let child_pages = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_allocation_scratch.get() },
-        private_count,
-    );
-    if private_count != 0
-        && !memory::allocate_frame_prefix_into(
-            memory::FrameOwner::KERNEL,
-            child_pages,
-            private_count,
+    // The frames and lists the copy works with, taken out of the scratch so
+    // no lock is held across the copy.
+    let mut scratch = LiveForkScratch::take();
+    let published = 'publish: {
+        if !fork_frame_scratch(&mut scratch.hierarchy_allocation, hierarchy_count)
+            || !memory::allocate_frame_prefix_into(
+                memory::FrameOwner::KERNEL,
+                &mut scratch.hierarchy_allocation,
+                hierarchy_count,
+            )
+        {
+            abort();
+            break 'publish false;
+        }
+        let child_hierarchy = &scratch.hierarchy_allocation[..hierarchy_count];
+        process_runtime()
+            .fork_execution_stage
+            .store(112, Ordering::Release);
+        if !fork_frame_scratch(&mut scratch.page_allocation, private_count)
+            || private_count != 0
+                && !memory::allocate_frame_prefix_into(
+                    memory::FrameOwner::KERNEL,
+                    &mut scratch.page_allocation,
+                    private_count,
+                )
+        {
+            let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, child_hierarchy);
+            abort();
+            break 'publish false;
+        }
+        process_runtime()
+            .fork_execution_stage
+            .store(113, Ordering::Release);
+        commit_cloned_fork(
+            &mut LiveTable,
+            child_handle,
+            child_hierarchy,
+            &scratch.page_allocation[..private_count],
+            share_vm,
+            &mut scratch.lists,
         )
-    {
-        let _ = memory::scrub_and_release_frames(
-            memory::FrameOwner::KERNEL,
-            &child_hierarchy[..hierarchy_count],
-        );
-        let _ = table.abort_fork(child_handle);
-        return None;
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(113, Ordering::Release);
-    let published = table.commit_cloned_fork(
-        child_handle,
-        &child_hierarchy[..hierarchy_count],
-        &child_pages[..private_count],
-        share_vm,
-    );
+    };
+    scratch.put_back();
     if !published {
         return None;
     }
@@ -6105,75 +6525,96 @@ pub(crate) fn begin_live_fork(
         .fork_execution_stage
         .store(12, Ordering::Release);
     // fork returns the child's number in the parent's PID namespace.
-    let parent_namespace = table
-        .process(parent_handle)
-        .map_or(0, |parent| parent.namespaces.pid);
+    let parent_namespace = with_live_table(|table| {
+        table
+            .process(parent_handle)
+            .map_or(0, |parent| parent.namespaces.pid)
+    })
+    .unwrap_or(0);
     let child_seen = linux_namespace::pid_seen_from(
         cpu::current_linux_execution_instance(),
         parent_namespace,
         child_handle.pid,
     )
     .unwrap_or(child_handle.pid);
-    if !table.set_return_value(parent_handle, u64::from(child_seen)) {
+    let scheduled = with_live_table(|table| {
+        schedule_live_fork(
+            table,
+            parent_handle,
+            child_handle,
+            child_seen,
+            child_stack,
+            child_first,
+        )
+    });
+    match scheduled {
+        Some(Ok(dispatch)) => dispatch,
+        Some(Err(())) => {
+            let _ = discard_live_fork(parent_handle, child_handle);
+            None
+        }
+        None => None,
+    }
+}
+
+/// The last part of `begin_live_fork`, under the table's lock: gives the
+/// parent its result and the child its stack, and puts both in the run
+/// queue. Err(()) when the child has to be discarded (`discard_live_fork`),
+/// after the run queue was put back as it was.
+fn schedule_live_fork(
+    table: &mut ProcessTable,
+    parent_handle: ProcessHandle,
+    child_handle: ProcessHandle,
+    child_seen: u32,
+    child_stack: Option<u64>,
+    child_first: bool,
+) -> Result<Option<LiveProcessDispatch>, ()> {
+    let refuse = |stage: u32| {
         process_runtime()
             .fork_execution_stage
-            .store(121, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+            .store(stage, Ordering::Release);
+        Err(())
+    };
+    if !table.set_return_value(parent_handle, u64::from(child_seen)) {
+        return refuse(121);
     }
     if child_stack.is_some_and(|stack| !table.set_stack_pointer(child_handle, stack)) {
-        process_runtime()
-            .fork_execution_stage
-            .store(122, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return refuse(122);
     }
     let Some(parent_context) = table
         .process(parent_handle)
         .and_then(|process| process.context)
     else {
-        process_runtime()
-            .fork_execution_stage
-            .store(123, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return refuse(123);
     };
     let Some(parent_space) = table
         .process(parent_handle)
-        .and_then(|process| process.address_space.as_ref())
+        .and_then(|process| process.address_space)
     else {
-        process_runtime()
-            .fork_execution_stage
-            .store(124, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return refuse(124);
     };
-    let Some(parent_scheduler_context) = parent_context.scheduler_context(parent_space) else {
-        process_runtime()
-            .fork_execution_stage
-            .store(125, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+    let Some(parent_scheduler_context) =
+        parent_context.scheduler_context(&parent_space, &table.spaces)
+    else {
+        return refuse(125);
     };
     let Some(child) = table.process(child_handle) else {
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return Err(());
     };
-    let (Some(child_space), Some(child_context)) = (child.address_space.as_ref(), child.context)
+    let (Some(child_space), Some(child_context)) = (child.address_space, child.context) else {
+        return refuse(126);
+    };
+    let Some(child_scheduler_context) =
+        child_context.scheduler_context(&child_space, &table.spaces)
     else {
-        process_runtime()
-            .fork_execution_stage
-            .store(126, Ordering::Release);
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
-    };
-    let Some(child_scheduler_context) = child_context.scheduler_context(child_space) else {
         process_runtime()
             .fork_execution_stage
             .store(127, Ordering::Release);
         crate::serial_write("linox: fork child context validation error/rip/rsp/fs/mappings: ");
         crate::serial_write_u64(u64::from(
-            child_context.validation_error(child_space).unwrap_or(0),
+            child_context
+                .validation_error(&child_space, &table.spaces)
+                .unwrap_or(0),
         ));
         crate::serial_write(" ");
         crate::serial_write_u64(child_context.rip);
@@ -6182,10 +6623,9 @@ pub(crate) fn begin_live_fork(
         crate::serial_write(" ");
         crate::serial_write_u64(child_context.fs_base);
         crate::serial_write(" ");
-        crate::serial_write_u64(child_space.mappings().len() as u64);
+        crate::serial_write_u64(child_space.mappings(&table.spaces).len() as u64);
         crate::serial_write("\r\n");
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return Err(());
     };
     process_runtime()
         .fork_execution_stage
@@ -6198,19 +6638,20 @@ pub(crate) fn begin_live_fork(
         scheduler::active_process_scheduler_workspace()
     } else {
         scheduler::acquire_process_scheduler_workspace()
-    }?;
+    };
+    let Some(run_queue) = run_queue else {
+        return Ok(None);
+    };
     if !nested && !table.admit_to_scheduler(parent_handle, run_queue, scheduler_domain) {
         let _ = scheduler::release_process_scheduler_workspace();
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return Err(());
     }
     if !table.admit_to_scheduler(child_handle, run_queue, scheduler_domain) {
         if !nested {
             let _ = table.withdraw_from_scheduler(parent_handle, run_queue);
             let _ = scheduler::release_process_scheduler_workspace();
         }
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return Err(());
     }
     let scheduled = (|| {
         let parent_thread = table.process(parent_handle)?.scheduler_thread?;
@@ -6236,63 +6677,71 @@ pub(crate) fn begin_live_fork(
             let _ = table.withdraw_from_scheduler(parent_handle, run_queue);
             let _ = scheduler::release_process_scheduler_workspace();
         }
-        let _ = discard_live_fork(table, parent_handle, child_handle);
-        return None;
+        return Err(());
     }
     process_runtime()
         .fork_execution_stage
         .store(14, Ordering::Release);
-    table.dispatch(child_handle)
+    Ok(table.dispatch(child_handle))
 }
 
-fn discard_live_fork(
-    table: &mut ProcessTable,
-    parent_handle: ProcessHandle,
-    child_handle: ProcessHandle,
-) -> bool {
-    let Some(child_space) = table
-        .process(child_handle)
-        .and_then(|process| process.address_space)
-    else {
-        return false;
-    };
-    let return_restored = table.set_return_value(parent_handle, 0);
-    let Some(retiring) = table.begin_exit(child_handle, child_space) else {
+/// Backs out a fork whose child was committed but not scheduled: the
+/// parent's result goes back to 0 and the child's memory and attachments
+/// go, the child reaped at once.
+fn discard_live_fork(parent_handle: ProcessHandle, child_handle: ProcessHandle) -> bool {
+    let Some((return_restored, retiring, root)) = with_live_table(|table| {
+        let child_space = table.process(child_handle)?.address_space?;
+        let return_restored = table.set_return_value(parent_handle, 0);
+        let retiring = table.begin_exit(child_handle, child_space)?;
+        Some((return_restored, retiring, retiring.root(&table.spaces)))
+    })
+    .flatten() else {
         return false;
     };
     return_restored
-        && release_live_process_address_space(retiring)
+        && retire_live_process_page_tables(root)
+        && with_live_table(|table| release_space_hierarchy(&retiring, &table.spaces))
+            .unwrap_or(false)
         && crate::linux_sysv_ipc::drop_process_attachments(child_handle.pid).is_ok()
-        && table.exit_after_retiring_address_space_released(child_handle, retiring, 0)
-        && table.wait(parent_handle, child_handle.pid)
-            == Some(WaitResult {
-                pid: child_handle.pid,
-                status: 0,
-            })
+        && with_live_table(|table| {
+            table.exit_after_retiring_address_space_released(child_handle, retiring, 0)
+                && table.wait(parent_handle, child_handle.pid)
+                    == Some(WaitResult {
+                        pid: child_handle.pid,
+                        status: 0,
+                    })
+        })
+        .unwrap_or(false)
 }
 
-fn release_live_process_address_space(space: ProcessAddressSpace) -> bool {
-    const RELEASE_BATCH_SIZE: usize = 64;
+/// Retires a process's page tables, rooted at `root`, with the table's lock
+/// released: retiring releases each private page they map (pages no other
+/// address space maps are freed, shared ones lose this mapping) and drops
+/// the swap entries of pages paged out (`LockRank::SWAPS`). The tables are
+/// the record of what the process maps; its registry may be a stale
+/// snapshot (a process killed by a signal has no final refresh).
+fn retire_live_process_page_tables(root: memory::FrameLease) -> bool {
     let page_table_started = crate::arch::x86_64::timer::timestamp_counter();
-    // Retiring the page tables releases each private page they map: pages no
-    // other address space maps are freed, shared ones lose this mapping. The
-    // tables are the record of what the process maps; its registry may be a
-    // stale snapshot (a process killed by a signal has no final refresh).
-    if !address_space::retire_linux_child_address_space(space.root()) {
-        return false;
+    let retired = address_space::retire_linux_child_address_space(root);
+    if retired && cfg!(feature = "linux-boot-profile") {
+        crate::arch::x86_64::cpu::linux_boot_profile_record_lifecycle_phase(7, page_table_started);
     }
-    // A stale snapshot's hierarchy list may name tables already freed and
-    // handed out again; the live tree's tables are freed already.
+    retired
+}
+
+/// Frees the page-table frames `space`'s hierarchy list names, after
+/// `retire_live_process_page_tables`, under the table's lock (the frame
+/// allocator ranks above it). A stale list may name tables already freed
+/// and handed out again; the live tree's tables were freed with it.
+fn release_space_hierarchy(space: &ProcessAddressSpace, lists: &SpaceLists) -> bool {
+    const RELEASE_BATCH_SIZE: usize = 64;
     if space.stale {
         return true;
-    }
-    if cfg!(feature = "linux-boot-profile") {
-        crate::arch::x86_64::cpu::linux_boot_profile_record_lifecycle_phase(7, page_table_started);
     }
     let frame_release_started = crate::arch::x86_64::timer::timestamp_counter();
     let mut release_batch = [memory::FrameLease::EMPTY; RELEASE_BATCH_SIZE];
     let mut release_count = 0;
-    for frame in space.hierarchy() {
+    for frame in space.hierarchy(lists) {
         let ownership_started = crate::arch::x86_64::timer::timestamp_counter();
         let owned = memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]);
         if cfg!(feature = "linux-boot-profile") {
@@ -6337,102 +6786,127 @@ fn release_live_process_address_space(space: ProcessAddressSpace) -> bool {
     released
 }
 
+/// Ends process `handle`, out of the run queue already, whose address space
+/// `space` (rooted at `root`) is still its own: its memory and System V
+/// attachments go with the table's lock released, then it becomes a zombie
+/// with `status`.
+fn release_and_exit_live_process(
+    handle: ProcessHandle,
+    space: ProcessAddressSpace,
+    root: memory::FrameLease,
+    status: u8,
+) -> bool {
+    retire_live_process_page_tables(root)
+        && with_live_table(|table| release_space_hierarchy(&space, &table.spaces)).unwrap_or(false)
+        && crate::linux_sysv_ipc::drop_process_attachments(handle.pid).is_ok()
+        && with_live_table(|table| table.exit_after_current_address_space_retired(handle, status))
+            .unwrap_or(false)
+}
+
 #[inline(never)]
 /// Ends a process from another process's context: withdraws it from the
 /// run queue, frees its address space and leaves it a zombie for its
 /// parent. A domain's init uses this on exit for killed processes the
 /// scheduler can no longer switch to, so they cannot run their own exit.
 pub(crate) fn force_exit_live_process(pid: u32, status: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(process) = table.process(handle) else {
-        return false;
-    };
-    if process.state != ProcessState::Running {
-        return false;
-    }
-    let Some(space) = process.address_space else {
-        return false;
-    };
-    if process.scheduler_thread.is_some() {
-        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
-            return false;
-        };
-        if !table.withdraw_from_scheduler(handle, run_queue) {
-            return false;
+    let withdrawn = with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        if process.state != ProcessState::Running {
+            return None;
         }
-    }
-    release_live_process_address_space(space)
-        && crate::linux_sysv_ipc::drop_process_attachments(pid).is_ok()
-        && table.exit_after_current_address_space_retired(handle, status)
+        let space = process.address_space?;
+        if process.scheduler_thread.is_some() {
+            let run_queue = scheduler::active_process_scheduler_workspace()?;
+            if !table.withdraw_from_scheduler(handle, run_queue) {
+                return None;
+            }
+        }
+        Some((handle, space, space.root(&table.spaces)))
+    })
+    .flatten();
+    let Some((handle, space, root)) = withdrawn else {
+        return false;
+    };
+    release_and_exit_live_process(handle, space, root, status)
 }
 
 pub(crate) fn complete_live_child_exit(pid: u32, status: u8) -> Option<LiveProcessDispatch> {
     process_runtime()
         .fork_execution_stage
         .store(15, Ordering::Release);
-    let table = live_process_table_mut()?;
-    process_runtime()
-        .fork_execution_stage
-        .store(151, Ordering::Release);
-    let child_handle = table.handle_by_pid(pid)?;
-    let child = table.process(child_handle)?;
-    let parent_handle = child.cloned_by.or(child.parent)?;
-    let parent = table.process(parent_handle)?;
-    if child.state != ProcessState::Running {
-        return None;
-    }
-    let parent_space = parent.address_space.as_ref()?;
-    let parent_context = parent.context?;
-    let child_space = child.address_space?;
-    let child_context = child.context?;
-    process_runtime()
-        .fork_execution_stage
-        .store(152, Ordering::Release);
-    let parent_scheduler_context = parent_context.scheduler_context(parent_space)?;
-    let child_scheduler_context = child_context.scheduler_context(&child_space)?;
-    let parent_thread = parent.scheduler_thread?;
-    let child_thread = child.scheduler_thread?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
-    process_runtime()
-        .fork_execution_stage
-        .store(153, Ordering::Release);
-    let resumed = run_queue.switch_current(child_thread, child_scheduler_context, parent_thread)?;
-    process_runtime()
-        .fork_execution_stage
-        .store(154, Ordering::Release);
-    if resumed.handle() != parent_thread || resumed.context() != parent_scheduler_context {
-        return None;
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(16, Ordering::Release);
-    let nested = parent.parent.is_some();
-    let standalone_transaction = table
-        .processes
-        .iter()
-        .flatten()
-        .filter(|process| process.scheduler_thread.is_some())
-        .count()
-        == 2;
-    if !table.withdraw_from_scheduler(child_handle, run_queue) {
-        return None;
-    }
-    if !nested
-        && standalone_transaction
-        && (!table.withdraw_from_scheduler(parent_handle, run_queue)
-            || !scheduler::release_process_scheduler_workspace())
+    let (child_handle, parent_handle, child_space, child_root) = with_live_table(|table| {
+        process_runtime()
+            .fork_execution_stage
+            .store(151, Ordering::Release);
+        let child_handle = table.handle_by_pid(pid)?;
+        let child = table.process(child_handle)?;
+        let parent_handle = child.cloned_by.or(child.parent)?;
+        let parent = table.process(parent_handle)?;
+        if child.state != ProcessState::Running {
+            return None;
+        }
+        let parent_space = parent.address_space?;
+        let parent_context = parent.context?;
+        let child_space = child.address_space?;
+        let child_context = child.context?;
+        process_runtime()
+            .fork_execution_stage
+            .store(152, Ordering::Release);
+        let parent_scheduler_context =
+            parent_context.scheduler_context(&parent_space, &table.spaces)?;
+        let child_scheduler_context =
+            child_context.scheduler_context(&child_space, &table.spaces)?;
+        let parent_thread = parent.scheduler_thread?;
+        let child_thread = child.scheduler_thread?;
+        let nested = parent.parent.is_some();
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        process_runtime()
+            .fork_execution_stage
+            .store(153, Ordering::Release);
+        let resumed =
+            run_queue.switch_current(child_thread, child_scheduler_context, parent_thread)?;
+        process_runtime()
+            .fork_execution_stage
+            .store(154, Ordering::Release);
+        if resumed.handle() != parent_thread || resumed.context() != parent_scheduler_context {
+            return None;
+        }
+        process_runtime()
+            .fork_execution_stage
+            .store(16, Ordering::Release);
+        let standalone_transaction = table
+            .processes
+            .iter()
+            .flatten()
+            .filter(|process| process.scheduler_thread.is_some())
+            .count()
+            == 2;
+        if !table.withdraw_from_scheduler(child_handle, run_queue) {
+            return None;
+        }
+        if !nested
+            && standalone_transaction
+            && (!table.withdraw_from_scheduler(parent_handle, run_queue)
+                || !scheduler::release_process_scheduler_workspace())
+        {
+            return None;
+        }
+        process_runtime()
+            .fork_execution_stage
+            .store(161, Ordering::Release);
+        Some((
+            child_handle,
+            parent_handle,
+            child_space,
+            child_space.root(&table.spaces),
+        ))
+    })
+    .flatten()?;
+    if !retire_live_process_page_tables(child_root)
+        || !with_live_table(|table| release_space_hierarchy(&child_space, &table.spaces))
+            .unwrap_or(false)
     {
-        return None;
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(161, Ordering::Release);
-    if !release_live_process_address_space(child_space) {
         process_runtime()
             .fork_execution_stage
             .store(162, Ordering::Release);
@@ -6442,7 +6916,10 @@ pub(crate) fn complete_live_child_exit(pid: u32, status: u8) -> Option<LiveProce
         .fork_execution_stage
         .store(163, Ordering::Release);
     if crate::linux_sysv_ipc::drop_process_attachments(pid).is_err()
-        || !table.exit_after_current_address_space_retired(child_handle, status)
+        || !with_live_table(|table| {
+            table.exit_after_current_address_space_retired(child_handle, status)
+        })
+        .unwrap_or(false)
     {
         process_runtime()
             .fork_execution_stage
@@ -6452,29 +6929,33 @@ pub(crate) fn complete_live_child_exit(pid: u32, status: u8) -> Option<LiveProce
     process_runtime()
         .fork_execution_stage
         .store(17, Ordering::Release);
-    table.dispatch(parent_handle)
+    with_live_table(|table| table.dispatch(parent_handle)).flatten()
 }
-
 pub(crate) fn resume_live_parent_after_child_exec(pid: u32) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let child_handle = table.handle_by_pid(pid)?;
-    let child = table.process(child_handle)?;
-    let parent_handle = child.cloned_by.or(child.parent)?;
-    let parent = table.process(parent_handle)?;
-    let child_space = child.address_space.as_ref()?;
-    let parent_space = parent.address_space.as_ref()?;
-    let child_context = child.context?;
-    let parent_context = parent.context?;
-    let child_thread = child.scheduler_thread?;
-    let parent_thread = parent.scheduler_thread?;
-    let child_scheduler_context = child_context.scheduler_context(child_space)?;
-    let parent_scheduler_context = parent_context.scheduler_context(parent_space)?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
-    let resumed = run_queue.switch_current(child_thread, child_scheduler_context, parent_thread)?;
-    if resumed.handle() != parent_thread || resumed.context() != parent_scheduler_context {
-        return None;
-    }
-    table.dispatch(parent_handle)
+    with_live_table(|table| {
+        let child_handle = table.handle_by_pid(pid)?;
+        let child = table.process(child_handle)?;
+        let parent_handle = child.cloned_by.or(child.parent)?;
+        let parent = table.process(parent_handle)?;
+        let child_space = child.address_space.as_ref()?;
+        let parent_space = parent.address_space.as_ref()?;
+        let child_context = child.context?;
+        let parent_context = parent.context?;
+        let child_thread = child.scheduler_thread?;
+        let parent_thread = parent.scheduler_thread?;
+        let child_scheduler_context =
+            child_context.scheduler_context(child_space, &table.spaces)?;
+        let parent_scheduler_context =
+            parent_context.scheduler_context(parent_space, &table.spaces)?;
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        let resumed =
+            run_queue.switch_current(child_thread, child_scheduler_context, parent_thread)?;
+        if resumed.handle() != parent_thread || resumed.context() != parent_scheduler_context {
+            return None;
+        }
+        table.dispatch(parent_handle)
+    })
+    .flatten()
 }
 
 /// Makes process `pid`, ready in the run queue, current on this CPU, which
@@ -6483,22 +6964,24 @@ pub(crate) fn resume_live_parent_after_child_exec(pid: u32) -> Option<LiveProces
 /// signal's frame, a call's result, a restart) is newer than the copy the
 /// run queue kept from its last release.
 pub(crate) fn claim_live_process(pid: u32) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    if process.state != ProcessState::Running {
-        return None;
-    }
-    let space = process.address_space.as_ref()?;
-    let context = process.context?.scheduler_context(space)?;
-    let thread = process.scheduler_thread?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
-    run_queue.claim(thread)?;
-    let dispatched = table.dispatch(handle);
-    if dispatched.is_none() {
-        let _ = run_queue.release(thread, context);
-    }
-    dispatched
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let process = table.process(handle)?;
+        if process.state != ProcessState::Running {
+            return None;
+        }
+        let space = process.address_space.as_ref()?;
+        let context = process.context?.scheduler_context(space, &table.spaces)?;
+        let thread = process.scheduler_thread?;
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        run_queue.claim(thread)?;
+        let dispatched = table.dispatch(handle);
+        if dispatched.is_none() {
+            let _ = run_queue.release(thread, context);
+        }
+        dispatched
+    })
+    .flatten()
 }
 
 /// Starts a domain runtime's run queue with its init, ready: the runtime
@@ -6506,27 +6989,27 @@ pub(crate) fn claim_live_process(pid: u32) -> Option<LiveProcessDispatch> {
 /// included (docs/SCHEDULER.md), so a fork only adds its child. The queue
 /// goes when the runtime ends (`retire_lone_live_process`).
 pub(crate) fn start_runtime_scheduler() -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(init) = table.init else {
-        return false;
-    };
-    if table
-        .process(init)
-        .is_some_and(|process| process.scheduler_thread.is_some())
-    {
-        return true;
-    }
-    let domain = table.scheduler_domain();
-    let Some(run_queue) = scheduler::acquire_process_scheduler_workspace() else {
-        return false;
-    };
-    if !table.admit_to_scheduler(init, run_queue, domain) {
-        let _ = scheduler::release_process_scheduler_workspace();
-        return false;
-    }
-    true
+    with_live_table(|table| {
+        let Some(init) = table.init else {
+            return false;
+        };
+        if table
+            .process(init)
+            .is_some_and(|process| process.scheduler_thread.is_some())
+        {
+            return true;
+        }
+        let domain = table.scheduler_domain();
+        let Some(run_queue) = scheduler::acquire_process_scheduler_workspace() else {
+            return false;
+        };
+        if !table.admit_to_scheduler(init, run_queue, domain) {
+            let _ = scheduler::release_process_scheduler_workspace();
+            return false;
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Makes running process `pid` issue system call `number` again when it is
@@ -6534,31 +7017,33 @@ pub(crate) fn start_runtime_scheduler() -> bool {
 /// `syscall` instruction (two bytes) and its rax names the call, as a
 /// restarted call is re-issued. False when it has no context.
 pub(crate) fn restart_live_process_call(pid: u32, number: u64) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process_mut(handle))
-        .filter(|process| process.state == ProcessState::Running)
-    else {
-        return false;
-    };
-    let Some(mut context) = process.context else {
-        return false;
-    };
-    context.rip = context.rip.wrapping_sub(2);
-    context.general[PROCESS_RAX_INDEX] = number;
-    process.context = Some(context);
-    true
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process_mut(handle))
+            .filter(|process| process.state == ProcessState::Running)
+        else {
+            return false;
+        };
+        let Some(mut context) = process.context else {
+            return false;
+        };
+        context.rip = context.rip.wrapping_sub(2);
+        context.general[PROCESS_RAX_INDEX] = number;
+        process.context = Some(context);
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The value process `pid`'s interrupted system call returns when it is
 /// next entered (its saved rax).
 pub(crate) fn live_process_return_value(pid: u32) -> Option<u64> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.context?.general[PROCESS_RAX_INDEX])
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.context?.general[PROCESS_RAX_INDEX])
+    })
+    .flatten()
 }
 
 /// After the last other scheduled process of the domain ended: process
@@ -6566,58 +7051,58 @@ pub(crate) fn live_process_return_value(pid: u32) -> Option<u64> {
 /// and the queue is released, as when no fork had been scheduled. True too
 /// when other processes still run.
 pub(crate) fn retire_lone_live_process(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let lone = table
-        .process(handle)
-        .is_some_and(|process| process.parent.is_none() && process.scheduler_thread.is_some())
-        && table
-            .processes
-            .iter()
-            .flatten()
-            .filter(|process| process.scheduler_thread.is_some())
-            .count()
-            == 1;
-    if !lone {
-        return true;
-    }
-    let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
-        return false;
-    };
-    table.withdraw_from_scheduler(handle, run_queue)
-        && scheduler::release_process_scheduler_workspace()
+    with_live_table(|table| {
+        let Some(handle) = table.handle_by_pid(pid) else {
+            return false;
+        };
+        let lone = table
+            .process(handle)
+            .is_some_and(|process| process.parent.is_none() && process.scheduler_thread.is_some())
+            && table
+                .processes
+                .iter()
+                .flatten()
+                .filter(|process| process.scheduler_thread.is_some())
+                .count()
+                == 1;
+        if !lone {
+            return true;
+        }
+        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+            return false;
+        };
+        table.withdraw_from_scheduler(handle, run_queue)
+            && scheduler::release_process_scheduler_workspace()
+    })
+    .unwrap_or(false)
 }
 
 /// Puts process `pid`, current on this CPU, back among the ready ones with
 /// the context its registry records, leaving the CPU with no process.
 pub(crate) fn release_live_process(pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(process) = table
-        .handle_by_pid(pid)
-        .and_then(|handle| table.process(handle))
-    else {
-        return false;
-    };
-    let (Some(space), Some(context), Some(thread)) = (
-        process.address_space.as_ref(),
-        process.context,
-        process.scheduler_thread,
-    ) else {
-        return false;
-    };
-    let (Some(context), Some(run_queue)) = (
-        context.scheduler_context(space),
-        scheduler::active_process_scheduler_workspace(),
-    ) else {
-        return false;
-    };
-    run_queue.release(thread, context)
+    with_live_table(|table| {
+        let Some(process) = table
+            .handle_by_pid(pid)
+            .and_then(|handle| table.process(handle))
+        else {
+            return false;
+        };
+        let (Some(space), Some(context), Some(thread)) = (
+            process.address_space.as_ref(),
+            process.context,
+            process.scheduler_thread,
+        ) else {
+            return false;
+        };
+        let (Some(context), Some(run_queue)) = (
+            context.scheduler_context(space, &table.spaces),
+            scheduler::active_process_scheduler_workspace(),
+        ) else {
+            return false;
+        };
+        run_queue.release(thread, context)
+    })
+    .unwrap_or(false)
 }
 
 /// The first live process after `after` (in pid order, wrapping) that is
@@ -6628,24 +7113,28 @@ pub(crate) fn ready_live_process_after(
     now: u64,
     mut accept: impl FnMut(u32) -> bool,
 ) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
     // A process asleep in a futex wait (`Process::is_asleep`) is passed
     // over here, before `accept`'s costlier tests and without a place in
     // the list: a thousand of them would otherwise be sorted and tested on
-    // every pass.
-    let mut ready: Vec<u32> = Vec::new();
-    for process in table.processes.iter().flatten() {
-        if process.state == ProcessState::Running
-            && !process.is_asleep(now)
-            && process
-                .scheduler_thread
-                .is_some_and(|thread| run_queue.is_ready_here(thread))
-            && ready.try_reserve(1).is_ok()
-        {
-            ready.push(process.handle.pid);
+    // every pass. `accept` asks the table itself, so it runs with the
+    // table's lock released.
+    let mut ready: Vec<u32> = with_live_table(|table| {
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        let mut ready = Vec::new();
+        for process in table.processes.iter().flatten() {
+            if process.state == ProcessState::Running
+                && !process.is_asleep(now)
+                && process
+                    .scheduler_thread
+                    .is_some_and(|thread| run_queue.is_ready_here(thread))
+                && ready.try_reserve(1).is_ok()
+            {
+                ready.push(process.handle.pid);
+            }
         }
-    }
+        Some(ready)
+    })
+    .flatten()?;
     ready.sort_unstable();
     let start = ready.iter().position(|pid| *pid > after).unwrap_or(0);
     (0..ready.len())
@@ -6657,28 +7146,28 @@ pub(crate) fn ready_live_process_after(
 /// run on this CPU (not blocked, not claimed by a CPU): `pid` has the CPU to
 /// itself otherwise.
 pub(crate) fn other_live_process_ready(pid: u32, now: u64) -> bool {
-    let (Some(table), Some(run_queue)) = (
-        live_process_table_mut(),
-        scheduler::active_process_scheduler_workspace(),
-    ) else {
-        return true;
-    };
-    table.processes.iter().flatten().any(|process| {
-        process.handle.pid != pid
-            && process.state == ProcessState::Running
-            && !process.is_asleep(now)
-            && process
-                .scheduler_thread
-                .is_some_and(|thread| run_queue.is_ready_here(thread))
+    with_live_table(|table| {
+        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+            return true;
+        };
+        table.processes.iter().flatten().any(|process| {
+            process.handle.pid != pid
+                && process.state == ProcessState::Running
+                && !process.is_asleep(now)
+                && process
+                    .scheduler_thread
+                    .is_some_and(|thread| run_queue.is_ready_here(thread))
+        })
     })
+    .unwrap_or(true)
 }
 
 /// The ready process to run next in turn, after the one the last call
 /// chose, that `accept` takes; it becomes the turn's.
 pub(crate) fn next_ready_live_process(now: u64, accept: impl FnMut(u32) -> bool) -> Option<u32> {
-    let after = live_process_table_mut()?.dispatch_cursor;
+    let after = with_live_table(|table| table.dispatch_cursor)?;
     let next = ready_live_process_after(after, now, accept)?;
-    live_process_table_mut()?.dispatch_cursor = next;
+    with_live_table(|table| table.dispatch_cursor = next)?;
     Some(next)
 }
 
@@ -6686,81 +7175,74 @@ pub(crate) fn next_ready_live_process(now: u64, accept: impl FnMut(u32) -> bool)
 /// run queue, its memory goes and it becomes a zombie for its parent to
 /// reap, which runs elsewhere or waits. The CPU is left with no process.
 pub(crate) fn complete_live_process_exit_detached(pid: u32, status: u8) -> bool {
-    let Some(table) = live_process_table_mut() else {
+    let withdrawn = with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        let space = table
+            .process(handle)
+            .filter(|process| process.state == ProcessState::Running)
+            .and_then(|process| process.address_space)?;
+        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        table
+            .withdraw_from_scheduler(handle, run_queue)
+            .then(|| (handle, space, space.root(&table.spaces)))
+    })
+    .flatten();
+    let Some((handle, space, root)) = withdrawn else {
         return false;
     };
-    let Some(handle) = table.handle_by_pid(pid) else {
-        return false;
-    };
-    let Some(space) = table
-        .process(handle)
-        .filter(|process| process.state == ProcessState::Running)
-        .and_then(|process| process.address_space)
-    else {
-        return false;
-    };
-    let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
-        return false;
-    };
-    table.withdraw_from_scheduler(handle, run_queue)
-        && release_live_process_address_space(space)
-        && crate::linux_sysv_ipc::drop_process_attachments(pid).is_ok()
-        && table.exit_after_current_address_space_retired(handle, status)
+    release_and_exit_live_process(handle, space, root, status)
 }
 
 /// `pid`'s SCHED_DEADLINE runtime, deadline and period.
 pub(crate) fn live_process_deadline_parameters(pid: u32) -> Option<[u64; 3]> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some(process.deadline_parameters)
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some(process.deadline_parameters)
+    })
+    .flatten()
 }
 
 /// Sets `pid`'s SCHED_DEADLINE runtime, deadline and period.
 pub(crate) fn set_live_process_deadline_parameters(pid: u32, parameters: [u64; 3]) -> bool {
-    let Some(process) = live_process_table_mut().and_then(|table| {
-        let handle = table.handle_by_pid(pid)?;
-        table.process_mut(handle)
-    }) else {
-        return false;
-    };
-    process.deadline_parameters = parameters;
-    true
+    with_live_process(pid, |process| {
+        process.deadline_parameters = parameters;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Notes that `pid` holds `kib` KiB resident now (its ru_maxrss peak).
 pub(crate) fn note_live_process_rss(pid: u32, kib: u64) {
-    if let Some(process) = live_process_table_mut().and_then(|table| {
-        let handle = table.handle_by_pid(pid)?;
-        table.process_mut(handle)
-    }) {
+    let _ = with_live_process(pid, |process| {
         process.maxrss_kib = process.maxrss_kib.max(kib);
-    }
+    });
 }
 
 /// `pid`'s ru_maxrss peaks: its own and its waited children's, in KiB.
 pub(crate) fn live_process_maxrss(pid: u32) -> Option<(u64, u64)> {
-    let table = live_process_table_mut()?;
-    let process = table.process(table.handle_by_pid(pid)?)?;
-    Some((process.maxrss_kib, process.children_maxrss_kib))
+    with_live_table(|table| {
+        let process = table.process(table.handle_by_pid(pid)?)?;
+        Some((process.maxrss_kib, process.children_maxrss_kib))
+    })
+    .flatten()
 }
 
 /// A wait reaped `child` of `parent`: the child's peaks join the
 /// parent's children's (RUSAGE_CHILDREN's ru_maxrss).
 pub(crate) fn add_waited_child_maxrss(parent: u32, (own, children): (u64, u64)) {
-    if let Some(process) = live_process_table_mut().and_then(|table| {
-        let handle = table.handle_by_pid(parent)?;
-        table.process_mut(handle)
-    }) {
+    let _ = with_live_process(parent, |process| {
         process.children_maxrss_kib = process.children_maxrss_kib.max(own).max(children);
-    }
+    });
 }
 
 pub(crate) fn wait_live_child(parent_pid: u32, child_pid: u32) -> Option<(u32, u8)> {
-    let table = live_process_table_mut()?;
-    let parent = table.handle_by_pid(parent_pid)?;
-    table
-        .wait(parent, child_pid)
-        .map(|result| (result.pid, result.status))
+    with_live_table(|table| {
+        let parent = table.handle_by_pid(parent_pid)?;
+        table
+            .wait(parent, child_pid)
+            .map(|result| (result.pid, result.status))
+    })
+    .flatten()
 }
 
 pub(crate) fn live_child_wait_state(
@@ -6768,34 +7250,39 @@ pub(crate) fn live_child_wait_state(
     child_pid: Option<u32>,
     events: ChildWaitEvents,
 ) -> Option<ChildWaitState> {
-    let table = live_process_table_mut()?;
-    let parent = table.handle_by_pid(parent_pid)?;
-    table.child_wait_state_matching(
-        parent,
-        |process| {
-            child_pid.is_none_or(|pid| process.handle.pid == pid) && events.scope.includes(process)
-        },
-        events.exited,
-        events.stopped,
-        events.continued,
-    )
+    with_live_table(|table| {
+        let parent = table.handle_by_pid(parent_pid)?;
+        table.child_wait_state_matching(
+            parent,
+            |process| {
+                child_pid.is_none_or(|pid| process.handle.pid == pid)
+                    && events.scope.includes(process)
+            },
+            events.exited,
+            events.stopped,
+            events.continued,
+        )
+    })
+    .flatten()
 }
 
 /// An exited child of `parent_pid` that ended while it reaped its
 /// children automatically.
 pub(crate) fn live_child_reaped_by_parent(parent_pid: u32) -> Option<u32> {
-    let table = live_process_table_mut()?;
-    let parent = table.handle_by_pid(parent_pid)?;
-    match table.child_wait_state_matching(
-        parent,
-        |process| process.reaped_by_parent,
-        true,
-        false,
-        false,
-    )? {
-        ChildWaitState::Exited { pid, .. } => Some(pid),
-        _ => None,
-    }
+    with_live_table(|table| {
+        let parent = table.handle_by_pid(parent_pid)?;
+        match table.child_wait_state_matching(
+            parent,
+            |process| process.reaped_by_parent,
+            true,
+            false,
+            false,
+        )? {
+            ChildWaitState::Exited { pid, .. } => Some(pid),
+            _ => None,
+        }
+    })
+    .flatten()
 }
 
 pub(crate) fn live_child_group_wait_state(
@@ -6803,15 +7290,17 @@ pub(crate) fn live_child_group_wait_state(
     process_group: u32,
     events: ChildWaitEvents,
 ) -> Option<ChildWaitState> {
-    let table = live_process_table_mut()?;
-    let parent = table.handle_by_pid(parent_pid)?;
-    table.child_wait_state_matching(
-        parent,
-        |process| process.process_group == process_group && events.scope.includes(process),
-        events.exited,
-        events.stopped,
-        events.continued,
-    )
+    with_live_table(|table| {
+        let parent = table.handle_by_pid(parent_pid)?;
+        table.child_wait_state_matching(
+            parent,
+            |process| process.process_group == process_group && events.scope.includes(process),
+            events.exited,
+            events.stopped,
+            events.continued,
+        )
+    })
+    .flatten()
 }
 
 /// Which child state changes a wait reports (WEXITED, WUNTRACED/WSTOPPED,
@@ -6845,524 +7334,13 @@ impl ChildScope {
 }
 
 pub(crate) fn consume_live_child_wait_event(parent_pid: u32, child_pid: u32) -> bool {
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(parent) = table.handle_by_pid(parent_pid) else {
-        return false;
-    };
-    table.consume_wait_event(parent, child_pid)
-}
-
-#[inline(never)]
-#[allow(dead_code)]
-pub(crate) fn verify_live_fork_clone_transaction() -> bool {
-    process_runtime()
-        .fork_execution_stage
-        .store(0, Ordering::Release);
-    process_runtime()
-        .fork_child_diagnostic
-        .store(0, Ordering::Release);
-    cpu::reset_process_child_execution_diagnostic();
-    if process_runtime()
-        .fork_child_executed
-        .load(Ordering::Acquire)
-    {
-        verify_live_fork_clone_only_transaction()
-    } else {
-        verify_live_fork_clone_and_execution_transaction()
-    }
-}
-
-#[inline(never)]
-#[allow(dead_code)]
-fn verify_live_fork_clone_and_execution_transaction() -> bool {
-    let Some(before) = memory::owner_live_frame_count(memory::FrameOwner::KERNEL) else {
-        return false;
-    };
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    let Some(parent_handle) = table.init else {
-        return false;
-    };
-    let Some(parent) = table.process(parent_handle) else {
-        return false;
-    };
-    let (Some(parent_space), Some(parent_context)) = (parent.address_space, parent.context) else {
-        return false;
-    };
-    let parent_user_namespace = parent.user_namespace;
-    if parent.state != ProcessState::Running || !parent_space.is_valid() {
-        return false;
-    }
-    let Some(child_handle) = table.prepare_fork(parent_handle) else {
-        return false;
-    };
-    let hierarchy_count = parent_space.hierarchy().len();
-    let mapping_count = parent_space.mappings().len();
-    let private_count = parent_space
-        .mappings()
-        .iter()
-        .filter(|mapping| mapping_requires_fork_copy(mapping))
-        .count();
-    let child_hierarchy = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_hierarchy_allocation_scratch.get() },
-        hierarchy_count,
-    );
-    if !memory::allocate_frame_prefix_into(
-        memory::FrameOwner::KERNEL,
-        child_hierarchy,
-        hierarchy_count,
-    ) {
-        let _ = table.abort_fork(child_handle);
-        return false;
-    }
-    let child_pages = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_allocation_scratch.get() },
-        private_count,
-    );
-    if !memory::allocate_frame_prefix_into(memory::FrameOwner::KERNEL, child_pages, private_count) {
-        let _released = memory::scrub_and_release_frames(
-            memory::FrameOwner::KERNEL,
-            &child_hierarchy[..hierarchy_count],
-        );
-        let _aborted = table.abort_fork(child_handle);
-        return false;
-    }
-    let published = table.commit_cloned_fork(
-        child_handle,
-        &child_hierarchy[..hierarchy_count],
-        &child_pages[..private_count],
-        false,
-    );
-    let hierarchy_extras_released = true;
-    let page_extras_released = true;
-    if !published {
-        return false;
-    }
-    let Some(child) = table.process(child_handle) else {
-        return false;
-    };
-    let Some(child_space) = child.address_space else {
-        return false;
-    };
-    let child_valid = child.parent == Some(parent_handle)
-        && child.user_namespace == parent_user_namespace
-        && linux_user::credentials(child.user_namespace).is_some()
-        && child.state == ProcessState::Running
-        && child.context == Some(parent_context.fork_child())
-        && child_space.is_valid()
-        && !child_space.overlaps(&parent_space)
-        && child_space.hierarchy().len() == hierarchy_count
-        && child_space.mappings().len() == mapping_count
-        && child_space
-            .mappings()
-            .iter()
-            .zip(parent_space.mappings())
-            .all(|(child, parent)| {
-                child.address == parent.address
-                    && child.writable == parent.writable
-                    && child.executable == parent.executable
-                    && child.shared == parent.shared
-                    && (child.frame != parent.frame) == mapping_requires_fork_copy(parent)
-                    && (!mapping_requires_fork_copy(parent)
-                        || child
-                            .frame
-                            .direct_map_address()
-                            .zip(parent.frame.direct_map_address())
-                            .is_some_and(|(child_address, parent_address)| {
-                                // SAFETY: Both leases remain owned by the process table for
-                                // the duration of this comparison, and a direct-map lookup
-                                // validates the complete physical page range.
-                                unsafe {
-                                    core::slice::from_raw_parts(
-                                        child_address as *const u8,
-                                        PAGE_SIZE,
-                                    ) == core::slice::from_raw_parts(
-                                        parent_address as *const u8,
-                                        PAGE_SIZE,
-                                    )
-                                }
-                            }))
-            });
-    let execute_child = child_valid
-        && !process_runtime()
-            .fork_child_executed
-            .load(Ordering::Acquire);
-    let exit_status = if execute_child {
-        execute_cloned_live_child(table, parent_handle, child_handle)
-    } else {
-        child_valid.then_some(42)
-    };
-    let Some(retiring) = table.begin_exit(child_handle, child_space) else {
-        return false;
-    };
-    let resources_released = retiring.scrub_and_release();
-    let exited = resources_released && table.exit(child_handle, exit_status.unwrap_or(0));
-    let waited = exited
-        && table.wait(parent_handle, child_handle.pid)
-            == Some(WaitResult {
-                pid: child_handle.pid,
-                status: 42,
-            });
-    let valid = child_valid
-        && hierarchy_extras_released
-        && page_extras_released
-        && exit_status == Some(42)
-        && waited
-        && table.processes.iter().flatten().count() == 1
-        && table.process(parent_handle).is_some_and(|process| {
-            process.address_space == Some(parent_space)
-                && process.context == Some(parent_context)
-                && process.state == ProcessState::Running
-                && process.scheduler_thread.is_none()
-        })
-        && memory::owner_live_frame_count(memory::FrameOwner::KERNEL) == Some(before);
-    if valid && execute_child {
-        process_runtime()
-            .fork_child_executed
-            .store(true, Ordering::Release);
-    }
-    valid
-}
-
-#[inline(never)]
-#[allow(dead_code)]
-fn verify_live_fork_clone_only_transaction() -> bool {
-    macro_rules! reject {
-        ($stage:expr) => {{
-            process_runtime()
-                .fork_execution_stage
-                .store($stage, Ordering::Release);
+    with_live_table(|table| {
+        let Some(parent) = table.handle_by_pid(parent_pid) else {
             return false;
-        }};
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(200, Ordering::Release);
-    let Some(before) = memory::owner_live_frame_count(memory::FrameOwner::KERNEL) else {
-        reject!(201);
-    };
-    let Some(table) = live_process_table_mut() else {
-        reject!(202);
-    };
-    let Some(parent_handle) = table.init else {
-        reject!(203);
-    };
-    let Some(parent) = table.process(parent_handle) else {
-        reject!(204);
-    };
-    let (Some(parent_space), Some(parent_context)) = (parent.address_space, parent.context) else {
-        reject!(205);
-    };
-    let parent_user_namespace = parent.user_namespace;
-    if parent.state != ProcessState::Running || !parent_space.is_valid() {
-        crate::serial_write("linox: clone-only parent state/owned/validated: ");
-        crate::serial_write_u64(u64::from(parent.state == ProcessState::Running));
-        crate::serial_write(" ");
-        crate::serial_write_u64(u64::from(parent_space.is_owned()));
-        crate::serial_write(" ");
-        crate::serial_write_u64(u64::from(
-            address_space::validate_linux_process_address_space(
-                parent_space.hierarchy(),
-                parent_space.mappings(),
-            ),
-        ));
-        crate::serial_write("\r\n");
-        reject!(206);
-    }
-    let Some(child_handle) = table.prepare_fork(parent_handle) else {
-        reject!(207);
-    };
-    let hierarchy_count = parent_space.hierarchy().len();
-    let mapping_count = parent_space.mappings().len();
-    let private_count = parent_space
-        .mappings()
-        .iter()
-        .filter(|mapping| mapping_requires_fork_copy(mapping))
-        .count();
-    let child_hierarchy = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_hierarchy_allocation_scratch.get() },
-        hierarchy_count,
-    );
-    if !memory::allocate_frame_prefix_into(
-        memory::FrameOwner::KERNEL,
-        child_hierarchy,
-        hierarchy_count,
-    ) {
-        let _ = table.abort_fork(child_handle);
-        reject!(208);
-    }
-    let child_pages = fork_frame_scratch(
-        unsafe { &mut *process_scratch().fork_allocation_scratch.get() },
-        private_count,
-    );
-    if !memory::allocate_frame_prefix_into(memory::FrameOwner::KERNEL, child_pages, private_count) {
-        let _ = memory::scrub_and_release_frames(
-            memory::FrameOwner::KERNEL,
-            &child_hierarchy[..hierarchy_count],
-        );
-        let _ = table.abort_fork(child_handle);
-        reject!(209);
-    }
-    let published = table.commit_cloned_fork(
-        child_handle,
-        &child_hierarchy[..hierarchy_count],
-        &child_pages[..private_count],
-        false,
-    );
-    let hierarchy_extras_released = true;
-    let page_extras_released = true;
-    if !published {
-        reject!(210);
-    }
-    let Some(child) = table.process(child_handle) else {
-        reject!(211);
-    };
-    let Some(child_space) = child.address_space else {
-        reject!(212);
-    };
-    let child_valid = child.parent == Some(parent_handle)
-        && child.user_namespace == parent_user_namespace
-        && linux_user::credentials(child.user_namespace).is_some()
-        && child.state == ProcessState::Running
-        && child.context == Some(parent_context.fork_child())
-        && child_space.is_valid()
-        && !child_space.overlaps(&parent_space)
-        && child_space.hierarchy().len() == hierarchy_count
-        && child_space.mappings().len() == mapping_count
-        && child_space
-            .mappings()
-            .iter()
-            .zip(parent_space.mappings())
-            .all(|(child, parent)| {
-                child.address == parent.address
-                    && child.writable == parent.writable
-                    && child.executable == parent.executable
-                    && child.shared == parent.shared
-                    && (child.frame != parent.frame) == mapping_requires_fork_copy(parent)
-                    && (!mapping_requires_fork_copy(parent)
-                        || child
-                            .frame
-                            .direct_map_address()
-                            .zip(parent.frame.direct_map_address())
-                            .is_some_and(|(child_address, parent_address)| {
-                                // SAFETY: Both live, generation-checked leases map
-                                // complete pages for this serialized comparison.
-                                unsafe {
-                                    core::slice::from_raw_parts(
-                                        child_address as *const u8,
-                                        PAGE_SIZE,
-                                    ) == core::slice::from_raw_parts(
-                                        parent_address as *const u8,
-                                        PAGE_SIZE,
-                                    )
-                                }
-                            }))
-            });
-    let Some(retiring) = table.begin_exit(child_handle, child_space) else {
-        reject!(213);
-    };
-    let resources_released = retiring.scrub_and_release();
-    let exited = resources_released && table.exit(child_handle, 42);
-    let waited = exited
-        && table.wait(parent_handle, child_handle.pid)
-            == Some(WaitResult {
-                pid: child_handle.pid,
-                status: 42,
-            });
-    let parent_restored = table.process(parent_handle).is_some_and(|process| {
-        process.address_space == Some(parent_space)
-            && process.context == Some(parent_context)
-            && process.state == ProcessState::Running
-            && process.scheduler_thread.is_none()
-    });
-    let frame_count_restored =
-        memory::owner_live_frame_count(memory::FrameOwner::KERNEL) == Some(before);
-    let valid = child_valid
-        && hierarchy_extras_released
-        && page_extras_released
-        && waited
-        && table.processes.iter().flatten().count() == 1
-        && parent_restored
-        && frame_count_restored;
-    if !valid {
-        crate::serial_write("linox: clone-only verification state: ");
-        for state in [
-            child_valid,
-            resources_released,
-            exited,
-            waited,
-            table.processes.iter().flatten().count() == 1,
-            parent_restored,
-            frame_count_restored,
-        ] {
-            crate::serial_write_u64(u64::from(state));
-            crate::serial_write(" ");
-        }
-        crate::serial_write_u64(before as u64);
-        crate::serial_write(" ");
-        crate::serial_write_u64(
-            memory::owner_live_frame_count(memory::FrameOwner::KERNEL).unwrap_or(usize::MAX) as u64,
-        );
-        crate::serial_write("\r\n");
-    }
-    valid
-}
-
-#[inline(never)]
-#[allow(dead_code)]
-fn execute_cloned_live_child(
-    table: &mut ProcessTable,
-    parent_handle: ProcessHandle,
-    child_handle: ProcessHandle,
-) -> Option<u8> {
-    process_runtime()
-        .fork_execution_stage
-        .store(1, Ordering::Release);
-    let parent = table.process(parent_handle)?;
-    let parent_space = parent.address_space.as_ref()?;
-    let parent_context = parent.context?;
-    let parent_scheduler_context = parent_context.scheduler_context(parent_space)?;
-    let child = table.process(child_handle)?;
-    let child_space = child.address_space.as_ref()?;
-    let child_context = child.context?;
-    let child_scheduler_context = child_context.scheduler_context(child_space)?;
-    let child_root = child_space.root();
-    let child_code = child_space.mappings().iter().find(|mapping| {
-        mapping.executable
-            && child_context.rip >= mapping.address as u64
-            && child_context.rip < mapping.address as u64 + PAGE_SIZE as u64
-    })?;
-    let parent_code = parent_space
-        .mappings()
-        .iter()
-        .find(|mapping| mapping.address == child_code.address)?;
-    let child_code_frame = child_code.frame;
-    let parent_code_frame = parent_code.frame;
-    let offset = usize::try_from(child_context.rip - child_code.address as u64).ok()?;
-    if offset.checked_add(LIVE_PROCESS_CHILD_PROGRAM.len())? > PAGE_SIZE {
-        return None;
-    }
-    let child_address = child_code_frame.direct_map_address()?.checked_add(offset)?;
-    let parent_address = parent_code_frame
-        .direct_map_address()?
-        .checked_add(offset)?;
-    let mut original_parent = [0_u8; LIVE_PROCESS_CHILD_PROGRAM.len()];
-    // SAFETY: Both generation-checked pages remain exclusively owned by their
-    // process records. The validated offset covers the complete bounded probe.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            parent_address as *const u8,
-            original_parent.as_mut_ptr(),
-            original_parent.len(),
-        );
-        core::ptr::copy_nonoverlapping(
-            LIVE_PROCESS_CHILD_PROGRAM.as_ptr(),
-            child_address as *mut u8,
-            LIVE_PROCESS_CHILD_PROGRAM.len(),
-        );
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(2, Ordering::Release);
-    let run_queue = scheduler::acquire_process_scheduler_workspace()?;
-    let scheduler_domain = table.scheduler_domain();
-    if !table.admit_to_scheduler(parent_handle, run_queue, scheduler_domain) {
-        let _ = scheduler::release_process_scheduler_workspace();
-        return None;
-    }
-    if !table.admit_to_scheduler(child_handle, run_queue, scheduler_domain) {
-        let _ = table.withdraw_from_scheduler(parent_handle, run_queue);
-        let _ = scheduler::release_process_scheduler_workspace();
-        return None;
-    }
-    process_runtime()
-        .fork_execution_stage
-        .store(3, Ordering::Release);
-    let parent_thread = table.process(parent_handle)?.scheduler_thread?;
-    let child_thread = table.process(child_handle)?.scheduler_thread?;
-    let initial = run_queue.schedule_next();
-    let selected_child = initial
-        .and_then(|selected| {
-            (selected.handle() == parent_thread && selected.context() == parent_scheduler_context)
-                .then_some(())
-        })
-        .and_then(|()| run_queue.yield_current(parent_thread, parent_scheduler_context));
-    let selected = selected_child.is_some_and(|selected| {
-        selected.handle() == child_thread && selected.context() == child_scheduler_context
-    });
-    if selected {
-        process_runtime()
-            .fork_execution_stage
-            .store(4, Ordering::Release);
-    }
-    cpu::reset_process_child_execution_diagnostic();
-    let exit_status = selected
-        .then(|| {
-            address_space::execute_linux_process_child(
-                child_root,
-                child_context.rip,
-                child_context.rsp,
-                child_context.fs_base,
-                child_context.general,
-            )
-        })
-        .flatten();
-    if exit_status == Some(42) {
-        process_runtime()
-            .fork_execution_stage
-            .store(5, Ordering::Release);
-    }
-    let resumed_parent =
-        exit_status.and_then(|_| run_queue.yield_current(child_thread, child_scheduler_context));
-    let resumed = resumed_parent.is_some_and(|selected| {
-        selected.handle() == parent_thread && selected.context() == parent_scheduler_context
-    });
-    if resumed {
-        process_runtime()
-            .fork_execution_stage
-            .store(6, Ordering::Release);
-    }
-    let child_withdrawn = table.withdraw_from_scheduler(child_handle, run_queue);
-    let parent_withdrawn = table.withdraw_from_scheduler(parent_handle, run_queue);
-    let scheduler_released = scheduler::release_process_scheduler_workspace();
-    let parent_unchanged = parent_code_frame
-        .direct_map_address()
-        .and_then(|address| address.checked_add(offset))
-        .is_some_and(|address| {
-            // SAFETY: The parent lease remains live and the bounded range was
-            // validated above; the child executed under a disjoint root.
-            unsafe {
-                core::slice::from_raw_parts(address as *const u8, original_parent.len())
-                    == original_parent
-            }
-        });
-    if child_withdrawn && parent_withdrawn && parent_unchanged {
-        process_runtime()
-            .fork_execution_stage
-            .store(7, Ordering::Release);
-    }
-    let valid = selected
-        && resumed
-        && child_withdrawn
-        && parent_withdrawn
-        && scheduler_released
-        && parent_unchanged
-        && exit_status == Some(42);
-    let diagnostic = u32::from(selected)
-        | (u32::from(exit_status.is_some()) << 1)
-        | (u32::from(exit_status == Some(42)) << 2)
-        | (u32::from(resumed) << 3)
-        | (u32::from(child_withdrawn) << 4)
-        | (u32::from(parent_withdrawn) << 5)
-        | (u32::from(parent_unchanged) << 6)
-        | (u32::from(scheduler_released) << 7);
-    process_runtime()
-        .fork_child_diagnostic
-        .store(diagnostic, Ordering::Release);
-    valid.then_some(42)
+        };
+        table.consume_wait_event(parent, child_pid)
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn live_fork_execution_stage() -> u32 {
@@ -7377,19 +7355,37 @@ pub(crate) fn live_fork_child_diagnostic() -> u32 {
         .load(Ordering::Acquire)
 }
 
-fn live_process_table_mut() -> Option<&'static mut ProcessTable> {
+/// Runs `f` on the active instance's table under its lock, then does the
+/// namespace work `f` left owed (`DeferredWork`) with the lock released;
+/// None when no table is active. `f` must not park, copy to or from user
+/// memory, call back into this module's public functions, or take a lock
+/// ranked at or below `LockRank::PROCESS_TABLE`: the rank check refuses
+/// the last two and fails closed.
+fn with_live_table<R>(f: impl FnOnce(&mut ProcessTable) -> R) -> Option<R> {
     let instance = active_process_instance()?;
     if !process_runtime().table_initialized[instance].load(Ordering::Acquire) {
         return None;
     }
-    let table = unsafe {
-        process_runtime()
-            .tables
-            .get()
-            .cast::<ProcessTable>()
-            .add(instance)
+    let (result, deferred) = {
+        let mut table = PROCESS_TABLES[instance].lock();
+        let result = f(&mut table);
+        (
+            result,
+            core::mem::replace(&mut table.deferred, DeferredWork::NONE),
+        )
     };
-    Some(unsafe { &mut *table })
+    deferred.run();
+    Some(result)
+}
+
+/// Runs `f` on the record of process `pid` of the active instance's table,
+/// under the table's lock (see `with_live_table` for what `f` may do).
+fn with_live_process<R>(pid: u32, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
+    with_live_table(|table| {
+        let handle = table.handle_by_pid(pid)?;
+        table.process_mut(handle).map(f)
+    })
+    .flatten()
 }
 
 fn current_process_instance() -> usize {
@@ -7451,27 +7447,21 @@ pub(crate) fn copy_private_pages(
     {
         return false;
     }
-    if source.iter().zip(destination).any(|(source, destination)| {
-        source.direct_map_address().is_none() || destination.direct_map_address().is_none()
-    }) {
+    // Every frame is checked before the first is written.
+    if source
+        .iter()
+        .chain(destination)
+        .any(|frame| Frame::leased(*frame).is_none())
+    {
         return false;
     }
-    for (source_frame, destination_frame) in source.iter().zip(destination) {
-        let (Some(source_address), Some(destination_address)) = (
-            source_frame.direct_map_address(),
-            destination_frame.direct_map_address(),
-        ) else {
+    for (source, destination) in source.iter().zip(destination) {
+        let (Some(source), Some(destination)) =
+            (Frame::leased(*source), Frame::leased(*destination))
+        else {
             return false;
         };
-        // SAFETY: all leases and direct-map extents were validated before the
-        // first write, and source/destination frames are live and disjoint.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                source_address as *const u8,
-                destination_address as *mut u8,
-                PAGE_SIZE,
-            );
-        }
+        destination.copy_from(source);
     }
     true
 }
@@ -7499,9 +7489,9 @@ fn copy_validated_private_pages(
         .zip(source)
         .zip(destination)
     {
-        let (Some(source_address), Some(destination_address)) = (
-            source_frame.direct_map_address(),
-            destination_frame.direct_map_address(),
+        let (Some(source_page), Some(destination_page)) = (
+            Frame::leased(*source_frame),
+            Frame::leased(*destination_frame),
         ) else {
             return false;
         };
@@ -7509,16 +7499,10 @@ fn copy_validated_private_pages(
         else {
             return false;
         };
-        unsafe {
-            if wipeonfork {
-                core::ptr::write_bytes(destination_address as *mut u8, 0, PAGE_SIZE);
-            } else {
-                core::ptr::copy_nonoverlapping(
-                    source_address as *const u8,
-                    destination_address as *mut u8,
-                    PAGE_SIZE,
-                );
-            }
+        if wipeonfork {
+            destination_page.zero();
+        } else {
+            destination_page.copy_from(source_page);
         }
     }
     true
@@ -7541,23 +7525,16 @@ pub(crate) fn verify_private_page_copy_contract() -> bool {
     };
 
     let result = (|| {
-        let source_addresses = source.map(memory::FrameLease::direct_map_address);
-        let destination_addresses = destination.map(memory::FrameLease::direct_map_address);
-        if source_addresses.iter().any(Option::is_none)
-            || destination_addresses.iter().any(Option::is_none)
+        let source_pages = source.map(Frame::leased);
+        let destination_pages = destination.map(Frame::leased);
+        if source_pages.iter().any(Option::is_none) || destination_pages.iter().any(Option::is_none)
         {
             return None;
         }
-        for (index, source_address) in source_addresses.iter().copied().enumerate() {
-            let source_address = source_address?;
-            // SAFETY: allocation returned a private zeroed frame with a valid
-            // complete direct-map extent.
-            unsafe {
-                (source_address as *mut u8).write(0x41 + index as u8);
-                (source_address as *mut u8)
-                    .add(PAGE_SIZE - 1)
-                    .write(0x61 + index as u8);
-            }
+        for (index, page) in source_pages.iter().enumerate() {
+            let page = (*page)?;
+            page.write_u8(0, 0x41 + index as u8);
+            page.write_u8(PAGE_SIZE - 1, 0x61 + index as u8);
         }
 
         let stale_generation = destination[0].generation().checked_add(1)?;
@@ -7566,42 +7543,27 @@ pub(crate) fn verify_private_page_copy_contract() -> bool {
         stale_destination[0] = stale;
         if copy_private_pages(&source, &stale_destination)
             || copy_private_pages(&source, &source)
-            || destination_addresses.into_iter().any(|address| {
-                address.is_none_or(|address| unsafe {
-                    core::slice::from_raw_parts(address as *const u8, PAGE_SIZE)
-                        .iter()
-                        .any(|byte| *byte != 0)
-                })
-            })
+            || destination_pages
+                .iter()
+                .any(|page| page.is_none_or(|page| !page.is_zero()))
             || !copy_private_pages(&source, &destination)
         {
             return None;
         }
 
-        for (source_address, destination_address) in source_addresses
-            .iter()
-            .copied()
-            .zip(destination_addresses.iter().copied())
-        {
-            let source_address = source_address?;
-            let destination_address = destination_address?;
-            // SAFETY: both complete direct-map extents remain live.
-            let (source_page, destination_page) = unsafe {
-                (
-                    core::slice::from_raw_parts(source_address as *const u8, PAGE_SIZE),
-                    core::slice::from_raw_parts(destination_address as *const u8, PAGE_SIZE),
-                )
-            };
-            if source_page != destination_page {
+        for (source_page, destination_page) in source_pages.iter().zip(destination_pages.iter()) {
+            let (source_page, destination_page) = ((*source_page)?, (*destination_page)?);
+            if (0..PAGE_SIZE / size_of::<u64>())
+                .any(|word| source_page.read_u64(word) != destination_page.read_u64(word))
+            {
                 return None;
             }
         }
 
-        let first_source = source_addresses[0]?;
-        let first_destination = destination_addresses[0]?;
-        // SAFETY: the destination is a distinct, live, private frame.
-        unsafe { (first_destination as *mut u8).write(0xff) };
-        Some(unsafe { (first_source as *const u8).read() == 0x41 })
+        let first_source = source_pages[0]?;
+        let first_destination = destination_pages[0]?;
+        first_destination.write_u8(0, 0xff);
+        Some(first_source.read_u8(0) == 0x41)
     })()
     .unwrap_or(false);
 

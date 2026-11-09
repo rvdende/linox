@@ -65,7 +65,6 @@ mod linux_overlay;
 mod linux_overlayfs;
 mod linux_path_views;
 mod linux_pidfs;
-#[allow(unsafe_code)]
 mod linux_process;
 mod linux_profile;
 mod linux_pty;

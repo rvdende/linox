@@ -169,6 +169,62 @@ nothing that takes a lock. Two such leaves are never held together.
   Interrupts stay off while it is held, so a timer interrupt's scheduler
   work on the same CPU cannot reach it while it is held.
 
+## The Linux process tables
+
+`PROCESS_TABLE` (189, `linux_process`): one `IrqSpinLock` per domain
+instance (`PROCESS_TABLES`), around the instance's process table and its
+processes' address-space lists (page-table frames and mapped pages by
+runtime slot, which used to be raw pointers to leaked boxes). Every access
+goes through `with_live_table` (or `with_live_process`), which holds the
+lock for the closure only.
+
+- What runs under it: the table's own updates, which grow and free its
+  vectors (the heap, 190); frame ownership checks and the release of
+  page-table frames (the frame allocator, 200); user-namespace lookups
+  (`linux_user`, 194, and the domain manager, 450); the scheduler's run
+  queue (its workspace has no lock yet; the preempted-context leaf is
+  400); and the fork scratch leaf below. Nothing under it parks, copies to
+  or from user memory, or calls back into `linux_process`.
+- What it is taken under: whatever a system call holds while it looks a
+  process up, including a copy-on-write fault taken during a copy to user
+  memory, which reaches `live_process_mapping` and
+  `replace_live_process_mapping` under the futex coordination lock (180),
+  the socket table (140), System V IPC (101), the volumes (186) or the
+  unlinked-file list (188); the executables (110) and AIO contexts (116)
+  look processes up while held. So it ranks as high as the heap allows,
+  sharing 189 with the tmpfs limits and the swap areas, which are leaves
+  that neither call into the table nor are called under it.
+- What moved out from under it, done between two holds that look the
+  process up again by its handle (slot and generation): the namespace
+  bookkeeping (`NAMESPACES`, 107: entering a new child's PID namespace,
+  forgetting a reaped pid, collecting unused namespaces, owed as
+  `DeferredWork` and run by `with_live_table` after the unlock); System V
+  attachments a fork inherits or an exit drops (`SYSV_IPC`, 101);
+  page-table teardown at exit and the page copy and page-table clone at
+  fork, which drop and duplicate swap entries (`SWAPS`, 189) and walk
+  page tables; the walk of a stale process's live page tables; and the
+  callbacks callers pass (`ready_live_process_after`'s `accept`,
+  `live_memcg_members`' `within`, `any_live_process_root`'s `visit`), which
+  call into the table themselves. The callbacks that still run under it
+  (`with_live_process_groups`, `with_live_process_root`,
+  `account_live_process_io`, `update_posix_timer`) only read or set the
+  values they are given; getgroups copies the groups out before its copy
+  to user memory.
+- Interrupts are off while it is held (it is an `IrqSpinLock`), so the
+  timer's CPU-time accounting on the same CPU cannot reach it held.
+
+The kernel-entry lock still serializes system calls, so a process's state
+between two holds (out of the run queue, page tables retired, not yet a
+zombie) is not yet seen by another CPU's call; splitting the kernel-entry
+lock (M3) has to keep that in mind, as it has for the frames a lookup
+hands out (`copy_from_live_process` copies a page after the lock is
+released).
+
+`PROCESS_SCRATCH` (195): the fork work areas (`FORK_SCRATCH`). A fork
+takes them out and puts them back, each a swap of vectors that allocates
+and frees nothing under the lock, so no lock is held across the fork's
+copies; a fork that finds them taken works with empty ones.
+
 ## Local interrupt audit
 
 Direct `cli`, `sti`, and `sti; hlt; cli` sequences are limited to local CPU

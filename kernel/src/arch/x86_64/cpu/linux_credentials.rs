@@ -193,28 +193,33 @@ pub(super) fn linux_get_current_groups(size: u64, address: u64) -> u64 {
     let Ok(size) = usize::try_from(size as i32) else {
         return LINUX_EINVAL;
     };
-    linux_process::with_live_process_groups(current_linux_process_pid(), |groups| {
+    // The groups are copied out of the process table first: a copy to user
+    // memory may fault, which must not happen under the table's lock.
+    let bytes = linux_process::with_live_process_groups(current_linux_process_pid(), |groups| {
         if size == 0 {
-            return groups.len() as u64;
+            return Err(groups.len() as u64);
         }
         if size < groups.len() {
-            return LINUX_EINVAL;
+            return Err(LINUX_EINVAL);
         }
         let mut bytes = Vec::new();
         if bytes
             .try_reserve_exact(core::mem::size_of_val(groups))
             .is_err()
         {
-            return LINUX_ENOMEM;
+            return Err(LINUX_ENOMEM);
         }
         bytes.extend(groups.iter().flat_map(|group| group.to_ne_bytes()));
-        if copy_to_linux_user(address, &bytes) {
-            groups.len() as u64
-        } else {
-            LINUX_EFAULT
+        Ok(bytes)
+    });
+    match bytes {
+        None => LINUX_ESRCH,
+        Some(Err(result)) => result,
+        Some(Ok(bytes)) if copy_to_linux_user(address, &bytes) => {
+            (bytes.len() / core::mem::size_of::<u32>()) as u64
         }
-    })
-    .unwrap_or(LINUX_ESRCH)
+        Some(Ok(_)) => LINUX_EFAULT,
+    }
 }
 
 pub(super) fn copy_linux_id_triple(

@@ -167,6 +167,20 @@ impl LockRank {
     /// unlinked files (whether a file is in use), never with the tmpfs
     /// limits; only the heap is taken while held.
     pub(crate) const SWAPS: Self = Self(189);
+    /// Each domain instance's Linux process table (`linux_process`): held
+    /// for short table updates only, never across a park, a copy to or
+    /// from user memory or page-table teardown. Under it the table grows
+    /// and frees its vectors (the heap) and asks the frame allocator, the
+    /// user namespaces and the scheduler's run queue, all ranked above it.
+    /// It is taken under whatever lock a system call holds while it looks
+    /// a process up, a copy-on-write fault during a copy to user memory
+    /// included (the futex coordination lock, the socket table, the
+    /// volumes, the unlinked-file list), so it ranks as high as the heap
+    /// allows. It shares 189 with the tmpfs limits and the swap areas,
+    /// leaves never held with it: neither calls into the table, and the
+    /// table calls neither (the page-table teardown and clone that drop
+    /// and duplicate swap entries run between its holds).
+    pub(crate) const PROCESS_TABLE: Self = Self(189);
     /// The kernel heap refills from the frame allocator while holding its
     /// lock, so it ranks just below it.
     pub(crate) const KERNEL_HEAP: Self = Self(190);
@@ -181,6 +195,10 @@ impl LockRank {
     /// unlinked-file list, so it ranks above them all and the heap, below
     /// the other leaves (none of which calls it).
     pub(crate) const OVERLAY_NODES: Self = Self(191);
+    /// The fork work areas (`linux_process`'s `FORK_SCRATCH`): a leaf held
+    /// only to swap the areas in or out, which allocates and frees nothing,
+    /// so a fork may take or return them under the process table.
+    pub(crate) const PROCESS_SCRATCH: Self = Self(195);
     /// The mount namespace table (`linux_mount`): a leaf that copies its
     /// fixed records in and out and calls nothing while held. Path walks
     /// ask for the current namespace under the route, overlay and volume
