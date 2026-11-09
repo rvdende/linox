@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use crate::{control_abi, linux_process, memory};
+use crate::{control_abi, linux_process, memory, trusted::frame::Frame};
 
 const INSTANCE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 1;
 const WALK_LIMIT: usize = 262_144;
@@ -79,8 +79,8 @@ fn lease() -> Option<memory::FrameLease> {
     memory::allocate_frames::<1>(memory::FrameOwner::KERNEL).map(|frames| frames[0])
 }
 fn zero(frame: memory::FrameLease) -> bool {
-    frame.direct_map_address().is_some_and(|address| {
-        unsafe { core::ptr::write_bytes(address as *mut u8, 0, 4096) };
+    Frame::leased(frame).is_some_and(|page| {
+        page.fill(0);
         true
     })
 }

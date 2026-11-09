@@ -4,6 +4,7 @@ use crate::{
     linux_tmpfs_quota as tmpfs_quota,
     memory::{self, FrameLease, FrameOwner},
     sync::{LockRank, SpinLock},
+    trusted::frame::Frame,
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::cell::UnsafeCell;
@@ -1086,14 +1087,11 @@ fn make_node_paged(node: &mut Node) -> bool {
             let _ = release_frame_index(paged.first_page);
             return false;
         };
-        let Some(address) =
-            memfd_page(&mut paged, index, true).and_then(FrameLease::direct_map_address)
-        else {
+        let Some(page) = memfd_page(&mut paged, index, true).and_then(Frame::leased) else {
             let _ = release_frame_index(paged.first_page);
             return false;
         };
-        unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) }
-            .copy_from_slice(&buffer[..length]);
+        page.write_bytes(0, &buffer[..length]);
     }
     if !release_data_pages(node.first_page) {
         let _ = release_frame_index(paged.first_page);
@@ -1486,12 +1484,8 @@ fn read_node(node: &mut Node, offset: usize, output: &mut [u8]) -> Option<usize>
             let within = position % PAGE_SIZE;
             let length = (end - position).min(PAGE_SIZE - within);
             let target = &mut output[position - start..position - start + length];
-            match memfd_page(node, position / PAGE_SIZE, false)
-                .and_then(FrameLease::direct_map_address)
-            {
-                Some(address) => target.copy_from_slice(unsafe {
-                    core::slice::from_raw_parts((address + within) as *const u8, length)
-                }),
+            match memfd_page(node, position / PAGE_SIZE, false).and_then(Frame::leased) {
+                Some(page) => page.read_bytes(within, target),
                 None => target.fill(0),
             }
             position += length;
@@ -1567,9 +1561,11 @@ fn write_data(handle: Handle, offset: usize, input: &[u8]) -> Option<usize> {
         while position < end {
             let within = position % PAGE_SIZE;
             let length = (end - position).min(PAGE_SIZE - within);
-            let address = memfd_page(node, position / PAGE_SIZE, true)?.direct_map_address()?;
-            unsafe { core::slice::from_raw_parts_mut((address + within) as *mut u8, length) }
-                .copy_from_slice(&input[position - offset..position - offset + length]);
+            let page = Frame::leased(memfd_page(node, position / PAGE_SIZE, true)?)?;
+            page.write_bytes(
+                within,
+                &input[position - offset..position - offset + length],
+            );
             position += length;
         }
         node.size = node.size.max(end);
@@ -1638,10 +1634,10 @@ pub(crate) fn truncate(handle: Handle, size: usize) -> bool {
         while position < node.size {
             let within = position % PAGE_SIZE;
             let length = (node.size - position).min(PAGE_SIZE - within);
-            if let Some(address) = memfd_page(node, position / PAGE_SIZE, false)
-                .and_then(FrameLease::direct_map_address)
+            if let Some(page) =
+                memfd_page(node, position / PAGE_SIZE, false).and_then(Frame::leased)
             {
-                unsafe { core::ptr::write_bytes((address + within) as *mut u8, 0, length) };
+                page.fill_bytes(within, length, 0);
             }
             position += length;
         }
@@ -2336,10 +2332,8 @@ pub(crate) fn punch_hole(handle: Handle, offset: usize, end: usize) -> bool {
                 Some(false) => {}
                 None => return false,
             }
-        } else if let Some(address) =
-            memfd_page(node, index, false).and_then(FrameLease::direct_map_address)
-        {
-            unsafe { core::ptr::write_bytes((address + within) as *mut u8, 0, length) };
+        } else if let Some(page) = memfd_page(node, index, false).and_then(Frame::leased) {
+            page.fill_bytes(within, length, 0);
         }
         position += length;
     }
@@ -2482,13 +2476,11 @@ pub(crate) fn read_cached_page(handle: Handle, index: usize, output: &mut [u8; P
     let Some(node) = node_mut(handle).filter(|node| node.paged()) else {
         return false;
     };
-    let Some(address) = memfd_page(node, index, false).and_then(FrameLease::direct_map_address)
-    else {
+    // A paged node's frames are whole pages it owns.
+    let Some(page) = memfd_page(node, index, false).and_then(Frame::leased) else {
         return false;
     };
-    // SAFETY: a paged node's frames are whole pages of the direct map that
-    // it owns; nothing else writes them during the system call.
-    output.copy_from_slice(unsafe { core::slice::from_raw_parts(address as *const u8, PAGE_SIZE) });
+    page.read_bytes(0, output);
     true
 }
 
@@ -2497,13 +2489,12 @@ pub(crate) fn fill_cached_page(handle: Handle, index: usize, page: &[u8; PAGE_SI
     let Some(node) = node_mut(handle).filter(|node| node.paged()) else {
         return false;
     };
-    let Some(address) = memfd_page(node, index, true).and_then(FrameLease::direct_map_address)
-    else {
+    // The frame may be mapped into processes, which then see the page as
+    // the file now holds it.
+    let Some(frame) = memfd_page(node, index, true).and_then(Frame::leased) else {
         return false;
     };
-    // SAFETY: as in `read_cached_page`; the frame may be mapped into
-    // processes, which then see the page as the file now holds it.
-    unsafe { core::slice::from_raw_parts_mut(address as *mut u8, PAGE_SIZE) }.copy_from_slice(page);
+    frame.write_bytes(0, page);
     true
 }
 
@@ -2911,8 +2902,7 @@ fn allocate_mapping_page() -> Option<FrameLease> {
 
 fn allocate_zeroed_frame() -> Option<FrameLease> {
     let [page] = memory::allocate_frames::<1>(FrameOwner::KERNEL)?;
-    let address = page.direct_map_address()?;
-    unsafe { core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE) };
+    Frame::leased(page)?.fill(0);
     Some(page)
 }
 

@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use crate::{linux_namespace, linux_process, memory};
+use crate::{linux_namespace, linux_process, memory, trusted::frame::Frame};
 
 const PAGE_SIZE: usize = 4096;
 /// One instance per domain, the host's, and one per IPC namespace made
@@ -534,11 +534,11 @@ fn message_page_mut(frame: memory::FrameLease) -> Option<&'static mut MessagePag
 
 fn allocate_zeroed() -> Option<memory::FrameLease> {
     let [frame] = memory::allocate_frames::<1>(memory::FrameOwner::KERNEL)?;
-    let Some(address) = frame.direct_map_address() else {
+    let Some(page) = Frame::leased(frame) else {
         let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[frame]);
         return None;
     };
-    unsafe { core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE) };
+    page.fill(0);
     Some(frame)
 }
 
@@ -2666,12 +2666,10 @@ pub(crate) fn verify_shared_memory_lifecycle() -> bool {
     let verified = (|| {
         let first = frame(id, 0).ok()?;
         let second = frame(id, 1).ok()?;
-        let first_address = first.direct_map_address()?;
-        let second_address = second.direct_map_address()?;
-        unsafe {
-            (first_address as *mut u8).write(0x47);
-            (second_address as *mut u8).write(0x58);
-        }
+        let first_page = Frame::leased(first)?;
+        let second_page = Frame::leased(second)?;
+        first_page.write_u8(0, 0x47);
+        second_page.write_u8(0, 0x58);
         attach(id, 0x4000_0000, 1).ok()?;
         inherit_process_attachments(1, 2).ok()?;
         let state = segment(id).ok()?;
@@ -2680,8 +2678,8 @@ pub(crate) fn verify_shared_memory_lifecycle() -> bool {
             || state.attachments != 2
             || attachment_at(0x4000_0000, 1).ok()? != (id, 2 * PAGE_SIZE as u64)
             || attachment_at(0x4000_0000, 2).ok()? != (id, 2 * PAGE_SIZE as u64)
-            || unsafe { (first_address as *const u8).read() } != 0x47
-            || unsafe { (second_address as *const u8).read() } != 0x58
+            || first_page.read_u8(0) != 0x47
+            || second_page.read_u8(0) != 0x58
         {
             return None;
         }

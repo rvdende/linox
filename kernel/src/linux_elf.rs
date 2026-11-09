@@ -2072,44 +2072,47 @@ pub(crate) fn materialize_page(
     page_index: usize,
     page: &mut [u8; PAGE_SIZE],
 ) -> bool {
-    if page_index >= segment.page_count || segment.bytes.len() > segment.memory_size {
+    let Some((offset, bytes)) = page_file_bytes(segment, page_index) else {
         return false;
-    }
+    };
     page.fill(0);
-    let Some(page_start) = segment
+    page[offset..offset + bytes.len()].copy_from_slice(bytes);
+    true
+}
+
+/// The file bytes of page `page_index` of `segment` and their offset in
+/// the page; the rest of the page is zero. None for a page the segment
+/// does not have, or a segment whose file bytes exceed its memory size.
+pub(crate) fn page_file_bytes(
+    segment: PlannedSegment<'_>,
+    page_index: usize,
+) -> Option<(usize, &[u8])> {
+    if page_index >= segment.page_count || segment.bytes.len() > segment.memory_size {
+        return None;
+    }
+    let page_start = segment
         .virtual_page
-        .checked_add((page_index * PAGE_SIZE) as u64)
-    else {
-        return false;
-    };
-    let Some(file_end) = segment
+        .checked_add((page_index * PAGE_SIZE) as u64)?;
+    let file_end = segment
         .virtual_address
-        .checked_add(segment.bytes.len() as u64)
-    else {
-        return false;
-    };
+        .checked_add(segment.bytes.len() as u64)?;
     let copy_start = page_start.max(segment.virtual_address);
     let copy_end = page_start.saturating_add(PAGE_SIZE as u64).min(file_end);
-    if copy_start < copy_end {
-        let source_start =
-            usize::try_from(copy_start - segment.virtual_address).unwrap_or(usize::MAX);
-        let destination_start = usize::try_from(copy_start - page_start).unwrap_or(usize::MAX);
-        let length = usize::try_from(copy_end - copy_start).unwrap_or(usize::MAX);
-        let Some(source_end) = source_start.checked_add(length) else {
-            return false;
-        };
-        let Some(destination_end) = destination_start.checked_add(length) else {
-            return false;
-        };
-        let Some(source) = segment.bytes.get(source_start..source_end) else {
-            return false;
-        };
-        let Some(destination) = page.get_mut(destination_start..destination_end) else {
-            return false;
-        };
-        destination.copy_from_slice(source);
+    if copy_start >= copy_end {
+        return Some((0, &[]));
     }
-    true
+    let source_start = usize::try_from(copy_start - segment.virtual_address).unwrap_or(usize::MAX);
+    let destination_start = usize::try_from(copy_start - page_start).unwrap_or(usize::MAX);
+    let length = usize::try_from(copy_end - copy_start).unwrap_or(usize::MAX);
+    let source_end = source_start.checked_add(length)?;
+    let destination_end = destination_start.checked_add(length)?;
+    if destination_end > PAGE_SIZE {
+        return None;
+    }
+    Some((
+        destination_start,
+        segment.bytes.get(source_start..source_end)?,
+    ))
 }
 
 pub(crate) fn materialized_page_matches(

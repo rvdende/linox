@@ -84,6 +84,7 @@ mod pe;
 mod published_rootfs;
 mod scheduler;
 mod sync;
+mod trusted;
 mod volume;
 
 use core::arch::{asm, global_asm};

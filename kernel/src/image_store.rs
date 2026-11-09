@@ -6,7 +6,10 @@ use core::{
 
 use linox_image_store::{Digest, ImageStore, ObjectBackend, StagingHandle, StoreError};
 
-use crate::memory::{self, FrameLease, FrameOwner};
+use crate::{
+    memory::{self, FrameLease, FrameOwner},
+    trusted::frame::Frame,
+};
 
 const PAGE_SIZE: usize = 4096;
 const OBJECT_LIMIT: usize = linox_oci::OCI_LAYER_LIMIT;
@@ -118,19 +121,16 @@ impl ObjectBackend for RamBackend {
             let page = position / PAGE_SIZE;
             let page_offset = position % PAGE_SIZE;
             let length = (bytes.len() - copied).min(PAGE_SIZE - page_offset);
-            let Some(address) = object
+            let Some(frame) = object
                 .first
                 .address()
                 .checked_add((page * PAGE_SIZE) as u64)
                 .and_then(|address| FrameLease::from_parts(address, object.first.generation()))
-                .and_then(FrameLease::direct_map_address)
+                .and_then(Frame::leased)
             else {
                 return false;
             };
-            let output = unsafe {
-                core::slice::from_raw_parts_mut((address + page_offset) as *mut u8, length)
-            };
-            output.copy_from_slice(&bytes[copied..copied + length]);
+            frame.write_bytes(page_offset, &bytes[copied..copied + length]);
             copied += length;
         }
         true
@@ -156,19 +156,16 @@ impl ObjectBackend for RamBackend {
             let page = position / PAGE_SIZE;
             let page_offset = position % PAGE_SIZE;
             let length = (output.len() - copied).min(PAGE_SIZE - page_offset);
-            let Some(address) = object
+            let Some(frame) = object
                 .first
                 .address()
                 .checked_add((page * PAGE_SIZE) as u64)
                 .and_then(|address| FrameLease::from_parts(address, object.first.generation()))
-                .and_then(FrameLease::direct_map_address)
+                .and_then(Frame::leased)
             else {
                 return false;
             };
-            let input = unsafe {
-                core::slice::from_raw_parts((address + page_offset) as *const u8, length)
-            };
-            output[copied..copied + length].copy_from_slice(input);
+            frame.read_bytes(page_offset, &mut output[copied..copied + length]);
             copied += length;
         }
         true

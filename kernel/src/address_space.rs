@@ -92,7 +92,9 @@ use crate::{
         smp,
         timer::{self, LocalApicCalibration},
     },
-    domain, ipc, memory, network, packet, scheduler, volume,
+    domain, ipc, memory, network, packet, scheduler,
+    trusted::frame::Frame,
+    volume,
 };
 
 global_asm!(include_str!("../volume-service.S"));
@@ -436,9 +438,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         let mut executable = |segment: crate::linux_elf::PlannedSegment<'_>| -> Option<()> {
             for page in 0..segment.page_count {
                 let frame = *runtime_frames.get(next_frame)?;
-                let output =
-                    unsafe { &mut *(mapped_frame::<u8>(frame.address())? as *mut [u8; PAGE_SIZE]) };
-                if !crate::linux_elf::materialize_page(segment, page, output) {
+                if !materialize_frame(Frame::leased(frame)?, segment, page) {
                     return None;
                 }
                 let address = segment
@@ -497,7 +497,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         for page in 1..cpu::LINUX_RUNTIME_HEAP_PAGES {
             let frame = *runtime_frames.get(next_frame)?;
             let address = HEAP_ADDRESS.checked_add((page * PAGE_SIZE) as u64)?;
-            if unsafe { zero_frame(frame.address()) }.is_none()
+            if zero_frame(frame.address()).is_none()
                 || !map_linux_leaf_in_root(root.address(), address, frame.address(), true, false)
             {
                 return None;
@@ -508,7 +508,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         while page < cpu::LINUX_RUNTIME_STACK_PAGES {
             let frame = *runtime_frames.get(next_frame)?;
             let address = STACK_ADDRESS.checked_sub((page * PAGE_SIZE) as u64)?;
-            if unsafe { zero_frame(frame.address()) }.is_none()
+            if zero_frame(frame.address()).is_none()
                 || !map_linux_leaf_in_root(root.address(), address, frame.address(), true, false)
             {
                 return None;
@@ -519,13 +519,14 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         stage = 4;
 
         let vdso = crate::linux_elf::vdso_image();
-        let vvar =
-            unsafe { &mut *(mapped_frame::<u8>(vvar_frame.address())? as *mut [u8; PAGE_SIZE]) };
-        let vdso_page =
-            unsafe { &mut *(mapped_frame::<u8>(vdso_frame.address())? as *mut [u8; PAGE_SIZE]) };
+        let vvar = Frame::leased(vvar_frame)?;
+        let vdso_page = Frame::leased(vdso_frame)?;
         vvar.fill(0);
         vdso_page.fill(0);
-        vdso_page.get_mut(..vdso.len())?.copy_from_slice(vdso);
+        if vdso.len() > PAGE_SIZE {
+            return None;
+        }
+        vdso_page.write_bytes(0, vdso);
         let frequency = crate::arch::x86_64::timer::monotonic_frequency()?;
         let multiplier = (1_000_000_000_u64 << 32).checked_div(frequency)?;
         if multiplier == 0 {
@@ -533,16 +534,16 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         }
         let monotonic_epoch = crate::arch::x86_64::timer::timestamp_counter();
         let (realtime_seconds, realtime_epoch) = crate::linux_realtime_epoch()?;
-        vvar[8..16].copy_from_slice(&multiplier.to_ne_bytes());
-        vvar[16..24].copy_from_slice(&monotonic_epoch.to_ne_bytes());
+        vvar.write_bytes(8, &multiplier.to_ne_bytes());
+        vvar.write_bytes(16, &monotonic_epoch.to_ne_bytes());
         let realtime_ticks = monotonic_epoch.checked_sub(realtime_epoch)?;
         let realtime_nanoseconds =
             u64::try_from(u128::from(realtime_ticks) * 1_000_000_000_u128 / u128::from(frequency))
                 .ok()?;
         let realtime_seconds =
             realtime_seconds.checked_add(realtime_nanoseconds / 1_000_000_000)?;
-        vvar[40..48].copy_from_slice(&realtime_seconds.to_ne_bytes());
-        vvar[48..56].copy_from_slice(&(realtime_nanoseconds % 1_000_000_000).to_ne_bytes());
+        vvar.write_bytes(40, &realtime_seconds.to_ne_bytes());
+        vvar.write_bytes(48, &(realtime_nanoseconds % 1_000_000_000).to_ne_bytes());
         if !map_linux_leaf_in_root(
             root.address(),
             crate::linux_elf::VVAR_ADDRESS,
@@ -580,8 +581,11 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
             initial_image_count += 1;
         }
 
-        let stack =
-            unsafe { &mut *(mapped_frame::<u8>(stack_frame.address())? as *mut [u8; PAGE_SIZE]) };
+        // The initial stack is laid out in a copy of the page and copied
+        // back in one piece below.
+        let stack_page = Frame::leased(stack_frame)?;
+        let mut stack = [0; PAGE_SIZE];
+        stack_page.read_bytes(0, &mut stack);
         let arguments = crate::published_rootfs::launch_arguments(init)?;
         let path_environment = b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0";
         let pwd_environment = b"PWD=/\0";
@@ -614,34 +618,22 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         stack[platform_offset..platform_offset + LINUX_PLATFORM.len()]
             .copy_from_slice(&LINUX_PLATFORM);
         stack[random_offset..platform_offset].copy_from_slice(&random);
-        let stack_words = unsafe { stack.as_mut_ptr().add(stack_offset).cast::<u64>() };
-        unsafe { stack_words.write(arguments.count as u64) };
-        for (index, address) in argument_addresses[..arguments.count].iter().enumerate() {
-            unsafe { stack_words.add(1 + index).write(*address) };
+        let stack_words = [arguments.count as u64]
+            .into_iter()
+            .chain(argument_addresses[..arguments.count].iter().copied())
+            .chain([0, path_environment_address, pwd_environment_address, 0])
+            .chain(crate::linux_elf::auxiliary_vector(
+                startup,
+                argument_address,
+                platform_address,
+                random_address,
+                crate::linux_elf::VDSO_ADDRESS,
+            ));
+        for (index, value) in stack_words.enumerate() {
+            let offset = stack_offset + index * size_of::<u64>();
+            stack[offset..offset + size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
         }
-        let environment_word = arguments.count + 2;
-        unsafe {
-            stack_words.add(arguments.count + 1).write(0);
-            stack_words
-                .add(environment_word)
-                .write(path_environment_address);
-            stack_words
-                .add(environment_word + 1)
-                .write(pwd_environment_address);
-            stack_words.add(environment_word + 2).write(0);
-        }
-        for (index, value) in crate::linux_elf::auxiliary_vector(
-            startup,
-            argument_address,
-            platform_address,
-            random_address,
-            crate::linux_elf::VDSO_ADDRESS,
-        )
-        .into_iter()
-        .enumerate()
-        {
-            unsafe { stack_words.add(environment_word + 3 + index).write(value) };
-        }
+        stack_page.write_bytes(0, &stack);
         stage = 5;
 
         let main_code = plan.main_executable()?;
@@ -1088,46 +1080,37 @@ pub(crate) fn verify_linux_elf_mapping(
                     .write(header_table | PRESENT | WRITABLE | USER);
             }
 
-            let first_bytes = &mut *(mapped_frame::<u8>(first_page)? as *mut [u8; PAGE_SIZE]);
-            let first_tail_bytes =
-                &mut *(mapped_frame::<u8>(first_tail_page)? as *mut [u8; PAGE_SIZE]);
-            let first_third_bytes =
-                &mut *(mapped_frame::<u8>(first_third_page)? as *mut [u8; PAGE_SIZE]);
-            let first_fourth_bytes =
-                &mut *(mapped_frame::<u8>(first_fourth_page)? as *mut [u8; PAGE_SIZE]);
-            let first_fifth_bytes =
-                &mut *(mapped_frame::<u8>(first_fifth_page)? as *mut [u8; PAGE_SIZE]);
-            let second_bytes = &mut *(mapped_frame::<u8>(second_page)? as *mut [u8; PAGE_SIZE]);
-            let second_tail_bytes =
-                &mut *(mapped_frame::<u8>(second_tail_page)? as *mut [u8; PAGE_SIZE]);
-            let header_bytes = &mut *(mapped_frame::<u8>(header_page)? as *mut [u8; PAGE_SIZE]);
-            let header_tail_bytes =
-                &mut *(mapped_frame::<u8>(header_tail_page)? as *mut [u8; PAGE_SIZE]);
-            if !crate::linux_elf::materialize(first, first_bytes)
-                || !crate::linux_elf::materialize(second, second_bytes)
-                || first.page_count > 1
-                    && !crate::linux_elf::materialize_page(first, 1, first_tail_bytes)
-                || first.page_count == 3
-                    && !crate::linux_elf::materialize_page(first, 2, first_third_bytes)
+            let first_bytes = Frame::from_physical(first_page)?;
+            let first_tail_bytes = Frame::from_physical(first_tail_page)?;
+            let first_third_bytes = Frame::from_physical(first_third_page)?;
+            let first_fourth_bytes = Frame::from_physical(first_fourth_page)?;
+            let first_fifth_bytes = Frame::from_physical(first_fifth_page)?;
+            let second_bytes = Frame::from_physical(second_page)?;
+            let second_tail_bytes = Frame::from_physical(second_tail_page)?;
+            let header_bytes = Frame::from_physical(header_page)?;
+            let header_tail_bytes = Frame::from_physical(header_tail_page)?;
+            if !materialize_frame(first_bytes, first, 0)
+                || !materialize_frame(second_bytes, second, 0)
+                || first.page_count > 1 && !materialize_frame(first_tail_bytes, first, 1)
+                || first.page_count == 3 && !materialize_frame(first_third_bytes, first, 2)
                 || first.page_count == 4
-                    && (!crate::linux_elf::materialize_page(first, 2, first_third_bytes)
-                        || !crate::linux_elf::materialize_page(first, 3, first_fourth_bytes))
+                    && (!materialize_frame(first_third_bytes, first, 2)
+                        || !materialize_frame(first_fourth_bytes, first, 3))
                 || first.page_count == 5
-                    && (!crate::linux_elf::materialize_page(first, 2, first_third_bytes)
-                        || !crate::linux_elf::materialize_page(first, 3, first_fourth_bytes)
-                        || !crate::linux_elf::materialize_page(first, 4, first_fifth_bytes))
-                || second.page_count == 2
-                    && !crate::linux_elf::materialize_page(second, 1, second_tail_bytes)
+                    && (!materialize_frame(first_third_bytes, first, 2)
+                        || !materialize_frame(first_fourth_bytes, first, 3)
+                        || !materialize_frame(first_fifth_bytes, first, 4))
+                || second.page_count == 2 && !materialize_frame(second_tail_bytes, second, 1)
                 || header.is_some_and(|segment| {
-                    !crate::linux_elf::materialize(segment, header_bytes)
+                    !materialize_frame(header_bytes, segment, 0)
                         || segment.page_count == 2
-                            && !crate::linux_elf::materialize_page(segment, 1, header_tail_bytes)
+                            && !materialize_frame(header_tail_bytes, segment, 1)
                 })
                 || zero_frame(heap_page).is_none()
             {
                 return None;
             }
-            let heap_bytes = &mut *(mapped_frame::<u8>(heap_page)? as *mut [u8; PAGE_SIZE]);
+            let heap_bytes = Frame::from_physical(heap_page)?;
             let flags = |segment: crate::linux_elf::PlannedSegment<'_>| {
                 PRESENT
                     | USER
@@ -1194,7 +1177,7 @@ pub(crate) fn verify_linux_elf_mapping(
                 table_entries.add(indexes[3]).write(0);
             }
 
-            let stack_bytes = mapped_frame::<u8>(stack_page)?;
+            let stack_bytes = Frame::from_physical(stack_page)?;
             let stack_offset = PAGE_SIZE - 52 * size_of::<u64>();
             let random_offset = PAGE_SIZE - 7 * size_of::<u64>();
             let platform_offset = PAGE_SIZE - 5 * size_of::<u64>();
@@ -1204,12 +1187,12 @@ pub(crate) fn verify_linux_elf_mapping(
             let random_address = stack_virtual_page + random_offset as u64;
             let environment_address = stack_virtual_page + environment_offset as u64;
             let argument_address = stack_virtual_page + argument_offset as u64;
-            let stack_words = stack_bytes.add(stack_offset).cast::<u64>();
+            let stack_words = stack_offset / size_of::<u64>();
             for (index, value) in [1_u64, argument_address, 0, environment_address, 0]
                 .into_iter()
                 .enumerate()
             {
-                stack_words.add(index).write(value);
+                stack_bytes.write_u64(stack_words + index, value);
             }
             for (index, value) in crate::linux_elf::auxiliary_vector(
                 startup,
@@ -1221,28 +1204,12 @@ pub(crate) fn verify_linux_elf_mapping(
             .into_iter()
             .enumerate()
             {
-                stack_words.add(5 + index).write(value);
+                stack_bytes.write_u64(stack_words + 5 + index, value);
             }
-            core::ptr::copy_nonoverlapping(
-                LINUX_FIXTURE_RANDOM.as_ptr(),
-                stack_bytes.add(random_offset),
-                LINUX_FIXTURE_RANDOM.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                LINUX_PLATFORM.as_ptr(),
-                stack_bytes.add(platform_offset),
-                LINUX_PLATFORM.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                LINUX_INIT_ENVIRONMENT.as_ptr(),
-                stack_bytes.add(environment_offset),
-                LINUX_INIT_ENVIRONMENT.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                LINUX_INIT_ARGUMENT.as_ptr(),
-                stack_bytes.add(argument_offset),
-                LINUX_INIT_ARGUMENT.len(),
-            );
+            stack_bytes.write_bytes(random_offset, &LINUX_FIXTURE_RANDOM);
+            stack_bytes.write_bytes(platform_offset, &LINUX_PLATFORM);
+            stack_bytes.write_bytes(environment_offset, &LINUX_INIT_ENVIRONMENT);
+            stack_bytes.write_bytes(argument_offset, &LINUX_INIT_ARGUMENT);
 
             let first_entry = table_entries.add(first_indexes[3]).read();
             let first_tail_entry = if first.page_count > 1 {
@@ -1288,13 +1255,13 @@ pub(crate) fn verify_linux_elf_mapping(
                         || header_tail_entry & (PRESENT | USER | NO_EXECUTE)
                             == PRESENT | USER | NO_EXECUTE
                             && header_tail_entry & WRITABLE == 0)
-                    && crate::linux_elf::materialized_page_matches(segment, 0, header_bytes)
+                    && header_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(segment, 0, bytes)
+                    })
                     && (segment.page_count == 1
-                        || crate::linux_elf::materialized_page_matches(
-                            segment,
-                            1,
-                            header_tail_bytes,
-                        ))
+                        || header_tail_bytes.with_bytes(|bytes| {
+                            crate::linux_elf::materialized_page_matches(segment, 1, bytes)
+                        }))
             });
             let entries_valid = root_entries.add(256).read() == kernel_root.add(256).read()
                 && root_entries.add(256).read() & USER == 0
@@ -1327,78 +1294,82 @@ pub(crate) fn verify_linux_elf_mapping(
                     .iter()
                     .all(|indexes| table_entries.add(indexes[3]).read() == 0)
                 && header_entries_valid
-                && crate::linux_elf::materialized_page_matches(first, 0, first_bytes)
+                && first_bytes.with_bytes(|bytes| {
+                    crate::linux_elf::materialized_page_matches(first, 0, bytes)
+                })
                 && (first.page_count == 1
-                    || crate::linux_elf::materialized_page_matches(first, 1, first_tail_bytes))
+                    || first_tail_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(first, 1, bytes)
+                    }))
                 && (first.page_count < 3
-                    || crate::linux_elf::materialized_page_matches(first, 2, first_third_bytes))
+                    || first_third_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(first, 2, bytes)
+                    }))
                 && (first.page_count < 4
-                    || crate::linux_elf::materialized_page_matches(first, 3, first_fourth_bytes))
+                    || first_fourth_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(first, 3, bytes)
+                    }))
                 && (first.page_count < 5
-                    || crate::linux_elf::materialized_page_matches(first, 4, first_fifth_bytes))
-                && crate::linux_elf::materialized_page_matches(second, 0, second_bytes)
+                    || first_fifth_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(first, 4, bytes)
+                    }))
+                && second_bytes.with_bytes(|bytes| {
+                    crate::linux_elf::materialized_page_matches(second, 0, bytes)
+                })
                 && (second.page_count == 1
-                    || crate::linux_elf::materialized_page_matches(second, 1, second_tail_bytes))
-                && heap_bytes.iter().all(|byte| *byte == 0)
-                && stack_words.read() == 1
-                && stack_words.add(1).read() == argument_address
-                && stack_words.add(3).read() == environment_address
-                && stack_words.add(5).read() == 3
-                && stack_words.add(6).read() == startup.program_headers
-                && stack_words.add(7).read() == 4
-                && stack_words.add(8).read() == crate::linux_elf::PROGRAM_HEADER_SIZE as u64
-                && stack_words.add(9).read() == 5
-                && stack_words.add(10).read() == u64::from(startup.program_header_count)
-                && stack_words.add(11).read() == 6
-                && stack_words.add(12).read() == PAGE_SIZE as u64
-                && stack_words.add(13).read() == 7
-                && stack_words.add(14).read() == startup.interpreter_base
-                && stack_words.add(15).read() == 8
-                && stack_words.add(16).read() == 0
-                && stack_words.add(17).read() == 11
-                && stack_words.add(18).read() == 0
-                && stack_words.add(19).read() == 12
-                && stack_words.add(20).read() == 0
-                && stack_words.add(21).read() == 13
-                && stack_words.add(22).read() == 0
-                && stack_words.add(23).read() == 14
-                && stack_words.add(24).read() == 0
-                && stack_words.add(25).read() == 23
-                && stack_words.add(26).read() == 0
-                && stack_words.add(27).read() == 31
-                && stack_words.add(28).read() == argument_address
-                && stack_words.add(29).read() == 9
-                && stack_words.add(30).read() == startup.main_entry
-                && stack_words.add(31).read() == 17
-                && stack_words.add(32).read() == 100
-                && stack_words.add(33).read() == 15
-                && stack_words.add(34).read() == platform_address
-                && stack_words.add(35).read() == 16
-                && stack_words.add(36).read() == 0
-                && stack_words.add(37).read() == 26
-                && stack_words.add(38).read() == 0
-                && stack_words.add(39).read() == 25
-                && stack_words.add(40).read() == random_address
-                && stack_words.add(41).read() == 33
-                && stack_words.add(42).read() == 0
-                && stack_words.add(43).read() == 0
-                && stack_words.add(44).read() == 0
-                && core::slice::from_raw_parts(
-                    stack_bytes.add(random_offset),
-                    LINUX_FIXTURE_RANDOM.len(),
-                ) == LINUX_FIXTURE_RANDOM
-                && core::slice::from_raw_parts(
-                    stack_bytes.add(platform_offset),
-                    LINUX_PLATFORM.len(),
-                ) == LINUX_PLATFORM
-                && core::slice::from_raw_parts(
-                    stack_bytes.add(environment_offset),
-                    LINUX_INIT_ENVIRONMENT.len(),
-                ) == LINUX_INIT_ENVIRONMENT
-                && core::slice::from_raw_parts(
-                    stack_bytes.add(argument_offset),
-                    LINUX_INIT_ARGUMENT.len(),
-                ) == LINUX_INIT_ARGUMENT;
+                    || second_tail_bytes.with_bytes(|bytes| {
+                        crate::linux_elf::materialized_page_matches(second, 1, bytes)
+                    }))
+                && heap_bytes.is_zero()
+                && stack_bytes.read_u64(stack_words) == 1
+                && stack_bytes.read_u64(stack_words + 1) == argument_address
+                && stack_bytes.read_u64(stack_words + 3) == environment_address
+                && stack_bytes.read_u64(stack_words + 5) == 3
+                && stack_bytes.read_u64(stack_words + 6) == startup.program_headers
+                && stack_bytes.read_u64(stack_words + 7) == 4
+                && stack_bytes.read_u64(stack_words + 8)
+                    == crate::linux_elf::PROGRAM_HEADER_SIZE as u64
+                && stack_bytes.read_u64(stack_words + 9) == 5
+                && stack_bytes.read_u64(stack_words + 10)
+                    == u64::from(startup.program_header_count)
+                && stack_bytes.read_u64(stack_words + 11) == 6
+                && stack_bytes.read_u64(stack_words + 12) == PAGE_SIZE as u64
+                && stack_bytes.read_u64(stack_words + 13) == 7
+                && stack_bytes.read_u64(stack_words + 14) == startup.interpreter_base
+                && stack_bytes.read_u64(stack_words + 15) == 8
+                && stack_bytes.read_u64(stack_words + 16) == 0
+                && stack_bytes.read_u64(stack_words + 17) == 11
+                && stack_bytes.read_u64(stack_words + 18) == 0
+                && stack_bytes.read_u64(stack_words + 19) == 12
+                && stack_bytes.read_u64(stack_words + 20) == 0
+                && stack_bytes.read_u64(stack_words + 21) == 13
+                && stack_bytes.read_u64(stack_words + 22) == 0
+                && stack_bytes.read_u64(stack_words + 23) == 14
+                && stack_bytes.read_u64(stack_words + 24) == 0
+                && stack_bytes.read_u64(stack_words + 25) == 23
+                && stack_bytes.read_u64(stack_words + 26) == 0
+                && stack_bytes.read_u64(stack_words + 27) == 31
+                && stack_bytes.read_u64(stack_words + 28) == argument_address
+                && stack_bytes.read_u64(stack_words + 29) == 9
+                && stack_bytes.read_u64(stack_words + 30) == startup.main_entry
+                && stack_bytes.read_u64(stack_words + 31) == 17
+                && stack_bytes.read_u64(stack_words + 32) == 100
+                && stack_bytes.read_u64(stack_words + 33) == 15
+                && stack_bytes.read_u64(stack_words + 34) == platform_address
+                && stack_bytes.read_u64(stack_words + 35) == 16
+                && stack_bytes.read_u64(stack_words + 36) == 0
+                && stack_bytes.read_u64(stack_words + 37) == 26
+                && stack_bytes.read_u64(stack_words + 38) == 0
+                && stack_bytes.read_u64(stack_words + 39) == 25
+                && stack_bytes.read_u64(stack_words + 40) == random_address
+                && stack_bytes.read_u64(stack_words + 41) == 33
+                && stack_bytes.read_u64(stack_words + 42) == 0
+                && stack_bytes.read_u64(stack_words + 43) == 0
+                && stack_bytes.read_u64(stack_words + 44) == 0
+                && stack_bytes.bytes_match(random_offset, &LINUX_FIXTURE_RANDOM)
+                && stack_bytes.bytes_match(platform_offset, &LINUX_PLATFORM)
+                && stack_bytes.bytes_match(environment_offset, &LINUX_INIT_ENVIRONMENT)
+                && stack_bytes.bytes_match(argument_offset, &LINUX_INIT_ARGUMENT);
             if !entries_valid {
                 return Some(false);
             }
@@ -1613,7 +1584,7 @@ pub(crate) fn verify_linux_elf_mapping(
     if current_root() != kernel_root_physical {
         unsafe { activate(kernel_root_physical) };
     }
-    let cleared = frames.iter().enumerate().all(|(index, frame)| unsafe {
+    let cleared = frames.iter().enumerate().all(|(index, frame)| {
         if memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]) {
             zero_frame(frame.address()).is_some()
         } else if (index < 5 && exec_page_table_frames[index].is_some())
@@ -2243,33 +2214,36 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 (interpreter_rw, 0, interpreter_data),
             ];
             for (segment, page, frame) in payloads {
-                let bytes = &mut *(mapped_frame::<u8>(frame)? as *mut [u8; PAGE_SIZE]);
-                if !crate::linux_elf::materialize_page(segment, page, bytes) {
+                let bytes = Frame::from_physical(frame)?;
+                if !materialize_frame(bytes, segment, page) {
                     return None;
                 }
             }
             zero_frame(heap_page)?;
             zero_frame(stack_page)?;
             zero_frame(sibling_stack_page)?;
-            let tls_bytes = &mut *(mapped_frame::<u8>(tls_page)? as *mut [u8; PAGE_SIZE]);
-            if !crate::linux_elf::materialize_static_tls_page(
-                tls_layout,
-                main_tls,
-                [dependency_tls, auxiliary_tls],
-                tls_base,
-                tls_bytes,
-            ) {
+            let tls_bytes = Frame::from_physical(tls_page)?;
+            if !tls_bytes.with_bytes_mut(|bytes| {
+                crate::linux_elf::materialize_static_tls_page(
+                    tls_layout,
+                    main_tls,
+                    [dependency_tls, auxiliary_tls],
+                    tls_base,
+                    bytes,
+                )
+            }) {
                 return None;
             }
-            let sibling_tls_bytes =
-                &mut *(mapped_frame::<u8>(sibling_tls_page)? as *mut [u8; PAGE_SIZE]);
-            if !crate::linux_elf::materialize_static_tls_page(
-                tls_layout,
-                main_tls,
-                [dependency_tls, auxiliary_tls],
-                sibling_tls_base,
-                sibling_tls_bytes,
-            ) {
+            let sibling_tls_bytes = Frame::from_physical(sibling_tls_page)?;
+            if !sibling_tls_bytes.with_bytes_mut(|bytes| {
+                crate::linux_elf::materialize_static_tls_page(
+                    tls_layout,
+                    main_tls,
+                    [dependency_tls, auxiliary_tls],
+                    sibling_tls_base,
+                    bytes,
+                )
+            }) {
                 return None;
             }
             let flags = |segment: crate::linux_elf::PlannedSegment<'_>| {
@@ -2325,7 +2299,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 .add(sibling_stack_upper_guard_indexes[3])
                 .write(0);
 
-            let stack_bytes = mapped_frame::<u8>(stack_page)?;
+            let stack_bytes = Frame::from_physical(stack_page)?;
             let stack_offset = PAGE_SIZE - 48 * size_of::<u64>();
             let platform_offset = PAGE_SIZE - 6 * size_of::<u64>();
             let environment_offset = PAGE_SIZE - 4 * size_of::<u64>();
@@ -2333,12 +2307,12 @@ pub(crate) fn verify_interpreted_elf_mapping(
             let platform_address = stack_virtual_page + platform_offset as u64;
             let environment_address = stack_virtual_page + environment_offset as u64;
             let argument_address = stack_virtual_page + argument_offset as u64;
-            let stack_words = stack_bytes.add(stack_offset).cast::<u64>();
+            let stack_words = stack_offset / size_of::<u64>();
             for (index, value) in [1_u64, argument_address, 0, environment_address, 0]
                 .into_iter()
                 .enumerate()
             {
-                stack_words.add(index).write(value);
+                stack_bytes.write_u64(stack_words + index, value);
             }
             for (index, value) in crate::linux_elf::auxiliary_vector(
                 startup,
@@ -2350,23 +2324,11 @@ pub(crate) fn verify_interpreted_elf_mapping(
             .into_iter()
             .enumerate()
             {
-                stack_words.add(5 + index).write(value);
+                stack_bytes.write_u64(stack_words + 5 + index, value);
             }
-            core::ptr::copy_nonoverlapping(
-                LINUX_PLATFORM.as_ptr(),
-                stack_bytes.add(platform_offset),
-                LINUX_PLATFORM.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                LINUX_INIT_ENVIRONMENT.as_ptr(),
-                stack_bytes.add(environment_offset),
-                LINUX_INIT_ENVIRONMENT.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                LINUX_INIT_ARGUMENT.as_ptr(),
-                stack_bytes.add(argument_offset),
-                LINUX_INIT_ARGUMENT.len(),
-            );
+            stack_bytes.write_bytes(platform_offset, &LINUX_PLATFORM);
+            stack_bytes.write_bytes(environment_offset, &LINUX_INIT_ENVIRONMENT);
+            stack_bytes.write_bytes(argument_offset, &LINUX_INIT_ARGUMENT);
 
             let permissions_valid = main_ro_entries.add(main_ro_indexes[3]).read() == 0
                 && (0..main_rx.page_count)
@@ -2416,10 +2378,11 @@ pub(crate) fn verify_interpreted_elf_mapping(
                     .add(sibling_stack_upper_guard_indexes[3])
                     .read()
                     == 0
-                && stack_words.add(6).read() == startup.program_headers
-                && stack_words.add(10).read() == u64::from(startup.program_header_count)
-                && stack_words.add(14).read() == startup.interpreter_base
-                && stack_words.add(30).read() == startup.main_entry;
+                && stack_bytes.read_u64(stack_words + 6) == startup.program_headers
+                && stack_bytes.read_u64(stack_words + 10)
+                    == u64::from(startup.program_header_count)
+                && stack_bytes.read_u64(stack_words + 14) == startup.interpreter_base
+                && stack_bytes.read_u64(stack_words + 30) == startup.main_entry;
             activate(root);
             let observed = current_root() == root
                 && cpu::with_supervisor_user_access(|| {
@@ -3026,7 +2989,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
     if current_root() != kernel_root_physical {
         unsafe { activate(kernel_root_physical) };
     }
-    let cleared = frames.iter().enumerate().all(|(index, frame)| unsafe {
+    let cleared = frames.iter().enumerate().all(|(index, frame)| {
         if memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]) {
             zero_frame(frame.address()).is_some()
         } else if (index == 9 && exec_heap_frame.is_some())
@@ -3042,17 +3005,17 @@ pub(crate) fn verify_interpreted_elf_mapping(
         }
     });
     let sibling_resources_scrubbed = cleared
-        && (exec_tls_frames[1].is_some() || unsafe { released_frame_scrubbed(frames[12]) })
-        && (exec_sibling_stack_frame.is_some() || unsafe { released_frame_scrubbed(frames[13]) });
+        && (exec_tls_frames[1].is_some() || released_frame_scrubbed(frames[12]))
+        && (exec_sibling_stack_frame.is_some() || released_frame_scrubbed(frames[13]));
     let dependency_cleared = dependency_frames
         .iter()
         .flatten()
         .flatten()
-        .all(|frame| unsafe { zero_frame(frame.address()).is_some() });
+        .all(|frame| zero_frame(frame.address()).is_some());
     let main_cleared = main_frames
         .iter()
         .flatten()
-        .all(|frame| unsafe { zero_frame(frame.address()).is_some() });
+        .all(|frame| zero_frame(frame.address()).is_some());
     let mut exec_frames_released = true;
     for frame in exec_frames.into_iter().flatten() {
         exec_frames_released &= prepare_linux_frame(frame.address(), &[])
@@ -3632,7 +3595,7 @@ fn current_linux_tls_frames<'main, 'interpreter, 'dependency>(
         }
         frames[index] = entry & ADDRESS_MASK;
         if !memory::frame_addresses_owned_by(memory::FrameOwner::KERNEL, &[frames[index]])
-            || mapped_frame::<u8>(frames[index]).is_none()
+            || Frame::from_physical(frames[index]).is_none()
         {
             return None;
         }
@@ -3706,19 +3669,20 @@ pub(crate) fn materialize_linux_exec_tls_frames(
         return false;
     };
     for (frame, thread_pointer) in frames.into_iter().zip(thread_pointers) {
-        let Some(address) = frame.direct_map_address() else {
+        // Each generation-tagged frame is live, unique, and private to the
+        // pending exec transaction.
+        let Some(page) = Frame::leased(frame) else {
             return false;
         };
-        // SAFETY: each generation-tagged frame is live, unique, and private to
-        // the pending exec transaction.
-        let page = unsafe { &mut *(address as *mut [u8; PAGE_SIZE]) };
-        if !crate::linux_elf::materialize_static_tls_page(
-            layout,
-            main,
-            dependencies,
-            thread_pointer,
-            page,
-        ) {
+        if !page.with_bytes_mut(|page| {
+            crate::linux_elf::materialize_static_tls_page(
+                layout,
+                main,
+                dependencies,
+                thread_pointer,
+                page,
+            )
+        }) {
             return false;
         }
     }
@@ -4524,12 +4488,10 @@ pub(crate) fn read_linux_frame(frame: memory::FrameLease, output: &mut [u8; PAGE
     if !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[frame]) {
         return false;
     }
-    let Some(source) = frame.direct_map_address() else {
+    let Some(source) = Frame::leased(frame) else {
         return false;
     };
-    // SAFETY: the frame is a live kernel-owned page, mapped whole by the
-    // direct map.
-    unsafe { core::ptr::copy_nonoverlapping(source as *const u8, output.as_mut_ptr(), PAGE_SIZE) };
+    source.read_bytes(0, output);
     true
 }
 
@@ -5369,9 +5331,9 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
                     | LINUX_RUNTIME_SHARED
                     | LINUX_RUNTIME_DONTFORK,
             );
-            (parent_pages[0].direct_map_address()? as *mut u8).write(0x31);
-            (parent_pages[1].direct_map_address()? as *mut u8).write(0x32);
-            (parent_pages[2].direct_map_address()? as *mut u8).write(0x33);
+            Frame::leased(parent_pages[0])?.write_u8(0, 0x31);
+            Frame::leased(parent_pages[1])?.write_u8(0, 0x32);
+            Frame::leased(parent_pages[2])?.write_u8(0, 0x33);
         }
         let parent_mappings = [
             cpu::LinuxActiveImageMapping {
@@ -5419,21 +5381,20 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
             &parent_hierarchy,
             &child_hierarchy,
             &parent_pages,
-        ) || child_hierarchy.iter().any(|frame| {
-            frame.direct_map_address().is_none_or(|address| unsafe {
-                core::slice::from_raw_parts(address as *const u8, PAGE_SIZE)
-                    .iter()
-                    .any(|byte| *byte != 0)
-            })
-        }) || !crate::linux_process::copy_private_pages(
-            &parent_pages[..PRIVATE_PAGES],
-            &child_pages,
-        ) || !clone_linux_process_hierarchy(
-            &parent_mappings,
-            &parent_hierarchy,
-            &child_hierarchy,
-            &child_pages,
-        ) {
+        ) || child_hierarchy
+            .iter()
+            .any(|frame| Frame::leased(*frame).is_none_or(|frame| !frame.is_zero()))
+            || !crate::linux_process::copy_private_pages(
+                &parent_pages[..PRIVATE_PAGES],
+                &child_pages,
+            )
+            || !clone_linux_process_hierarchy(
+                &parent_mappings,
+                &parent_hierarchy,
+                &child_hierarchy,
+                &child_pages,
+            )
+        {
             return Some(false);
         }
 
@@ -5446,9 +5407,9 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
             { linux_leaf_in_root(parent_root, (USER_TEST_ADDRESS + PAGE_SIZE) as u64)?.read() };
         let omitted =
             { linux_leaf_in_root(child_root, (USER_TEST_ADDRESS + 2 * PAGE_SIZE) as u64)?.read() };
-        let child_code_address = child_pages[0].direct_map_address()?;
-        let parent_code_address = parent_pages[0].direct_map_address()?;
-        unsafe { (child_code_address as *mut u8).write(0x7f) };
+        let child_code_page = Frame::leased(child_pages[0])?;
+        let parent_code_page = Frame::leased(parent_pages[0])?;
+        child_code_page.write_u8(0, 0x7f);
 
         Some(
             code & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE)
@@ -5460,7 +5421,7 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
                 && parent_data & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE)
                     == parent_pages[1].address() | PRESENT | WRITABLE | USER | NO_EXECUTE
                 && omitted == 0
-                && unsafe { (parent_code_address as *const u8).read() } == 0x31,
+                && parent_code_page.read_u8(0) == 0x31,
         )
     })()
     .unwrap_or(false);
@@ -5514,11 +5475,11 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
                 false,
             );
         if split {
-            unsafe { (cow[4].direct_map_address()? as *mut u8).write(0x7e) };
+            Frame::leased(cow[4])?.write_u8(0, 0x7e);
         }
         let isolated = split
-            && unsafe { (parent_pages[1].direct_map_address()? as *const u8).read() } == 0x32
-            && unsafe { (cow[4].direct_map_address()? as *const u8).read() } == 0x7e;
+            && Frame::leased(parent_pages[1])?.read_u8(0) == 0x32
+            && Frame::leased(cow[4])?.read_u8(0) == 0x7e;
         // The child drops its mappings of the parent's pages (its copy of
         // the written one and its exit, in a real fork); the pages stay with
         // their contents and become the parent's alone.
@@ -5528,7 +5489,7 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
             && !memory::frame_is_shared(parent_pages[0])
             && !memory::frame_is_shared(parent_pages[1])
             && memory::frames_owned_by(memory::FrameOwner::KERNEL, &parent_pages[..2])
-            && unsafe { (parent_pages[1].direct_map_address()? as *const u8).read() } == 0x32;
+            && Frame::leased(parent_pages[1])?.read_u8(0) == 0x32;
         parent_leaf.write(parent_pages[1].address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
         let restored = parent_leaf.read()
             & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE | LINUX_RUNTIME_COW)
@@ -5769,15 +5730,11 @@ pub(crate) fn prepare_linux_frame(frame: u64, bytes: &[u8]) -> bool {
     {
         return false;
     }
-    unsafe {
-        if zero_frame(frame).is_none() {
-            return false;
-        }
-        let Some(output) = mapped_frame::<u8>(frame) else {
-            return false;
-        };
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
-    }
+    let Some(output) = Frame::from_physical(frame) else {
+        return false;
+    };
+    output.zero();
+    output.write_bytes(0, bytes);
     true
 }
 
@@ -5785,18 +5742,15 @@ pub(crate) fn update_linux_vvar(frame: memory::FrameLease, time: [u64; 6]) -> bo
     if !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[frame]) {
         return false;
     }
-    let Some(address) = frame.direct_map_address() else {
+    // The generation-tagged frame is live, remains kernel-owned, and the
+    // vvar mapping is read-only in userspace. This refresh runs while exec
+    // owns the address space, before the replacement image returns to ring
+    // 3; the resulting time base is immutable for that execution image.
+    let Some(vvar) = Frame::leased(frame) else {
         return false;
     };
-    // SAFETY: the generation-tagged frame is live, remains kernel-owned, and
-    // the vvar mapping is read-only in userspace. This refresh runs while exec
-    // owns the address space, before the replacement image returns to ring 3;
-    // the resulting time base is immutable for that execution image.
-    unsafe {
-        let fields = (address as *mut u64).add(1);
-        for (index, value) in time.into_iter().enumerate() {
-            fields.add(index).write_volatile(value);
-        }
+    for (index, value) in time.into_iter().enumerate() {
+        vvar.write_volatile_u64((1 + index) * size_of::<u64>(), value);
     }
     true
 }
@@ -5811,13 +5765,9 @@ pub(crate) fn materialize_linux_exec_frame(
     {
         return false;
     }
-    let Some(address) = frame.direct_map_address() else {
-        return false;
-    };
-    // SAFETY: the generation-tagged lease is live, uniquely selected for this
-    // not-yet-published exec transaction, and covers exactly one page.
-    let output = unsafe { &mut *(address as *mut [u8; PAGE_SIZE]) };
-    crate::linux_elf::materialize_page(segment, page_index, output)
+    // The generation-tagged lease is live and uniquely selected for this
+    // not-yet-published exec transaction.
+    Frame::leased(frame).is_some_and(|output| materialize_frame(output, segment, page_index))
 }
 
 pub(crate) fn materialize_linux_exec_stack_frame(
@@ -5832,14 +5782,13 @@ pub(crate) fn materialize_linux_exec_stack_frame(
     {
         return false;
     }
-    let Some(address) = frame.direct_map_address() else {
+    // This generation-tagged frame is live, private to the pending exec
+    // transaction, and not yet installed in userspace.
+    let Some(output) = Frame::leased(frame) else {
         return false;
     };
-    // SAFETY: this generation-tagged frame is live, private to the pending
-    // exec transaction, and has not yet been installed in userspace.
-    let output = unsafe { &mut *(address as *mut [u8; PAGE_SIZE]) };
     output.fill(0);
-    output[offset..offset + image.len()].copy_from_slice(image);
+    output.write_bytes(offset, image);
     true
 }
 
@@ -5998,15 +5947,11 @@ pub(crate) fn copy_linux_frame(
     {
         return false;
     }
-    let (Some(source), Some(destination)) = (
-        source.direct_map_address(),
-        destination.direct_map_address(),
-    ) else {
+    let (Some(source), Some(destination)) = (Frame::leased(source), Frame::leased(destination))
+    else {
         return false;
     };
-    unsafe {
-        core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, PAGE_SIZE);
-    }
+    destination.copy_from(source);
     true
 }
 
@@ -6399,7 +6344,7 @@ pub(crate) fn zero_current_linux_page(address: u64, frame: u64) -> bool {
     {
         return false;
     }
-    unsafe { zero_frame(frame).is_some() }
+    zero_frame(frame).is_some()
 }
 
 /// A page-table entry the kernel reads and writes in place. Only the table
@@ -8237,11 +8182,9 @@ impl AddressSpace {
 
     fn release(self) -> bool {
         let frames = self.frames;
-        unsafe {
-            for frame in &frames {
-                if zero_frame(frame.address()).is_none() {
-                    return false;
-                }
+        for frame in &frames {
+            if zero_frame(frame.address()).is_none() {
+                return false;
             }
         }
         memory::release_frames(memory::FrameOwner::KERNEL, frames)
@@ -8295,9 +8238,9 @@ pub(crate) fn verify_control_plane_wx_layout() -> bool {
     // SAFETY: Both mapped pages and all page tables have unique leases until
     // release. The kernel mapping is preserved and interrupts are disabled.
     let valid = unsafe {
-        space.code_frame.cast::<u8>().write_volatile(0x90);
-        space.first_stack_frame.cast::<u64>().write_volatile(0);
-        space.second_stack_frame.cast::<u64>().write_volatile(0);
+        space.code_frame.write_u8(0, 0x90);
+        space.first_stack_frame.write_volatile_u64(0, 0);
+        space.second_stack_frame.write_volatile_u64(0, 0);
         activate(space.root);
         let first_stack_address = USER_TEST_ADDRESS + 2 * PAGE_SIZE;
         let second_stack_address = USER_TEST_ADDRESS + 4 * PAGE_SIZE;
@@ -8307,13 +8250,13 @@ pub(crate) fn verify_control_plane_wx_layout() -> bool {
             (second_stack_address as *mut u64).write_volatile(!TEST_PATTERN);
             visible
         });
-        let stacks_writable = space.first_stack_frame.cast::<u64>().read_volatile() == TEST_PATTERN
-            && space.second_stack_frame.cast::<u64>().read_volatile() == !TEST_PATTERN;
+        let stacks_writable = space.first_stack_frame.read_volatile_u64(0) == TEST_PATTERN
+            && space.second_stack_frame.read_volatile_u64(0) == !TEST_PATTERN;
         activate(kernel_root);
         let restored = current_root() == kernel_root;
-        space.code_frame.cast::<u8>().write_volatile(0);
-        space.first_stack_frame.cast::<u64>().write_volatile(0);
-        space.second_stack_frame.cast::<u64>().write_volatile(0);
+        space.code_frame.write_u8(0, 0);
+        space.first_stack_frame.write_volatile_u64(0, 0);
+        space.second_stack_frame.write_volatile_u64(0, 0);
         code_visible && stacks_writable && restored
     };
     valid && space.release()
@@ -8391,8 +8334,8 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
                 let table = mapped_frame::<u64>(addresses[3])?;
                 for page in 0..image_pages {
                     let frame = addresses[4 + page];
-                    let output = &mut *(mapped_frame::<u8>(frame)? as *mut [u8; PAGE_SIZE]);
-                    if !image.materialize_page(page, output) {
+                    let output = Frame::from_physical(frame)?;
+                    if !output.with_bytes_mut(|output| image.materialize_page(page, output)) {
                         return None;
                     }
                     let mut flags = PRESENT | USER;
@@ -8423,8 +8366,8 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
                     let page = usize::try_from(relocation.target / PAGE_SIZE as u64).ok()?;
                     let offset = usize::try_from(relocation.target % PAGE_SIZE as u64).ok()?;
                     let frame = *addresses.get(4 + page)?;
-                    let target = mapped_frame::<u8>(frame)?.add(offset).cast::<u64>();
-                    target.write((USER_TEST_ADDRESS as u64).checked_add(relocation.addend)?);
+                    let value = (USER_TEST_ADDRESS as u64).checked_add(relocation.addend)?;
+                    Frame::from_physical(frame)?.write_bytes(offset, &value.to_ne_bytes());
                 }
                 Some(())
             })()
@@ -8520,10 +8463,12 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
                 let Some(frame) = self.frames.get(4 + page) else {
                     return false;
                 };
-                let Some(mapped) = mapped_frame::<u8>(frame.address()) else {
+                let Some(mapped) = Frame::leased(*frame) else {
                     return false;
                 };
-                let observed = unsafe { mapped.add(offset).cast::<u64>().read() };
+                let mut observed = [0; size_of::<u64>()];
+                mapped.read_bytes(offset, &mut observed);
+                let observed = u64::from_ne_bytes(observed);
                 observed == USER_TEST_ADDRESS as u64 + relocation.addend
             })
     }
@@ -8896,8 +8841,8 @@ impl AuxiliaryAddressSpace {
             return false;
         };
         match self {
-            Self::Wx(_) => unsafe { dma_page_has_completed_transaction(frame) }.is_some(),
-            Self::Native(_) => unsafe {
+            Self::Wx(_) => dma_page_has_completed_transaction(frame).is_some(),
+            Self::Native(_) => {
                 let Some(recovered) = native_dma_completion_state(frame) else {
                     return false;
                 };
@@ -8905,7 +8850,7 @@ impl AuxiliaryAddressSpace {
                     .native_volume_completion
                     .store(if recovered { 2 } else { 1 }, Ordering::Release);
                 true
-            },
+            }
             Self::Network(_) => false,
             Self::Controller(_) => false,
         }
@@ -10223,14 +10168,8 @@ pub(crate) fn verify_packet_wait_wakeup(timed: bool) -> bool {
     {
         return false;
     }
-    unsafe {
-        for (offset, byte) in producer_program.iter().enumerate() {
-            producer_space.code_frame.add(offset).write(*byte);
-        }
-        for (offset, byte) in consumer_program.iter().enumerate() {
-            consumer_space.code_frame.add(offset).write(*byte);
-        }
-    }
+    producer_space.code_frame.write_bytes(0, producer_program);
+    consumer_space.code_frame.write_bytes(0, consumer_program);
     let producer_root = producer_space.root;
     let consumer_root = consumer_space.root;
     let producer_entry = USER_TEST_ADDRESS;
@@ -10361,14 +10300,8 @@ pub(crate) fn verify_packet_wait_cancellation() -> bool {
     {
         return false;
     }
-    unsafe {
-        for (offset, byte) in waiter_program.iter().enumerate() {
-            waiter_space.code_frame.add(offset).write(*byte);
-        }
-        for (offset, byte) in helper_program.iter().enumerate() {
-            helper_space.code_frame.add(offset).write(*byte);
-        }
-    }
+    waiter_space.code_frame.write_bytes(0, waiter_program);
+    helper_space.code_frame.write_bytes(0, helper_program);
     let waiter_root = waiter_space.root;
     let helper_root = helper_space.root;
     let entry = USER_TEST_ADDRESS;
@@ -10497,14 +10430,8 @@ pub(crate) fn verify_packet_wait_timeout() -> bool {
     {
         return false;
     }
-    unsafe {
-        for (offset, byte) in waiter_program.iter().enumerate() {
-            waiter_space.code_frame.add(offset).write(*byte);
-        }
-        for (offset, byte) in helper_program.iter().enumerate() {
-            helper_space.code_frame.add(offset).write(*byte);
-        }
-    }
+    waiter_space.code_frame.write_bytes(0, waiter_program);
+    helper_space.code_frame.write_bytes(0, helper_program);
     let waiter_root = waiter_space.root;
     let helper_root = helper_space.root;
     let entry = USER_TEST_ADDRESS;
@@ -10621,14 +10548,8 @@ pub(crate) fn verify_packet_backpressure_wakeup() -> bool {
     {
         return false;
     }
-    unsafe {
-        for (offset, byte) in producer_program.iter().enumerate() {
-            producer_space.code_frame.add(offset).write(*byte);
-        }
-        for (offset, byte) in consumer_program.iter().enumerate() {
-            consumer_space.code_frame.add(offset).write(*byte);
-        }
-    }
+    producer_space.code_frame.write_bytes(0, producer_program);
+    consumer_space.code_frame.write_bytes(0, consumer_program);
     let producer_root = producer_space.root;
     let consumer_root = consumer_space.root;
     let entry = USER_TEST_ADDRESS;
@@ -10775,14 +10696,8 @@ pub(crate) fn verify_egress_backpressure_wakeup() -> bool {
     {
         return false;
     }
-    unsafe {
-        for (offset, byte) in producer_program.iter().enumerate() {
-            producer_space.code_frame.add(offset).write(*byte);
-        }
-        for (offset, byte) in consumer_program.iter().enumerate() {
-            consumer_space.code_frame.add(offset).write(*byte);
-        }
-    }
+    producer_space.code_frame.write_bytes(0, producer_program);
+    consumer_space.code_frame.write_bytes(0, consumer_program);
     let producer_root = producer_space.root;
     let consumer_root = consumer_space.root;
     let entry = USER_TEST_ADDRESS;
@@ -11001,11 +10916,7 @@ fn prepare_packet_wait_producer_for_object(
         let _ = space.release();
         return None;
     }
-    unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, program);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -11631,11 +11542,7 @@ fn verify_ring3_egress_consumer(expected_sequence: u64) -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, program);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -11720,11 +11627,7 @@ fn verify_ring3_packet_consumer(expected_sequence: u64, more_pending: bool) -> b
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, program);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -12789,13 +12692,16 @@ pub(crate) fn load_and_queue_auxiliary_from_current_user(
     let Some(space) = WxAddressSpace::new(kernel_root, owner) else {
         return false;
     };
-    // SAFETY: The target code frame is exclusively leased to this domain and
+    // The target code frame is exclusively leased to this domain and
     // remains live for the duration of the bounded copy.
-    let code = unsafe { core::slice::from_raw_parts_mut(space.code_frame, length) };
-    if !space.permissions_are_valid(kernel_root) || !copy_from_current_user(source, code) {
+    let mut code = [0; PAGE_SIZE];
+    if !space.permissions_are_valid(kernel_root)
+        || !copy_from_current_user(source, &mut code[..length])
+    {
         let _ = space.release();
         return false;
     }
+    space.code_frame.write_bytes(0, &code[..length]);
     let root = space.root;
     if !register_auxiliary_address_space(domain_id, space) {
         return false;
@@ -12848,16 +12754,18 @@ pub(crate) fn initialize_staged_auxiliary_from_current_user(
         return false;
     };
     let offset = PAGE_SIZE - length;
-    // SAFETY: The private stack frame remains owned by this exact staged
-    // domain and the bounded range cannot leave that single NX page.
+    // The private stack frame remains owned by this exact staged domain and
+    // the bounded range cannot leave that single NX page.
     let AuxiliaryAddressSpace::Wx(space) = &mut registered.space else {
         return false;
     };
-    let payload =
-        unsafe { core::slice::from_raw_parts_mut(space.first_stack_frame.add(offset), length) };
-    if !copy_from_current_user(source, payload) {
+    let mut payload = [0; PAGE_SIZE];
+    if !copy_from_current_user(source, &mut payload[..length]) {
         return false;
     }
+    space
+        .first_stack_frame
+        .write_bytes(offset, &payload[..length]);
     scheduler::initialize_staged_auxiliary(
         domain_id,
         (USER_TEST_ADDRESS + 3 * PAGE_SIZE - length) as u64,
@@ -13817,23 +13725,17 @@ pub(crate) fn verify_ring3_control_plane(
         return false;
     }
     unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            first_space.code_frame.add(offset).write(*byte);
-            second_space.code_frame.add(offset).write(*byte);
-        }
+        first_space.code_frame.write_bytes(0, program);
+        second_space.code_frame.write_bytes(0, program);
         first_space
             .first_stack_frame
-            .cast::<u64>()
-            .write_volatile(TEST_PATTERN);
+            .write_volatile_u64(0, TEST_PATTERN);
         second_space
             .first_stack_frame
-            .cast::<u64>()
-            .write_volatile(!TEST_PATTERN);
+            .write_volatile_u64(0, !TEST_PATTERN);
         first_space
             .first_stack_frame
-            .add(ROOT_HANDLE_STACK_OFFSET)
-            .cast::<u64>()
-            .write_volatile(handles[0][3]);
+            .write_volatile_u64(ROOT_HANDLE_STACK_OFFSET, handles[0][3]);
         activate(first_space.root);
         let first_marker = cpu::with_supervisor_user_access(|| {
             ((USER_TEST_ADDRESS + 2 * PAGE_SIZE) as *const u64).read_volatile()
@@ -13843,19 +13745,11 @@ pub(crate) fn verify_ring3_control_plane(
             ((USER_TEST_ADDRESS + 2 * PAGE_SIZE) as *const u64).read_volatile()
         });
         activate(kernel_root);
-        first_space
-            .first_stack_frame
-            .cast::<u64>()
-            .write_volatile(0);
-        second_space
-            .first_stack_frame
-            .cast::<u64>()
-            .write_volatile(0);
+        first_space.first_stack_frame.write_volatile_u64(0, 0);
+        second_space.first_stack_frame.write_volatile_u64(0, 0);
         let root_handle_seeded = first_space
             .first_stack_frame
-            .add(ROOT_HANDLE_STACK_OFFSET)
-            .cast::<u64>()
-            .read_volatile()
+            .read_volatile_u64(ROOT_HANDLE_STACK_OFFSET)
             == handles[0][3];
         if first_marker != TEST_PATTERN || second_marker != !TEST_PATTERN || !root_handle_seeded {
             return false;
@@ -14062,11 +13956,7 @@ pub(crate) fn verify_ring3_network_service() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in NETWORK_PROBE_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, NETWORK_PROBE_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14146,11 +14036,7 @@ pub(crate) fn verify_ring3_network_observer() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in NETWORK_OBSERVER_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, NETWORK_OBSERVER_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14241,11 +14127,9 @@ pub(crate) fn verify_ring3_network_configurator() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in NETWORK_CONFIGURATOR_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space
+        .code_frame
+        .write_bytes(0, NETWORK_CONFIGURATOR_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14316,11 +14200,7 @@ pub(crate) fn verify_ring3_network_fault_containment() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in INVALID_OPCODE_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, &INVALID_OPCODE_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14397,11 +14277,7 @@ pub(crate) fn verify_ring3_network_recovery() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in NETWORK_RECOVERY_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, NETWORK_RECOVERY_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14552,11 +14428,7 @@ fn run_volume_auxiliary(
     if !space.permissions_are_valid(kernel_root) {
         return None;
     }
-    unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, program);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14624,11 +14496,7 @@ pub(crate) fn verify_ring3_auxiliary_fault() -> bool {
     if !space.permissions_are_valid(kernel_root) {
         return false;
     }
-    unsafe {
-        for (offset, byte) in INVALID_OPCODE_PROGRAM.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, &INVALID_OPCODE_PROGRAM);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -14740,11 +14608,7 @@ pub(crate) fn verify_ring3_read_only_device_grant(
         let _ = space.release();
         return false;
     }
-    unsafe {
-        for (offset, byte) in program.iter().enumerate() {
-            space.code_frame.add(offset).write(*byte);
-        }
-    }
+    space.code_frame.write_bytes(0, &program);
     let root = space.root;
     let entry = USER_TEST_ADDRESS;
     let stack = USER_TEST_ADDRESS + 3 * PAGE_SIZE;
@@ -15222,7 +15086,7 @@ fn verify_native_volume_service_run(
         scheduler::current_domain().is_none(),
         registered_auxiliary_address_space_count() == 0,
         memory::owner_live_frame_count(owner) == Some(0),
-        unsafe { frame_is_zero(dma_physical) },
+        frame_is_zero(dma_physical),
         iommu_profile.is_inactive(),
         iommu_evidence.is_retired(),
         domain::domain_is_retired(auxiliary),
@@ -15274,9 +15138,9 @@ fn verify_native_volume_service_run(
 struct WxAddressSpace {
     kernel_root: u64,
     root: u64,
-    code_frame: *mut u8,
-    first_stack_frame: *mut u8,
-    second_stack_frame: *mut u8,
+    code_frame: Frame,
+    first_stack_frame: Frame,
+    second_stack_frame: Frame,
     frames: [memory::FrameLease; USER_ADDRESS_SPACE_FRAMES],
     dma_frame: Option<memory::FrameLease>,
     owner: memory::FrameOwner,
@@ -15319,9 +15183,9 @@ impl WxAddressSpace {
         Some(Self {
             kernel_root,
             root,
-            code_frame: mapped_frame::<u8>(code)?,
-            first_stack_frame: mapped_frame::<u8>(first_stack)?,
-            second_stack_frame: mapped_frame::<u8>(second_stack)?,
+            code_frame: Frame::from_physical(code)?,
+            first_stack_frame: Frame::from_physical(first_stack)?,
+            second_stack_frame: Frame::from_physical(second_stack)?,
             frames,
             dma_frame: None,
             owner,
@@ -15368,12 +15232,9 @@ impl WxAddressSpace {
                 && code & ADDRESS_MASK == self.frames[4].address()
                 && first_stack & ADDRESS_MASK == self.frames[5].address()
                 && second_stack & ADDRESS_MASK == self.frames[6].address()
-                && paging::direct_map_range_address(self.frames[4].address(), PAGE_SIZE)
-                    == Some(self.code_frame as usize)
-                && paging::direct_map_range_address(self.frames[5].address(), PAGE_SIZE)
-                    == Some(self.first_stack_frame as usize)
-                && paging::direct_map_range_address(self.frames[6].address(), PAGE_SIZE)
-                    == Some(self.second_stack_frame as usize)
+                && Frame::leased(self.frames[4]) == Some(self.code_frame)
+                && Frame::leased(self.frames[5]) == Some(self.first_stack_frame)
+                && Frame::leased(self.frames[6]) == Some(self.second_stack_frame)
         }
     }
 
@@ -15468,16 +15329,14 @@ impl WxAddressSpace {
         {
             return false;
         }
-        unsafe {
-            for frame in &frames {
-                if zero_frame(frame.address()).is_none() {
-                    return false;
-                }
+        for frame in &frames {
+            if zero_frame(frame.address()).is_none() {
+                return false;
             }
-            if let Some(frame) = dma_frame {
-                if zero_frame(frame.address()).is_none() {
-                    return false;
-                }
+        }
+        if let Some(frame) = dma_frame {
+            if zero_frame(frame.address()).is_none() {
+                return false;
             }
         }
         memory::release_frames(self.owner, frames)
@@ -15506,31 +15365,41 @@ fn mapped_frame<T>(frame: u64) -> Option<*mut T> {
     paging::direct_map_range_address(frame, PAGE_SIZE).map(|address| address as *mut T)
 }
 
-unsafe fn zero_frame(frame: u64) -> Option<()> {
-    let entries = mapped_frame::<u64>(frame)?;
-    for index in 0..ENTRY_COUNT {
-        entries.add(index).write(0);
-    }
-    Some(())
+/// Writes page `page_index` of `segment` into `frame`: its file bytes,
+/// zero elsewhere.
+fn materialize_frame(
+    frame: Frame,
+    segment: crate::linux_elf::PlannedSegment<'_>,
+    page_index: usize,
+) -> bool {
+    let Some((offset, bytes)) = crate::linux_elf::page_file_bytes(segment, page_index) else {
+        return false;
+    };
+    frame.fill(0);
+    frame.write_bytes(offset, bytes);
+    true
 }
 
-unsafe fn frame_is_zero(frame: u64) -> bool {
-    mapped_frame::<u64>(frame)
-        .is_some_and(|entries| (0..ENTRY_COUNT).all(|index| entries.add(index).read() == 0))
+fn zero_frame(frame: u64) -> Option<()> {
+    Frame::from_physical(frame).map(Frame::zero)
+}
+
+fn frame_is_zero(frame: u64) -> bool {
+    Frame::from_physical(frame).is_some_and(Frame::is_zero)
 }
 
 /// Whether `frame`, which its lease released, was scrubbed: it is zero,
 /// unless the allocator has since leased it again (a newer generation),
 /// and it holds its new owner's data.
-unsafe fn released_frame_scrubbed(frame: memory::FrameLease) -> bool {
+fn released_frame_scrubbed(frame: memory::FrameLease) -> bool {
     memory::live_frame_lease(memory::FrameOwner::KERNEL, frame.address())
         .is_some_and(|lease| lease != frame)
         || frame_is_zero(frame.address())
 }
 
-unsafe fn dma_page_has_completed_transaction(frame: u64) -> Option<bool> {
-    let bytes = mapped_frame::<u8>(frame)?;
-    let recovered = core::ptr::read_volatile(bytes.add(0x901));
+fn dma_page_has_completed_transaction(frame: u64) -> Option<bool> {
+    let bytes = Frame::from_physical(frame)?;
+    let recovered = bytes.read_volatile_u8(0x901);
     if recovered > 1 {
         return None;
     };
@@ -15565,16 +15434,16 @@ unsafe fn dma_page_has_completed_transaction(frame: u64) -> Option<bool> {
                 0x901 => recovered,
                 _ => 0,
             };
-            core::ptr::read_volatile(bytes.add(offset)) == expected
+            bytes.read_volatile_u8(offset) == expected
         })
         .then_some(recovered == 1)
 }
 
-unsafe fn native_dma_completion_state(frame: u64) -> Option<bool> {
-    let bytes = mapped_frame::<u8>(frame)?;
-    let read_u16 = |offset| core::ptr::read_volatile(bytes.add(offset).cast::<u16>());
-    let read_u32 = |offset| core::ptr::read_volatile(bytes.add(offset).cast::<u32>());
-    let read_u64 = |offset| core::ptr::read_volatile(bytes.add(offset).cast::<u64>());
+fn native_dma_completion_state(frame: u64) -> Option<bool> {
+    let bytes = Frame::from_physical(frame)?;
+    let read_u16 = |offset| bytes.read_volatile_u16(offset);
+    let read_u32 = |offset| bytes.read_volatile_u32(offset);
+    let read_u64 = |offset| bytes.read_volatile_u64(offset);
     let available = read_u16(0x102);
     let used = read_u16(0x202);
     if available != used || !matches!(used, 2 | 10) {
@@ -15596,6 +15465,6 @@ unsafe fn native_dma_completion_state(frame: u64) -> Option<bool> {
         && read_u64(VIRTIO_REQUEST_OFFSET + 8) == 5
         && read_u32(0x204 + final_slot * 8) == 0
         && read_u32(0x208 + final_slot * 8) == 513
-        && core::ptr::read_volatile(bytes.add(VIRTIO_STATUS_OFFSET)) == 0)
+        && bytes.read_volatile_u8(VIRTIO_STATUS_OFFSET) == 0)
         .then_some(used == 2)
 }
