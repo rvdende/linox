@@ -505,7 +505,7 @@ interior-mutable	kernel/src/linux_signal.rs	SIGNAL_RUNTIME	process-runtime	allow
 interior-mutable	kernel/src/linux_socket.rs	SOCKETS	domain-runtime	allowlist	none	ranked-socket-table
 interior-mutable	kernel/src/linux_socket.rs	CLOSING_PENDING	domain-runtime	allowlist	none	atomic-hint-checked-under-socket-lock
 interior-mutable	kernel/src/linux_sysv_ipc.rs	SYSV_IPC_RUNTIME	domain-runtime	allowlist	none	explicit-domain-sysv-ipc-owner-root
-interior-mutable	kernel/src/linux_tmpfs.rs	TMPFS_RUNTIME	domain-runtime	allowlist	none	explicit-domain-tmpfs-runtime-owner-root
+interior-mutable	kernel/src/linux_tmpfs.rs	TMPFS_RUNTIME	domain-runtime	allowlist	none	ranked-tmpfs-files-per-domain
 interior-mutable	kernel/src/linux_user.rs	USER_RUNTIME	domain-runtime	allowlist	none	explicit-domain-user-runtime-owner-root
 interior-mutable	kernel/src/memory.rs	PHYSICAL_MEMORY	platform-device	allowlist	none	explicit-host-physical-memory-owner-root
 interior-mutable	kernel/src/network.rs	NETWORKS	platform-device	allowlist	none	explicit-host-virtual-network-owner-root

@@ -38,6 +38,9 @@ impl LockRank {
     /// Each domain's AIO contexts and their queued events: a leaf, below
     /// the heap so the queues may grow while held.
     pub(crate) const AIO_CONTEXTS: Self = Self(116);
+    /// Each domain's in-kernel file store (`linux_tmpfs`): a leaf, below
+    /// the heap so files may grow while held.
+    pub(crate) const TMPFS_FILES: Self = Self(117);
     /// Deadlines of timed waits set to restart; ranks below the heap so the
     /// list may grow while held.
     pub(crate) const RESTART_DEADLINES: Self = Self(120);

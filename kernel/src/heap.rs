@@ -15,6 +15,8 @@
 //! takes frames while holding it. So the heap must not be used while holding
 //! the frame allocator lock or any lock ranked above it.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -176,12 +178,18 @@ unsafe impl GlobalAlloc for KernelHeap {
     }
 }
 
+/// A zeroed page of bytes on the heap, or `None` without memory. It is a
+/// frame run of its own, so freeing it scrubs the frame and gives it back.
+pub(crate) fn zeroed_page() -> Option<Box<[u8; PAGE_SIZE]>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(PAGE_SIZE).ok()?;
+    bytes.resize(PAGE_SIZE, 0);
+    bytes.into_boxed_slice().try_into().ok()
+}
+
 /// Exercises both allocation paths at boot, so a broken heap fails here
 /// rather than in whatever first uses it.
 pub(crate) fn verify() -> bool {
-    use alloc::boxed::Box;
-    use alloc::vec::Vec;
-
     let small: Vec<Box<u64>> = (0..600_u64).map(Box::new).collect();
     let small_intact = small.iter().map(|value| **value).eq(0..600);
     let mut large: Vec<u8> = Vec::with_capacity(3 * PAGE_SIZE + 1);
