@@ -101,15 +101,13 @@ impl Frame {
     }
 
     pub(crate) fn read_u8(self, offset: usize) -> u8 {
-        let byte = self.at(offset, 1);
-        // SAFETY: as for `read_u64`.
-        unsafe { byte.read() }
+        let mut byte = [0];
+        self.read_bytes(offset, &mut byte);
+        byte[0]
     }
 
     pub(crate) fn write_u8(self, offset: usize, value: u8) {
-        let byte = self.at(offset, 1);
-        // SAFETY: as for `read_u64`.
-        unsafe { byte.write(value) }
+        self.write_bytes(offset, &[value]);
     }
 
     /// Reads the `T` at byte `offset` with a volatile load, for memory a
@@ -152,6 +150,18 @@ impl Frame {
         // separate buffer the caller owns (a plain copy, not a reference
         // into the frame), and `copy` allows overlap anyway.
         unsafe { core::ptr::copy(source, output.as_mut_ptr(), output.len()) }
+    }
+
+    /// Stores `value` at the start of the frame, for a plain `repr(C)`
+    /// record handed to user space (a native service's boot-information
+    /// page). Its padding bytes are left unspecified, so the kernel must
+    /// not read the frame back as bytes.
+    pub(crate) fn write_value<T: Copy>(self, value: T) {
+        let destination = self.at_aligned::<T>(0);
+        // SAFETY: as for `read_u64`, for the checked size and alignment of
+        // `T`; storing a `Copy` value has no drop or validity requirement
+        // on what it overwrites.
+        unsafe { destination.write(value) }
     }
 
     /// Whether the bytes from byte `offset` equal `expected`.

@@ -19,6 +19,8 @@ struct LinuxProcessScratchOwner {
     validation: UnsafeCell<Vec<bool>>,
 }
 
+// SAFETY: the scratch lists are only used by address-space clones and
+// validations, which run under the kernel-entry lock and do not nest.
 unsafe impl Sync for LinuxProcessScratchOwner {}
 
 static LINUX_PROCESS_SCRATCH: LinuxProcessScratchOwner = LinuxProcessScratchOwner {
@@ -93,7 +95,10 @@ use crate::{
         timer::{self, LocalApicCalibration},
     },
     domain, ipc, memory, network, packet, scheduler,
-    trusted::frame::Frame,
+    trusted::{
+        frame::Frame,
+        page_table::{invalidate_page, PageEntry, PageTable},
+    },
     volume,
 };
 
@@ -216,6 +221,8 @@ struct AddressSpaceServicesOwner {
     interactive_controller_domain: AtomicU64,
 }
 
+// SAFETY: the auxiliary registry is reached only from domain control
+// paths serialized by the kernel-entry lock; the other fields are atomics.
 unsafe impl Sync for AddressSpaceServicesOwner {}
 
 static ADDRESS_SPACE_SERVICES: AddressSpaceServicesOwner = AddressSpaceServicesOwner {
@@ -241,6 +248,8 @@ struct LinuxRuntimeOwner {
     >,
 }
 
+// SAFETY: a domain's slot is written only by its own runtime launch and
+// resume, which the kernel-entry lock serializes; `active` is atomic.
 unsafe impl Sync for LinuxRuntimeOwner {}
 
 static LINUX_RUNTIME: LinuxRuntimeOwner = LinuxRuntimeOwner {
@@ -305,10 +314,12 @@ pub(crate) fn run_installed_interactive_controller() -> bool {
     let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, size) };
     let linux_root = current_root();
     let kernel_root = paging::kernel_root_address();
+    // SAFETY: the kernel's root maps the whole kernel and stays live.
     unsafe { activate(kernel_root) };
     let valid = current_root() == kernel_root
         && crate::native_elf::inspect_controller(bytes)
             .is_some_and(|image| run_interactive_controller(&image));
+    // SAFETY: this root was active on entry and its address space is still live.
     unsafe { activate(linux_root) };
     valid && current_root() == linux_root
 }
@@ -388,47 +399,39 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         let [root, pdpt, directory, main_table, interpreter_table, runtime_table] = [
             frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
         ];
-        unsafe {
-            for frame in [
-                root,
-                pdpt,
-                directory,
-                main_table,
-                interpreter_table,
-                runtime_table,
-            ] {
-                zero_frame(frame.address())?;
-            }
-            let root_entries = mapped_frame::<u64>(root.address())?;
-            let kernel_entries = mapped_frame::<u64>(kernel_root)?;
-            root_entries.add(256).write(kernel_entries.add(256).read());
-            root_entries.write(pdpt.address() | PRESENT | WRITABLE | USER);
-            // The first 4 GiB hold only the kernel's own regions (the
-            // template's); the process's mappings go everywhere else.
-            let pdpt_entries = mapped_frame::<u64>(pdpt.address())?;
-            let template = mapped_frame::<u64>(paging::linux_low_template())?;
-            core::ptr::copy_nonoverlapping(template, pdpt_entries, ENTRY_COUNT);
-            let directory_entries = mapped_frame::<u64>(directory.address())?;
-            if let Some(template_directory) = paging::linux_low_template_directory(0) {
-                let template_directory = mapped_frame::<u64>(template_directory)?;
-                core::ptr::copy_nonoverlapping(template_directory, directory_entries, ENTRY_COUNT);
-            }
-            // The program's tables below replace these entries: a kernel
-            // region there would vanish from the process's view.
-            if (2..=4).any(|index| directory_entries.add(index).read() != 0) {
-                return None;
-            }
-            pdpt_entries.write(directory.address() | PRESENT | WRITABLE | USER);
-            directory_entries
-                .add(2)
-                .write(main_table.address() | PRESENT | WRITABLE | USER);
-            directory_entries
-                .add(3)
-                .write(interpreter_table.address() | PRESENT | WRITABLE | USER);
-            directory_entries
-                .add(4)
-                .write(runtime_table.address() | PRESENT | WRITABLE | USER);
+        for frame in [
+            root,
+            pdpt,
+            directory,
+            main_table,
+            interpreter_table,
+            runtime_table,
+        ] {
+            zero_frame(frame.address())?;
         }
+        let root_entries = PageTable::from_physical(root.address())?;
+        let kernel_entries = PageTable::from_physical(kernel_root)?;
+        root_entries.set(256, kernel_entries.get(256));
+        root_entries.set(0, pdpt.address() | PRESENT | WRITABLE | USER);
+        // The first 4 GiB hold only the kernel's own regions (the
+        // template's); the process's mappings go everywhere else.
+        let pdpt_entries = PageTable::from_physical(pdpt.address())?;
+        let template = PageTable::from_physical(paging::linux_low_template())?;
+        pdpt_entries.copy_from(template);
+        let directory_entries = PageTable::from_physical(directory.address())?;
+        if let Some(template_directory) = paging::linux_low_template_directory(0) {
+            let template_directory = PageTable::from_physical(template_directory)?;
+            directory_entries.copy_from(template_directory);
+        }
+        // The program's tables below replace these entries: a kernel
+        // region there would vanish from the process's view.
+        if (2..=4).any(|index| directory_entries.get(index) != 0) {
+            return None;
+        }
+        pdpt_entries.set(0, directory.address() | PRESENT | WRITABLE | USER);
+        directory_entries.set(2, main_table.address() | PRESENT | WRITABLE | USER);
+        directory_entries.set(3, interpreter_table.address() | PRESENT | WRITABLE | USER);
+        directory_entries.set(4, runtime_table.address() | PRESENT | WRITABLE | USER);
         stage = 1;
 
         let mut next_frame = 0;
@@ -641,6 +644,8 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         let loader_code = plan.loader_executable()?;
         stage = 6;
 
+        // SAFETY: a live process root built by this module, holding the kernel's entries (see
+        // `activate`).
         unsafe { activate(root.address()) };
         let result = cpu::verify_linux_elf_entry(&cpu::LinuxElfExecution {
             runtime: true,
@@ -684,6 +689,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
             system_init: false,
             initial_image_mappings: &initial_image_mappings[..initial_image_count],
         });
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(kernel_root) };
         stage = 7;
         (current_root() == kernel_root).then_some(result)
@@ -691,9 +697,12 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     .unwrap_or(cpu::LinuxElfResult::FAILED);
     let valid = result.valid;
     if current_root() != kernel_root {
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(kernel_root) };
     }
     if valid && result.suspended {
+        // SAFETY: only this slot's runtime touches its entries (see
+        // `LinuxRuntimeOwner`).
         unsafe {
             (*LINUX_RUNTIME.owned_frames.get())[slot] = frames;
             (*LINUX_RUNTIME.runtime_frames.get())[slot] = runtime_frames;
@@ -760,6 +769,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
 }
 
 fn resume_linux_init(slot: usize, mmap: u64) -> LinuxProcessOutcome {
+    // SAFETY: as in `run_linux_init`.
     let (frames, runtime_frames) = unsafe {
         (
             (*LINUX_RUNTIME.owned_frames.get())[slot],
@@ -767,13 +777,17 @@ fn resume_linux_init(slot: usize, mmap: u64) -> LinuxProcessOutcome {
         )
     };
     let kernel_root = current_root();
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(frames[0].address()) };
     let result = cpu::resume_suspended_linux_runtime(mmap);
+    // SAFETY: the kernel's root maps the whole kernel and stays live.
     unsafe { activate(kernel_root) };
     if result.valid && result.suspended {
         return LinuxProcessOutcome::Suspended;
     }
     LINUX_RUNTIME.active[slot].store(false, Ordering::Release);
+    // SAFETY: as in `run_linux_init`.
     unsafe {
         (*LINUX_RUNTIME.owned_frames.get())[slot] =
             [memory::FrameLease::EMPTY; LINUX_OWNED_FRAME_COUNT];
@@ -1013,24 +1027,24 @@ pub(crate) fn verify_linux_elf_mapping(
             for frame in [root, pdpt, directory, table, header_table] {
                 zero_frame(frame)?;
             }
-            let kernel_root = mapped_frame::<u64>(kernel_root_physical)?;
-            let root_entries = mapped_frame::<u64>(root)?;
-            let pdpt_entries = mapped_frame::<u64>(pdpt)?;
-            let directory_entries = mapped_frame::<u64>(directory)?;
-            let mut table_entries = mapped_frame::<u64>(table)?;
-            let header_table_entries = mapped_frame::<u64>(header_table)?;
-            root_entries.add(256).write(kernel_root.add(256).read());
-            root_entries.write(pdpt | PRESENT | WRITABLE | USER);
+            let kernel_root = PageTable::from_physical(kernel_root_physical)?;
+            let root_entries = PageTable::from_physical(root)?;
+            let pdpt_entries = PageTable::from_physical(pdpt)?;
+            let directory_entries = PageTable::from_physical(directory)?;
+            let mut table_entries = PageTable::from_physical(table)?;
+            let header_table_entries = PageTable::from_physical(header_table)?;
+            root_entries.set(256, kernel_root.get(256));
+            root_entries.set(0, pdpt | PRESENT | WRITABLE | USER);
 
-            let kernel_pdpt_physical = kernel_root.read() & ADDRESS_MASK;
-            let kernel_pdpt = mapped_frame::<u64>(kernel_pdpt_physical)?;
-            core::ptr::copy_nonoverlapping(kernel_pdpt, pdpt_entries, ENTRY_COUNT);
-            let kernel_directory_physical = kernel_pdpt.read() & ADDRESS_MASK;
-            let kernel_directory = mapped_frame::<u64>(kernel_directory_physical)?;
-            core::ptr::copy_nonoverlapping(kernel_directory, directory_entries, ENTRY_COUNT);
-            pdpt_entries.write(directory | PRESENT | WRITABLE | USER);
+            let kernel_pdpt_physical = kernel_root.get(0) & ADDRESS_MASK;
+            let kernel_pdpt = PageTable::from_physical(kernel_pdpt_physical)?;
+            pdpt_entries.copy_from(kernel_pdpt);
+            let kernel_directory_physical = kernel_pdpt.get(0) & ADDRESS_MASK;
+            let kernel_directory = PageTable::from_physical(kernel_directory_physical)?;
+            directory_entries.copy_from(kernel_directory);
+            pdpt_entries.set(0, directory | PRESENT | WRITABLE | USER);
 
-            let original = kernel_directory.add(first_indexes[2]).read();
+            let original = kernel_directory.get(first_indexes[2]);
             if original & PRESENT == 0
                 || original & LARGE_PAGE != 0 && original & PAGE_ATTRIBUTE_TABLE != 0
             {
@@ -1040,20 +1054,16 @@ pub(crate) fn verify_linux_elf_mapping(
                 let base = original & ADDRESS_MASK;
                 let flags = original & !ADDRESS_MASK & !LARGE_PAGE;
                 for index in 0..ENTRY_COUNT {
-                    table_entries
-                        .add(index)
-                        .write((base + (index * PAGE_SIZE) as u64) | flags);
+                    table_entries.set(index, (base + (index * PAGE_SIZE) as u64) | flags);
                 }
             } else {
-                let original_table = mapped_frame::<u64>(original & ADDRESS_MASK)?;
-                core::ptr::copy_nonoverlapping(original_table, table_entries, ENTRY_COUNT);
+                let original_table = PageTable::from_physical(original & ADDRESS_MASK)?;
+                table_entries.copy_from(original_table);
             }
-            directory_entries
-                .add(first_indexes[2])
-                .write(table | PRESENT | WRITABLE | USER);
+            directory_entries.set(first_indexes[2], table | PRESENT | WRITABLE | USER);
 
             if header_indexes[2] != first_indexes[2] {
-                let original = kernel_directory.add(header_indexes[2]).read();
+                let original = kernel_directory.get(header_indexes[2]);
                 if original & PRESENT == 0
                     || original & LARGE_PAGE != 0 && original & PAGE_ATTRIBUTE_TABLE != 0
                 {
@@ -1064,20 +1074,13 @@ pub(crate) fn verify_linux_elf_mapping(
                     let flags = original & !ADDRESS_MASK & !LARGE_PAGE;
                     for index in 0..ENTRY_COUNT {
                         header_table_entries
-                            .add(index)
-                            .write((base + (index * PAGE_SIZE) as u64) | flags);
+                            .set(index, (base + (index * PAGE_SIZE) as u64) | flags);
                     }
                 } else {
-                    let original_table = mapped_frame::<u64>(original & ADDRESS_MASK)?;
-                    core::ptr::copy_nonoverlapping(
-                        original_table,
-                        header_table_entries,
-                        ENTRY_COUNT,
-                    );
+                    let original_table = PageTable::from_physical(original & ADDRESS_MASK)?;
+                    header_table_entries.copy_from(original_table);
                 }
-                directory_entries
-                    .add(header_indexes[2])
-                    .write(header_table | PRESENT | WRITABLE | USER);
+                directory_entries.set(header_indexes[2], header_table | PRESENT | WRITABLE | USER);
             }
 
             let first_bytes = Frame::from_physical(first_page)?;
@@ -1117,64 +1120,43 @@ pub(crate) fn verify_linux_elf_mapping(
                     | if segment.writable { WRITABLE } else { 0 }
                     | if segment.executable { 0 } else { NO_EXECUTE }
             };
-            table_entries
-                .add(first_indexes[3])
-                .write(first_page | flags(first));
+            table_entries.set(first_indexes[3], first_page | flags(first));
             if first.page_count > 1 {
-                table_entries
-                    .add(first_indexes[3] + 1)
-                    .write(first_tail_page | flags(first));
+                table_entries.set(first_indexes[3] + 1, first_tail_page | flags(first));
             }
             if first.page_count == 3 {
-                table_entries
-                    .add(first_indexes[3] + 2)
-                    .write(first_third_page | flags(first));
+                table_entries.set(first_indexes[3] + 2, first_third_page | flags(first));
             }
             if first.page_count == 4 {
-                table_entries
-                    .add(first_indexes[3] + 2)
-                    .write(first_third_page | flags(first));
-                table_entries
-                    .add(first_indexes[3] + 3)
-                    .write(first_fourth_page | flags(first));
+                table_entries.set(first_indexes[3] + 2, first_third_page | flags(first));
+                table_entries.set(first_indexes[3] + 3, first_fourth_page | flags(first));
             }
             if first.page_count == 5 {
-                table_entries
-                    .add(first_indexes[3] + 2)
-                    .write(first_third_page | flags(first));
-                table_entries
-                    .add(first_indexes[3] + 3)
-                    .write(first_fourth_page | flags(first));
-                table_entries
-                    .add(first_indexes[3] + 4)
-                    .write(first_fifth_page | flags(first));
+                table_entries.set(first_indexes[3] + 2, first_third_page | flags(first));
+                table_entries.set(first_indexes[3] + 3, first_fourth_page | flags(first));
+                table_entries.set(first_indexes[3] + 4, first_fifth_page | flags(first));
             }
             if let Some(segment) = header {
-                header_table_entries
-                    .add(header_indexes[3])
-                    .write(header_page | flags(segment));
+                header_table_entries.set(header_indexes[3], header_page | flags(segment));
                 if segment.page_count == 2 {
                     header_table_entries
-                        .add(header_indexes[3] + 1)
-                        .write(header_tail_page | flags(segment));
+                        .set(header_indexes[3] + 1, header_tail_page | flags(segment));
                 }
             }
-            table_entries
-                .add(second_indexes[3])
-                .write(second_page | flags(second));
+            table_entries.set(second_indexes[3], second_page | flags(second));
             if second.page_count == 2 {
-                table_entries
-                    .add(second_indexes[3] + 1)
-                    .write(second_tail_page | flags(second));
+                table_entries.set(second_indexes[3] + 1, second_tail_page | flags(second));
             }
-            table_entries
-                .add(heap_indexes[3])
-                .write(heap_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            table_entries
-                .add(stack_indexes[3])
-                .write(stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            table_entries.set(
+                heap_indexes[3],
+                heap_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
+            table_entries.set(
+                stack_indexes[3],
+                stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
             for indexes in mmap_indexes {
-                table_entries.add(indexes[3]).write(0);
+                table_entries.set(indexes[3], 0);
             }
 
             let stack_bytes = Frame::from_physical(stack_page)?;
@@ -1211,43 +1193,43 @@ pub(crate) fn verify_linux_elf_mapping(
             stack_bytes.write_bytes(environment_offset, &LINUX_INIT_ENVIRONMENT);
             stack_bytes.write_bytes(argument_offset, &LINUX_INIT_ARGUMENT);
 
-            let first_entry = table_entries.add(first_indexes[3]).read();
+            let first_entry = table_entries.get(first_indexes[3]);
             let first_tail_entry = if first.page_count > 1 {
-                table_entries.add(first_indexes[3] + 1).read()
+                table_entries.get(first_indexes[3] + 1)
             } else {
                 0
             };
             let first_third_entry = if first.page_count >= 3 {
-                table_entries.add(first_indexes[3] + 2).read()
+                table_entries.get(first_indexes[3] + 2)
             } else {
                 0
             };
             let first_fourth_entry = if first.page_count >= 4 {
-                table_entries.add(first_indexes[3] + 3).read()
+                table_entries.get(first_indexes[3] + 3)
             } else {
                 0
             };
             let first_fifth_entry = if first.page_count == 5 {
-                table_entries.add(first_indexes[3] + 4).read()
+                table_entries.get(first_indexes[3] + 4)
             } else {
                 0
             };
-            let header_entry = header_table_entries.add(header_indexes[3]).read();
+            let header_entry = header_table_entries.get(header_indexes[3]);
             let header_tail_entry = if header.is_some_and(|segment| segment.page_count == 2) {
-                header_table_entries.add(header_indexes[3] + 1).read()
+                header_table_entries.get(header_indexes[3] + 1)
             } else {
                 0
             };
-            let second_entry = table_entries.add(second_indexes[3]).read();
+            let second_entry = table_entries.get(second_indexes[3]);
             let second_tail_entry = if second.page_count == 2 {
-                table_entries.add(second_indexes[3] + 1).read()
+                table_entries.get(second_indexes[3] + 1)
             } else {
                 0
             };
-            let heap_entry = table_entries.add(heap_indexes[3]).read();
-            let stack_entry = table_entries.add(stack_indexes[3]).read();
-            let lower_guard = table_entries.add(stack_indexes[3] - 1).read();
-            let upper_guard = table_entries.add(stack_indexes[3] + 1).read();
+            let heap_entry = table_entries.get(heap_indexes[3]);
+            let stack_entry = table_entries.get(stack_indexes[3]);
+            let lower_guard = table_entries.get(stack_indexes[3] - 1);
+            let upper_guard = table_entries.get(stack_indexes[3] + 1);
             let header_entries_valid = header.is_none_or(|segment| {
                 header_entry & (PRESENT | USER | NO_EXECUTE) == PRESENT | USER | NO_EXECUTE
                     && header_entry & WRITABLE == 0
@@ -1263,8 +1245,8 @@ pub(crate) fn verify_linux_elf_mapping(
                             crate::linux_elf::materialized_page_matches(segment, 1, bytes)
                         }))
             });
-            let entries_valid = root_entries.add(256).read() == kernel_root.add(256).read()
-                && root_entries.add(256).read() & USER == 0
+            let entries_valid = root_entries.get(256) == kernel_root.get(256)
+                && root_entries.get(256) & USER == 0
                 && first_entry & (PRESENT | USER) == PRESENT | USER
                 && first_entry & (WRITABLE | NO_EXECUTE) == 0
                 && (first.page_count == 1
@@ -1292,7 +1274,7 @@ pub(crate) fn verify_linux_elf_mapping(
                 && upper_guard & USER == 0
                 && mmap_indexes
                     .iter()
-                    .all(|indexes| table_entries.add(indexes[3]).read() == 0)
+                    .all(|indexes| table_entries.get(indexes[3]) == 0)
                 && header_entries_valid
                 && first_bytes.with_bytes(|bytes| {
                     crate::linux_elf::materialized_page_matches(first, 0, bytes)
@@ -1499,7 +1481,7 @@ pub(crate) fn verify_linux_elf_mapping(
                 activate(kernel_root_physical);
                 return Some(false);
             }
-            table_entries = mapped_frame::<u64>(exec_page_table_frames[3]?.address())?;
+            table_entries = PageTable::from_physical(exec_page_table_frames[3]?.address())?;
             let retired_image_frames = execution_result.retired_image_frames;
             let retired_image_valid = execution_result.retired_image_count == initial_image_count
                 && retired_image_frames[..initial_image_count]
@@ -1547,14 +1529,14 @@ pub(crate) fn verify_linux_elf_mapping(
                                 .is_some_and(|entry| entry.read() == 0)
                     });
             let exec_stack_mapping_valid = exec_stack_frame.is_some_and(|frame| {
-                logically_writable_leaf(table_entries.add(stack_indexes[3]).read())
+                logically_writable_leaf(table_entries.get(stack_indexes[3]))
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                     && frame != frames[15]
                     && !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[frames[15]])
             });
             let exec_heap_mapping_valid = exec_heap_frame.is_some_and(|frame| {
-                logically_writable_leaf(table_entries.add(heap_indexes[3]).read())
+                logically_writable_leaf(table_entries.get(heap_indexes[3]))
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                     && frame != frames[14]
@@ -1571,7 +1553,7 @@ pub(crate) fn verify_linux_elf_mapping(
                 && exec_heap_mapping_valid;
             let mapping_removed = mmap_indexes
                 .iter()
-                .all(|indexes| table_entries.add(indexes[3]).read() == 0);
+                .all(|indexes| table_entries.get(indexes[3]) == 0);
             activate(kernel_root_physical);
             let restored = current_root() == kernel_root_physical;
             Some(executed && mapping_removed && restored)
@@ -1582,6 +1564,7 @@ pub(crate) fn verify_linux_elf_mapping(
     // loaded; they are scrubbed below, and the kernel would then fetch its
     // own code through zeroed tables.
     if current_root() != kernel_root_physical {
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(kernel_root_physical) };
     }
     let cleared = frames.iter().enumerate().all(|(index, frame)| {
@@ -2157,24 +2140,22 @@ pub(crate) fn verify_interpreted_elf_mapping(
             ] {
                 zero_frame(frame)?;
             }
-            let kernel_root = mapped_frame::<u64>(kernel_root_physical)?;
-            let root_entries = mapped_frame::<u64>(root)?;
-            let pdpt_entries = mapped_frame::<u64>(pdpt)?;
-            let directory_entries = mapped_frame::<u64>(directory)?;
-            let mut main_ro_entries = mapped_frame::<u64>(main_ro_table)?;
-            let mut main_entries = mapped_frame::<u64>(main_table)?;
-            let mut interpreter_entries = mapped_frame::<u64>(interpreter_table)?;
-            root_entries.add(256).write(kernel_root.add(256).read());
-            root_entries.write(pdpt | PRESENT | WRITABLE | USER);
+            let kernel_root = PageTable::from_physical(kernel_root_physical)?;
+            let root_entries = PageTable::from_physical(root)?;
+            let pdpt_entries = PageTable::from_physical(pdpt)?;
+            let directory_entries = PageTable::from_physical(directory)?;
+            let mut main_ro_entries = PageTable::from_physical(main_ro_table)?;
+            let mut main_entries = PageTable::from_physical(main_table)?;
+            let mut interpreter_entries = PageTable::from_physical(interpreter_table)?;
+            root_entries.set(256, kernel_root.get(256));
+            root_entries.set(0, pdpt | PRESENT | WRITABLE | USER);
 
-            let kernel_pdpt = mapped_frame::<u64>(kernel_root.read() & ADDRESS_MASK)?;
-            core::ptr::copy_nonoverlapping(kernel_pdpt, pdpt_entries, ENTRY_COUNT);
+            let kernel_pdpt = PageTable::from_physical(kernel_root.get(0) & ADDRESS_MASK)?;
+            pdpt_entries.copy_from(kernel_pdpt);
             let kernel_directory =
-                mapped_frame::<u64>(kernel_pdpt.add(main_indexes[1]).read() & ADDRESS_MASK)?;
-            core::ptr::copy_nonoverlapping(kernel_directory, directory_entries, ENTRY_COUNT);
-            pdpt_entries
-                .add(main_indexes[1])
-                .write(directory | PRESENT | WRITABLE | USER);
+                PageTable::from_physical(kernel_pdpt.get(main_indexes[1]) & ADDRESS_MASK)?;
+            directory_entries.copy_from(kernel_directory);
+            pdpt_entries.set(main_indexes[1], directory | PRESENT | WRITABLE | USER);
 
             for (directory_index, table_entries, table_frame) in [
                 (main_ro_indexes[2], main_ro_entries, main_ro_table),
@@ -2185,7 +2166,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                     interpreter_table,
                 ),
             ] {
-                let original = kernel_directory.add(directory_index).read();
+                let original = kernel_directory.get(directory_index);
                 if original & PRESENT == 0
                     || original & LARGE_PAGE != 0 && original & PAGE_ATTRIBUTE_TABLE != 0
                 {
@@ -2195,17 +2176,13 @@ pub(crate) fn verify_interpreted_elf_mapping(
                     let base = original & ADDRESS_MASK;
                     let flags = original & !ADDRESS_MASK & !LARGE_PAGE;
                     for index in 0..ENTRY_COUNT {
-                        table_entries
-                            .add(index)
-                            .write((base + (index * PAGE_SIZE) as u64) | flags);
+                        table_entries.set(index, (base + (index * PAGE_SIZE) as u64) | flags);
                     }
                 } else {
-                    let original_table = mapped_frame::<u64>(original & ADDRESS_MASK)?;
-                    core::ptr::copy_nonoverlapping(original_table, table_entries, ENTRY_COUNT);
+                    let original_table = PageTable::from_physical(original & ADDRESS_MASK)?;
+                    table_entries.copy_from(original_table);
                 }
-                directory_entries
-                    .add(directory_index)
-                    .write(table_frame | PRESENT | WRITABLE | USER);
+                directory_entries.set(directory_index, table_frame | PRESENT | WRITABLE | USER);
             }
 
             let payloads = [
@@ -2252,52 +2229,56 @@ pub(crate) fn verify_interpreted_elf_mapping(
                     | if segment.writable { WRITABLE } else { 0 }
                     | if segment.executable { 0 } else { NO_EXECUTE }
             };
-            main_ro_entries.add(main_ro_indexes[3]).write(0);
+            main_ro_entries.set(main_ro_indexes[3], 0);
             for offset in 0..main_rx.page_count {
-                main_entries.add(main_indexes[3] + offset).write(0);
+                main_entries.set(main_indexes[3] + offset, 0);
             }
             for offset in 0..main_rw.page_count {
-                main_entries.add(main_rw_indexes[3] + offset).write(0);
+                main_entries.set(main_rw_indexes[3] + offset, 0);
             }
-            interpreter_entries
-                .add(interpreter_indexes[3])
-                .write(interpreter_page | flags(interpreter_rx));
-            interpreter_entries
-                .add(interpreter_indexes[3] + 1)
-                .write(interpreter_tail_page | flags(interpreter_rx));
-            interpreter_entries
-                .add(interpreter_rw_indexes[3])
-                .write(interpreter_data | flags(interpreter_rw));
+            interpreter_entries.set(
+                interpreter_indexes[3],
+                interpreter_page | flags(interpreter_rx),
+            );
+            interpreter_entries.set(
+                interpreter_indexes[3] + 1,
+                interpreter_tail_page | flags(interpreter_rx),
+            );
+            interpreter_entries.set(
+                interpreter_rw_indexes[3],
+                interpreter_data | flags(interpreter_rw),
+            );
             for dependency in 0..2 {
                 for offset in 0..dependency_window_pages[dependency] {
                     let page = dependency_window_start[dependency] + (offset * PAGE_SIZE) as u64;
-                    interpreter_entries.add(indexes(page)[3]).write(0);
+                    interpreter_entries.set(indexes(page)[3], 0);
                 }
             }
-            main_entries
-                .add(heap_indexes[3])
-                .write(heap_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            main_entries
-                .add(stack_indexes[3])
-                .write(stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
+            main_entries.set(
+                heap_indexes[3],
+                heap_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
+            main_entries.set(
+                stack_indexes[3],
+                stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
             for indexes in mmap_indexes {
-                main_entries.add(indexes[3]).write(0);
+                main_entries.set(indexes[3], 0);
             }
-            main_entries
-                .add(tls_indexes[3])
-                .write(tls_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            main_entries
-                .add(sibling_tls_indexes[3])
-                .write(sibling_tls_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            main_entries
-                .add(sibling_stack_lower_guard_indexes[3])
-                .write(0);
-            main_entries
-                .add(sibling_stack_indexes[3])
-                .write(sibling_stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            main_entries
-                .add(sibling_stack_upper_guard_indexes[3])
-                .write(0);
+            main_entries.set(
+                tls_indexes[3],
+                tls_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
+            main_entries.set(
+                sibling_tls_indexes[3],
+                sibling_tls_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
+            main_entries.set(sibling_stack_lower_guard_indexes[3], 0);
+            main_entries.set(
+                sibling_stack_indexes[3],
+                sibling_stack_page | PRESENT | WRITABLE | USER | NO_EXECUTE,
+            );
+            main_entries.set(sibling_stack_upper_guard_indexes[3], 0);
 
             let stack_bytes = Frame::from_physical(stack_page)?;
             let stack_offset = PAGE_SIZE - 48 * size_of::<u64>();
@@ -2330,54 +2311,44 @@ pub(crate) fn verify_interpreted_elf_mapping(
             stack_bytes.write_bytes(environment_offset, &LINUX_INIT_ENVIRONMENT);
             stack_bytes.write_bytes(argument_offset, &LINUX_INIT_ARGUMENT);
 
-            let permissions_valid = main_ro_entries.add(main_ro_indexes[3]).read() == 0
+            let permissions_valid = main_ro_entries.get(main_ro_indexes[3]) == 0
                 && (0..main_rx.page_count)
-                    .all(|offset| main_entries.add(main_indexes[3] + offset).read() == 0)
+                    .all(|offset| main_entries.get(main_indexes[3] + offset) == 0)
                 && (0..main_rw.page_count)
-                    .all(|offset| main_entries.add(main_rw_indexes[3] + offset).read() == 0)
+                    .all(|offset| main_entries.get(main_rw_indexes[3] + offset) == 0)
                 && (0..interpreter_rx.page_count).all(|offset| {
-                    interpreter_entries
-                        .add(interpreter_indexes[3] + offset)
-                        .read()
+                    interpreter_entries.get(interpreter_indexes[3] + offset)
                         & (PRESENT | USER | WRITABLE | NO_EXECUTE)
                         == PRESENT | USER
                 })
-                && interpreter_entries.add(interpreter_rw_indexes[3]).read()
+                && interpreter_entries.get(interpreter_rw_indexes[3])
                     & (PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == PRESENT | USER | WRITABLE | NO_EXECUTE
                 && (0..2).all(|dependency| {
                     (0..dependency_window_pages[dependency]).all(|offset| {
                         let page =
                             dependency_window_start[dependency] + (offset * PAGE_SIZE) as u64;
-                        interpreter_entries.add(indexes(page)[3]).read() == 0
+                        interpreter_entries.get(indexes(page)[3]) == 0
                     })
                 })
-                && main_entries.add(heap_indexes[3]).read()
-                    & (PRESENT | USER | WRITABLE | NO_EXECUTE)
+                && main_entries.get(heap_indexes[3]) & (PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == PRESENT | USER | WRITABLE | NO_EXECUTE
-                && main_entries.add(stack_indexes[3]).read()
-                    & (PRESENT | USER | WRITABLE | NO_EXECUTE)
+                && main_entries.get(stack_indexes[3]) & (PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == PRESENT | USER | WRITABLE | NO_EXECUTE
                 && mmap_indexes
                     .iter()
-                    .all(|indexes| main_entries.add(indexes[3]).read() == 0)
-                && main_entries.add(tls_indexes[3]).read()
+                    .all(|indexes| main_entries.get(indexes[3]) == 0)
+                && main_entries.get(tls_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == tls_page | PRESENT | USER | WRITABLE | NO_EXECUTE
-                && main_entries.add(sibling_tls_indexes[3]).read()
+                && main_entries.get(sibling_tls_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == sibling_tls_page | PRESENT | USER | WRITABLE | NO_EXECUTE
-                && main_entries
-                    .add(sibling_stack_lower_guard_indexes[3])
-                    .read()
-                    == 0
-                && main_entries.add(sibling_stack_indexes[3]).read()
+                && main_entries.get(sibling_stack_lower_guard_indexes[3]) == 0
+                && main_entries.get(sibling_stack_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == sibling_stack_page | PRESENT | USER | WRITABLE | NO_EXECUTE
-                && main_entries
-                    .add(sibling_stack_upper_guard_indexes[3])
-                    .read()
-                    == 0
+                && main_entries.get(sibling_stack_upper_guard_indexes[3]) == 0
                 && stack_bytes.read_u64(stack_words + 6) == startup.program_headers
                 && stack_bytes.read_u64(stack_words + 10)
                     == u64::from(startup.program_header_count)
@@ -2580,9 +2551,9 @@ pub(crate) fn verify_interpreted_elf_mapping(
             if !execution_result.valid || exec_page_table_frames.iter().any(Option::is_none) {
                 return None;
             }
-            main_ro_entries = mapped_frame::<u64>(exec_page_table_frames[3]?.address())?;
-            main_entries = mapped_frame::<u64>(exec_page_table_frames[4]?.address())?;
-            interpreter_entries = mapped_frame::<u64>(exec_page_table_frames[5]?.address())?;
+            main_ro_entries = PageTable::from_physical(exec_page_table_frames[3]?.address())?;
+            main_entries = PageTable::from_physical(exec_page_table_frames[4]?.address())?;
+            interpreter_entries = PageTable::from_physical(exec_page_table_frames[5]?.address())?;
             let expected_active_image_count = initial_image_count
                 + main_mappings
                     .iter()
@@ -2594,7 +2565,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 && execution_result.active_image_mapping_count == expected_active_image_count;
             let exec_stack_mapping_valid = executed
                 && exec_stack_frame.is_some_and(|frame| {
-                    main_entries.add(stack_indexes[3]).read()
+                    main_entries.get(stack_indexes[3])
                         & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                         == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                         && frame != frames[10]
@@ -2602,7 +2573,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 });
             let exec_heap_mapping_valid = executed
                 && exec_heap_frame.is_some_and(|frame| {
-                    main_entries.add(heap_indexes[3]).read()
+                    main_entries.get(heap_indexes[3])
                         & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                         == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                         && frame != frames[9]
@@ -2617,7 +2588,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                         } else {
                             sibling_tls_virtual_page
                         };
-                        main_entries.add(indexes(virtual_page)[3]).read()
+                        main_entries.get(indexes(virtual_page)[3])
                             & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                             == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                             && frame != old
@@ -2626,7 +2597,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 });
             let exec_sibling_stack_mapping_valid = executed
                 && exec_sibling_stack_frame.is_some_and(|frame| {
-                    main_entries.add(sibling_stack_indexes[3]).read()
+                    main_entries.get(sibling_stack_indexes[3])
                         & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                         == frame.address() | PRESENT | USER | WRITABLE | NO_EXECUTE
                         && frame != frames[13]
@@ -2634,9 +2605,9 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 });
             let mapping_removed = mmap_indexes
                 .iter()
-                .all(|indexes| main_entries.add(indexes[3]).read() == 0);
+                .all(|indexes| main_entries.get(indexes[3]) == 0);
             let tls_runtime_valid = executed
-                && main_entries.add(tls_indexes[3]).read()
+                && main_entries.get(tls_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == exec_tls_frames[0].map_or(0, memory::FrameLease::address)
                         | PRESENT
@@ -2685,7 +2656,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                         && (tls_base as *const u64).read_volatile() == tls_base
                 });
             let sibling_tls_runtime_valid = executed
-                && main_entries.add(sibling_tls_indexes[3]).read()
+                && main_entries.get(sibling_tls_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == exec_tls_frames[1].map_or(0, memory::FrameLease::address)
                         | PRESENT
@@ -2703,44 +2674,39 @@ pub(crate) fn verify_interpreted_elf_mapping(
                         && sibling_tls_base != tls_base
                 });
             let sibling_stack_runtime_valid = executed
-                && main_entries
-                    .add(sibling_stack_lower_guard_indexes[3])
-                    .read()
-                    == 0
-                && main_entries.add(sibling_stack_indexes[3]).read()
+                && main_entries.get(sibling_stack_lower_guard_indexes[3]) == 0
+                && main_entries.get(sibling_stack_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == exec_sibling_stack_frame.map_or(0, memory::FrameLease::address)
                         | PRESENT
                         | USER
                         | WRITABLE
                         | NO_EXECUTE
-                && main_entries
-                    .add(sibling_stack_upper_guard_indexes[3])
-                    .read()
-                    == 0
+                && main_entries.get(sibling_stack_upper_guard_indexes[3]) == 0
                 && exec_sibling_stack_frame.is_some_and(|frame| {
-                    mapped_frame::<u64>(frame.address()).is_some_and(|stack| {
-                        (0..ENTRY_COUNT).all(|index| stack.add(index).read_volatile() == 0)
+                    Frame::leased(frame).is_some_and(|stack| {
+                        (0..ENTRY_COUNT)
+                            .all(|index| stack.read_volatile_u64(index * size_of::<u64>()) == 0)
                     })
                 });
             let main_frame_addresses = execution_result
                 .main_frames
                 .map(|frame| frame.map(memory::FrameLease::address).unwrap_or(0));
-            let main_permissions_valid = main_ro_entries.add(main_ro_indexes[3]).read()
+            let main_permissions_valid = main_ro_entries.get(main_ro_indexes[3])
                 & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                 == main_frame_addresses[0] | PRESENT | USER | NO_EXECUTE
                 && main_frame_addresses[1..6]
                     .iter()
                     .enumerate()
                     .all(|(offset, frame)| {
-                        main_entries.add(main_indexes[3] + offset).read()
+                        main_entries.get(main_indexes[3] + offset)
                             & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                             == *frame | PRESENT | USER
                     })
-                && main_entries.add(main_rw_indexes[3]).read()
+                && main_entries.get(main_rw_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == main_frame_addresses[6] | PRESENT | USER | WRITABLE | NO_EXECUTE
-                && main_entries.add(main_rw_indexes[3] + 1).read()
+                && main_entries.get(main_rw_indexes[3] + 1)
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                     == main_frame_addresses[7] | PRESENT | USER | NO_EXECUTE;
             let selected_dependency_bases = execution_result.dependency_bases;
@@ -2765,7 +2731,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
                                     | USER
                                     | if mapping.writable { WRITABLE } else { 0 }
                                     | if mapping.executable { 0 } else { NO_EXECUTE };
-                                interpreter_entries.add(indexes(actual_page)[3]).read()
+                                interpreter_entries.get(indexes(actual_page)[3])
                                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
                                     == expected
                             })
@@ -2987,6 +2953,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
     // loaded; they are scrubbed below, and the kernel would then fetch its
     // own code through zeroed tables.
     if current_root() != kernel_root_physical {
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(kernel_root_physical) };
     }
     let cleared = frames.iter().enumerate().all(|(index, frame)| {
@@ -3188,6 +3155,9 @@ pub(crate) fn copy_from_current_user_partial(address: u64, output: &mut [u8]) ->
     if !current_user_root_is_owned(root) {
         return 0;
     }
+    // SAFETY: the range lies in the user half of an address space this
+    // kernel owns; the fault-recovering copy turns an unmapped page into a
+    // short copy, and `output` is a kernel buffer of the copied length.
     let remaining =
         unsafe { cpu::raw_copy_from_user(output.as_mut_ptr(), address as *const u8, output.len()) };
     output.len().saturating_sub(remaining)
@@ -3211,6 +3181,7 @@ pub(crate) fn copy_to_current_user_partial(address: u64, input: &[u8]) -> usize 
     if !current_user_root_is_owned(root) {
         return 0;
     }
+    // SAFETY: as in `copy_from_current_user_partial`, in the other direction.
     let remaining =
         unsafe { cpu::raw_copy_to_user(address as *mut u8, input.as_ptr(), input.len()) };
     input.len().saturating_sub(remaining)
@@ -3250,6 +3221,8 @@ pub(crate) fn copy_to_current_linux_user_fast(address: u64, input: &[u8]) -> boo
             None => return false,
         };
     }
+    // SAFETY: every page of the user range was checked present, user and
+    // writable above, and the copy recovers from a fault regardless.
     unsafe { cpu::raw_copy_to_user(address as *mut u8, input.as_ptr(), input.len()) == 0 }
 }
 
@@ -3265,10 +3238,10 @@ pub(crate) fn protect_current_user_page_read_only(address: u64) -> bool {
     ];
     let mut table = current_root();
     for (level, index) in indexes.into_iter().enumerate() {
-        let Some(entries) = mapped_frame::<u64>(table & ADDRESS_MASK) else {
+        let Some(entries) = PageTable::from_physical(table & ADDRESS_MASK) else {
             return false;
         };
-        let entry = unsafe { entries.add(index).read() };
+        let entry = entries.get(index);
         if entry & (PRESENT | WRITABLE | USER) != PRESENT | WRITABLE | USER
             || (level == 1 || level == 2) && entry & LARGE_PAGE != 0
         {
@@ -3278,11 +3251,9 @@ pub(crate) fn protect_current_user_page_read_only(address: u64) -> bool {
             if entry & NO_EXECUTE == 0 {
                 return false;
             }
-            unsafe {
-                entries.add(index).write(entry & !WRITABLE);
-                asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-            }
-            return unsafe { entries.add(index).read() & WRITABLE == 0 };
+            entries.set(index, entry & !WRITABLE);
+            invalidate_page(address);
+            return entries.get(index) & WRITABLE == 0;
         }
         table = entry & ADDRESS_MASK;
     }
@@ -3319,10 +3290,8 @@ pub(crate) fn protect_current_linux_pages_read_only(address: u64, frames: &[u64]
     }
     for index in 0..frames.len() {
         let page = address + index as u64 * PAGE_SIZE as u64;
-        unsafe {
-            leaves[index].write(values[index] & !WRITABLE);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaves[index].write(values[index] & !WRITABLE);
+        invalidate_page(page);
     }
     leaves[..frames.len()]
         .iter()
@@ -3369,10 +3338,8 @@ pub(crate) fn replace_current_linux_pages(
     let new_flags = PRESENT | USER | NO_EXECUTE | if new_writable { WRITABLE } else { 0 };
     for (index, frame) in new_frames.iter().enumerate() {
         let page = address + (index * PAGE_SIZE) as u64;
-        unsafe {
-            leaves[index].write(frame.address() | new_flags);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaves[index].write(frame.address() | new_flags);
+        invalidate_page(page);
     }
     leaves[..new_frames.len()]
         .iter()
@@ -3420,10 +3387,8 @@ pub(crate) fn reserve_current_linux_pages(
     }
     for (index, leaf) in leaves[..old_frames.len()].iter().enumerate() {
         let page = address + (index * PAGE_SIZE) as u64;
-        unsafe {
-            leaf.write(0);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaf.write(0);
+        invalidate_page(page);
     }
     if leaves[..old_frames.len()]
         .iter()
@@ -3433,10 +3398,8 @@ pub(crate) fn reserve_current_linux_pages(
     }
     for (index, leaf) in leaves[..old_frames.len()].iter().enumerate() {
         let page = address + (index * PAGE_SIZE) as u64;
-        unsafe {
-            leaf.write(values[index]);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaf.write(values[index]);
+        invalidate_page(page);
     }
     false
 }
@@ -3466,10 +3429,8 @@ pub(crate) fn map_current_linux_pages(
     let flags = PRESENT | USER | NO_EXECUTE | if writable { WRITABLE } else { 0 };
     for (index, frame) in frames.iter().enumerate() {
         let page = address + (index * PAGE_SIZE) as u64;
-        unsafe {
-            leaves[index].write(frame.address() | flags);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaves[index].write(frame.address() | flags);
+        invalidate_page(page);
     }
     let installed = leaves[..frames.len()]
         .iter()
@@ -3483,10 +3444,8 @@ pub(crate) fn map_current_linux_pages(
     }
     for (index, leaf) in leaves[..frames.len()].iter().enumerate() {
         let page = address + (index * PAGE_SIZE) as u64;
-        unsafe {
-            leaf.write(0);
-            asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-        }
+        leaf.write(0);
+        invalidate_page(page);
     }
     false
 }
@@ -3756,8 +3715,11 @@ pub(crate) fn replace_current_linux_image_and_hierarchy(
     {
         return false;
     }
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(new_hierarchy[0].address()) };
     if current_root() != new_hierarchy[0].address() {
+        // SAFETY: this root was active on entry and its address space is still live.
         unsafe { activate(old_hierarchy[0].address()) };
         return false;
     }
@@ -3816,31 +3778,30 @@ fn prepare_linux_hierarchy_replacement(
         .zip(new_hierarchy.iter().copied())
     {
         let (Some(source), Some(destination)) = (
-            mapped_frame::<u64>(old.address()),
-            mapped_frame::<u64>(new.address()),
+            PageTable::from_physical(old.address()),
+            PageTable::from_physical(new.address()),
         ) else {
             return false;
         };
-        unsafe { core::ptr::copy_nonoverlapping(source, destination, ENTRY_COUNT) };
+        destination.copy_from(source);
     }
     let Some(relocation) = HierarchyRelocation::new(old_hierarchy) else {
         return false;
     };
     for frame in new_hierarchy.iter().copied() {
-        let Some(entries) = mapped_frame::<u64>(frame.address()) else {
+        let Some(entries) = PageTable::from_physical(frame.address()) else {
             return false;
         };
         for index in 0..ENTRY_COUNT {
-            let value = unsafe { entries.add(index).read() };
+            let value = entries.get(index);
             if value & PRESENT == 0 {
                 continue;
             }
             if let Some(position) = relocation.position(value & ADDRESS_MASK) {
-                unsafe {
-                    entries
-                        .add(index)
-                        .write((value & !ADDRESS_MASK) | new_hierarchy[position].address());
-                }
+                entries.set(
+                    index,
+                    (value & !ADDRESS_MASK) | new_hierarchy[position].address(),
+                );
             }
         }
     }
@@ -3961,31 +3922,30 @@ fn clone_shared_linux_hierarchy(
         .zip(new_hierarchy.iter().copied())
     {
         let (Some(source), Some(destination)) = (
-            mapped_frame::<u64>(old.address()),
-            mapped_frame::<u64>(new.address()),
+            PageTable::from_physical(old.address()),
+            PageTable::from_physical(new.address()),
         ) else {
             return false;
         };
-        unsafe { core::ptr::copy_nonoverlapping(source, destination, ENTRY_COUNT) };
+        destination.copy_from(source);
     }
     let Some(relocation) = HierarchyRelocation::new(old_hierarchy) else {
         return false;
     };
     for frame in new_hierarchy.iter().copied() {
-        let Some(entries) = mapped_frame::<u64>(frame.address()) else {
+        let Some(entries) = PageTable::from_physical(frame.address()) else {
             return false;
         };
         for index in 0..ENTRY_COUNT {
-            let value = unsafe { entries.add(index).read() };
+            let value = entries.get(index);
             if value & PRESENT == 0 {
                 continue;
             }
             if let Some(position) = relocation.position(value & ADDRESS_MASK) {
-                unsafe {
-                    entries
-                        .add(index)
-                        .write((value & !ADDRESS_MASK) | new_hierarchy[position].address());
-                }
+                entries.set(
+                    index,
+                    (value & !ADDRESS_MASK) | new_hierarchy[position].address(),
+                );
             }
         }
     }
@@ -4080,6 +4040,8 @@ fn clone_linux_process_hierarchy_inner(
     {
         return false;
     }
+    // SAFETY: the kernel-entry lock serializes address-space clones, and no
+    // other reference to the clone scratch lists is live during one.
     let scratch = unsafe { &mut *LINUX_PROCESS_SCRATCH.clone.get() };
     let child_mapping_capacity = parent_mappings.len();
     let (Some(mut visited_hierarchy), Some(()), Some(())) = (
@@ -4218,12 +4180,12 @@ fn visit_linux_leaf_pages(root: u64, visit: &mut impl FnMut(memory::FrameLease) 
         level: usize,
         visit: &mut impl FnMut(memory::FrameLease) -> bool,
     ) -> bool {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return false;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         (0..end).all(|index| {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             if level < 3 {
                 value & (PRESENT | USER | LARGE_PAGE) != PRESENT | USER
                     || walk(value & ADDRESS_MASK, level + 1, visit)
@@ -4240,12 +4202,12 @@ fn visit_linux_leaf_pages(root: u64, visit: &mut impl FnMut(memory::FrameLease) 
 /// page over one of them, counts as mapping it.
 pub(crate) fn linux_root_maps_any(root: u64, frames: &[u64]) -> bool {
     fn walk(table_address: u64, level: usize, frames: &[u64]) -> bool {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return true;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         (0..end).any(|index| {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             if value & PRESENT == 0 || value & USER == 0 {
                 return false;
             }
@@ -4296,21 +4258,21 @@ pub(crate) fn release_linux_leaf_pages(root: memory::FrameLease) -> bool {
 /// of `root` that names a page paged out to swap.
 fn visit_linux_swap_leaves(root: u64, visit: &mut impl FnMut(u64, PageEntry)) {
     fn walk(table_address: u64, level: usize, prefix: u64, visit: &mut impl FnMut(u64, PageEntry)) {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         for index in 0..end {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             let address = prefix | (index as u64) << [39_u32, 30, 21, 12][level];
             if level < 3 {
                 if value & (PRESENT | USER | LARGE_PAGE) == PRESENT | USER {
                     walk(value & ADDRESS_MASK, level + 1, address, visit);
                 }
             } else if linux_leaf_swap_entry(value).is_some() {
-                // SAFETY: the table was reached through present user entries
+                // The table was reached through present user entries
                 // of the root's own tables.
-                visit(address, unsafe { PageEntry::new(table.add(index)) });
+                visit(address, table.entry(index));
             }
         }
     }
@@ -4411,10 +4373,8 @@ pub(crate) fn swap_out_current_linux_page(
                 | LINUX_RUNTIME_SEALED);
     entry.write(value);
     if !invalidate_changed_runtime_translation(address, old) {
-        unsafe {
-            entry.write(old);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old);
+        invalidate_page(address);
         return None;
     }
     Some((frame, old))
@@ -4430,9 +4390,9 @@ pub(crate) fn restore_current_linux_swapped_page(address: u64, old: u64) -> bool
         return false;
     }
     entry.write(old);
-    // SAFETY: invalidating a translation has no effect beyond the TLB; the
+    // Invalidating a translation has no effect beyond the TLB; the
     // non-present entry it replaces was cached nowhere.
-    unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+    invalidate_page(address);
     true
 }
 
@@ -4603,6 +4563,8 @@ pub(crate) fn validate_linux_process_address_space(
     {
         return false;
     }
+    // SAFETY: as for the clone scratch lists: validations are serialized by
+    // the kernel-entry lock and never nest.
     let visited_mappings = unsafe { &mut *LINUX_PROCESS_SCRATCH.validation.get() };
     let (Some(mut visited_hierarchy), Some(())) = (
         filled_list(hierarchy.len(), false),
@@ -4689,10 +4651,10 @@ pub(crate) fn complete_current_linux_process_snapshot(
             }
             let index = cursors[level].next_index;
             cursors[level].next_index += 1;
-            let Some(entries) = mapped_frame::<u64>(cursors[level].table) else {
+            let Some(entries) = PageTable::from_physical(cursors[level].table) else {
                 return SnapshotWalk::Invalid;
             };
-            let value = unsafe { entries.add(index).read() };
+            let value = entries.get(index);
             if value & PRESENT == 0 {
                 continue;
             }
@@ -4850,8 +4812,8 @@ pub(crate) fn current_linux_process_hierarchy(
         }
         let index = cursors[level].next_index;
         cursors[level].next_index += 1;
-        let entries = mapped_frame::<u64>(cursors[level].table).ok_or(false)?;
-        let value = unsafe { entries.add(index).read() };
+        let entries = PageTable::from_physical(cursors[level].table).ok_or(false)?;
+        let value = entries.get(index);
         if value & (PRESENT | USER) != PRESENT | USER || level == 3 {
             continue;
         }
@@ -4874,9 +4836,7 @@ pub(crate) fn current_linux_process_hierarchy(
 }
 
 fn linux_process_hierarchy_frame_is_empty(frame: memory::FrameLease) -> bool {
-    mapped_frame::<u64>(frame.address()).is_some_and(|entries| {
-        (0..ENTRY_COUNT).all(|index| unsafe { entries.add(index).read() } == 0)
-    })
+    PageTable::from_physical(frame.address()).is_some_and(PageTable::is_empty)
 }
 
 pub(crate) fn current_linux_process_user_tree_counts(
@@ -4898,11 +4858,11 @@ pub(crate) fn current_linux_process_user_tree_counts(
             return false;
         }
         visited[hierarchy_index] = true;
-        let Some(entries) = mapped_frame::<u64>(table) else {
+        let Some(entries) = PageTable::from_physical(table) else {
             return false;
         };
         for index in 0..ENTRY_COUNT {
-            let value = unsafe { entries.add(index).read() };
+            let value = entries.get(index);
             if value & PRESENT == 0 {
                 continue;
             }
@@ -4963,13 +4923,13 @@ pub(crate) fn inherit_linux_process_kernel_mappings(root: memory::FrameLease) ->
         return false;
     }
     let (Some(kernel), Some(process)) = (
-        mapped_frame::<u64>(current_root()),
-        mapped_frame::<u64>(root.address()),
+        PageTable::from_physical(current_root()),
+        PageTable::from_physical(root.address()),
     ) else {
         return false;
     };
     let indexes = [0_usize, 256];
-    let values = indexes.map(|index| unsafe { kernel.add(index).read() });
+    let values = indexes.map(|index| kernel.get(index));
     if values
         .iter()
         .any(|value| value & PRESENT == 0 || value & USER != 0)
@@ -4977,10 +4937,10 @@ pub(crate) fn inherit_linux_process_kernel_mappings(root: memory::FrameLease) ->
         return false;
     }
     for (index, value) in indexes.into_iter().zip(values) {
-        unsafe { process.add(index).write(value) };
+        process.set(index, value);
     }
     indexes.into_iter().zip(values).all(|(index, value)| {
-        let actual = unsafe { process.add(index).read() };
+        let actual = process.get(index);
         actual & !ACCESSED == value & !ACCESSED && actual & USER == 0
     })
 }
@@ -4988,6 +4948,7 @@ pub(crate) fn inherit_linux_process_kernel_mappings(root: memory::FrameLease) ->
 pub(crate) fn verify_linux_process_root_activation(root: memory::FrameLease) -> bool {
     let previous = current_root();
     let rflags: u64;
+    // SAFETY: reading RFLAGS through the stack has no other effect.
     unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(preserves_flags)) };
     if !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[root])
         || root.address() == previous
@@ -4996,27 +4957,30 @@ pub(crate) fn verify_linux_process_root_activation(root: memory::FrameLease) -> 
         return false;
     }
     let (Some(kernel), Some(process)) = (
-        mapped_frame::<u64>(previous),
-        mapped_frame::<u64>(root.address()),
+        PageTable::from_physical(previous),
+        PageTable::from_physical(root.address()),
     ) else {
         return false;
     };
     if [256_usize].into_iter().any(|index| {
-        let expected = unsafe { kernel.add(index).read() };
-        let candidate = unsafe { process.add(index).read() };
+        let expected = kernel.get(index);
+        let candidate = process.get(index);
         expected & PRESENT == 0
             || expected & USER != 0
             || candidate & !ACCESSED != expected & !ACCESSED
     }) {
         return false;
     }
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(root.address()) };
     let selected = current_root() == root.address();
-    let process_visible = mapped_frame::<u64>(root.address()).is_some_and(|active| {
+    let process_visible = PageTable::from_physical(root.address()).is_some_and(|active| {
         [256_usize]
             .into_iter()
-            .all(|index| unsafe { active.add(index).read() } & USER == 0)
+            .all(|index| active.get(index) & USER == 0)
     });
+    // SAFETY: this root was active on entry and its address space is still live.
     unsafe { activate(previous) };
     selected && process_visible && current_root() == previous
 }
@@ -5035,11 +4999,14 @@ pub(crate) fn execute_linux_process_child(
     if !verify_linux_process_root_activation(root) || current_root() != previous {
         return None;
     }
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(root.address()) };
     let selected = current_root() == root.address();
     let exit_status = selected
         .then(|| cpu::execute_linux_process_child(entry, stack, fs_base, general))
         .flatten();
+    // SAFETY: this root was active on entry and its address space is still live.
     unsafe { activate(previous) };
     (current_root() == previous)
         .then_some(exit_status)
@@ -5080,6 +5047,8 @@ pub(crate) fn resume_live_linux_process(
         }
         return false;
     }
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(root.address()) };
     let resumed = current_root() == root.address()
         && cpu::resume_live_linux_process(entry, stack, fs_base, general, rflags);
@@ -5087,6 +5056,7 @@ pub(crate) fn resume_live_linux_process(
     // resumed one ran; loading its freed root would leave no kernel mapping
     // and triple-fault. Fall back to the kernel's tables and report it.
     if !linux_root_is_usable(previous) {
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(paging::kernel_root_address()) };
         crate::serial_write_raw(b"linox: resume returned to a released address space; root ");
         crate::serial_write_u64(previous);
@@ -5095,6 +5065,7 @@ pub(crate) fn resume_live_linux_process(
         crate::serial_write_raw(b"\r\n");
         return false;
     }
+    // SAFETY: this root was active on entry and its address space is still live.
     unsafe { activate(previous) };
     resumed && current_root() == previous
 }
@@ -5105,8 +5076,7 @@ pub(crate) fn resume_live_linux_process(
 fn linux_root_is_usable(root: u64) -> bool {
     root == paging::kernel_root_address()
         || memory::live_frame_lease(memory::FrameOwner::KERNEL, root).is_some()
-            && mapped_frame::<u64>(root)
-                .is_some_and(|entries| unsafe { entries.read() } & PRESENT != 0)
+            && PageTable::from_physical(root).is_some_and(|entries| entries.get(0) & PRESENT != 0)
 }
 
 pub(crate) fn with_live_linux_process_root<T>(
@@ -5120,12 +5090,16 @@ pub(crate) fn with_live_linux_process_root<T>(
     if !verify_linux_process_root_activation(root) || current_root() != previous {
         return None;
     }
+    // SAFETY: a live process root built by this module, holding the kernel's entries (see
+    // `activate`).
     unsafe { activate(root.address()) };
     if current_root() != root.address() {
+        // SAFETY: this root was active on entry and its address space is still live.
         unsafe { activate(previous) };
         return None;
     }
     let result = operation();
+    // SAFETY: this root was active on entry and its address space is still live.
     unsafe { activate(previous) };
     (current_root() == previous).then_some(result)
 }
@@ -5169,17 +5143,11 @@ pub(crate) fn copy_to_linux_process(
                 memory::FrameLease::from_parts(frame_address, 1)
                     .filter(|frame| memory::frame_lease_is_runtime(*frame))
             });
-        let Some(target) = frame.and_then(memory::FrameLease::direct_map_address) else {
+        let Some(target) = frame.and_then(Frame::leased) else {
             crate::serial_write("linox: console input frame is unavailable\r\n");
             return false;
         };
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                input.as_ptr().add(copied),
-                (target as *mut u8).add(offset),
-                length,
-            );
-        }
+        target.write_bytes(offset, &input[copied..copied + length]);
         copied += length;
         address += length;
     }
@@ -5203,12 +5171,12 @@ fn validate_complete_linux_process_user_tree(
         return false;
     }
     visited_hierarchy[hierarchy_index] = true;
-    let Some(entries) = mapped_frame::<u64>(table) else {
+    let Some(entries) = PageTable::from_physical(table) else {
         return false;
     };
     let shift = [39_u32, 30, 21, 12][level];
     for index in 0..ENTRY_COUNT {
-        let value = unsafe { entries.add(index).read() };
+        let value = entries.get(index);
         if value & PRESENT == 0 {
             continue;
         }
@@ -5310,31 +5278,31 @@ pub(crate) fn verify_linux_process_hierarchy_clone() -> bool {
     let result = (|| -> Option<bool> {
         let [parent_root, parent_pdpt, parent_directory, parent_table] =
             parent_hierarchy.map(memory::FrameLease::address);
-        let root = mapped_frame::<u64>(parent_root)?;
-        let pdpt = mapped_frame::<u64>(parent_pdpt)?;
-        let directory = mapped_frame::<u64>(parent_directory)?;
-        let table = mapped_frame::<u64>(parent_table)?;
-        unsafe {
-            root.add(1).write(parent_pdpt | PRESENT | WRITABLE | USER);
-            pdpt.write(parent_directory | PRESENT | WRITABLE | USER);
-            directory.write(parent_table | PRESENT | WRITABLE | USER);
-            table.write(parent_pages[0].address() | PRESENT | USER);
-            table
-                .add(1)
-                .write(parent_pages[1].address() | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            table.add(2).write(
-                parent_pages[2].address()
-                    | PRESENT
-                    | WRITABLE
-                    | USER
-                    | NO_EXECUTE
-                    | LINUX_RUNTIME_SHARED
-                    | LINUX_RUNTIME_DONTFORK,
-            );
-            Frame::leased(parent_pages[0])?.write_u8(0, 0x31);
-            Frame::leased(parent_pages[1])?.write_u8(0, 0x32);
-            Frame::leased(parent_pages[2])?.write_u8(0, 0x33);
-        }
+        let root = PageTable::from_physical(parent_root)?;
+        let pdpt = PageTable::from_physical(parent_pdpt)?;
+        let directory = PageTable::from_physical(parent_directory)?;
+        let table = PageTable::from_physical(parent_table)?;
+        root.set(1, parent_pdpt | PRESENT | WRITABLE | USER);
+        pdpt.set(0, parent_directory | PRESENT | WRITABLE | USER);
+        directory.set(0, parent_table | PRESENT | WRITABLE | USER);
+        table.set(0, parent_pages[0].address() | PRESENT | USER);
+        table.set(
+            1,
+            parent_pages[1].address() | PRESENT | WRITABLE | USER | NO_EXECUTE,
+        );
+        table.set(
+            2,
+            parent_pages[2].address()
+                | PRESENT
+                | WRITABLE
+                | USER
+                | NO_EXECUTE
+                | LINUX_RUNTIME_SHARED
+                | LINUX_RUNTIME_DONTFORK,
+        );
+        Frame::leased(parent_pages[0])?.write_u8(0, 0x31);
+        Frame::leased(parent_pages[1])?.write_u8(0, 0x32);
+        Frame::leased(parent_pages[2])?.write_u8(0, 0x33);
         let parent_mappings = [
             cpu::LinuxActiveImageMapping {
                 address: USER_TEST_ADDRESS,
@@ -5630,20 +5598,16 @@ fn replace_current_linux_image_inner(
         old_clear_entries[index] = value;
     }
     for (mapping, entry) in old_mappings.iter().zip(clear_entries) {
-        unsafe {
-            entry.write(0);
-            asm!("invlpg [{}]", in(reg) mapping.address, options(nostack, preserves_flags));
-        }
+        entry.write(0);
+        invalidate_page(mapping.address as u64);
     }
     for (mapping, entry) in mappings.iter().zip(mapping_entries) {
         let flags = PRESENT
             | USER
             | if mapping.writable { WRITABLE } else { 0 }
             | if mapping.executable { 0 } else { NO_EXECUTE };
-        unsafe {
-            entry.write(mapping.frame | flags);
-            asm!("invlpg [{}]", in(reg) mapping.address, options(nostack, preserves_flags));
-        }
+        entry.write(mapping.frame | flags);
+        invalidate_page(mapping.address as u64);
     }
     let installed = !force_verification_failure
         && mappings.iter().all(|mapping| {
@@ -5671,10 +5635,8 @@ fn replace_current_linux_image_inner(
     }
     for (mapping, value) in old_mappings.iter().zip(old_clear_entries) {
         if let Some(entry) = current_linux_leaf(mapping.address as u64) {
-            unsafe {
-                entry.write(value);
-                asm!("invlpg [{}]", in(reg) mapping.address, options(nostack, preserves_flags));
-            }
+            entry.write(value);
+            invalidate_page(mapping.address as u64);
         }
     }
     for (mapping, value) in mappings.iter().zip(old_mapping_entries) {
@@ -5683,10 +5645,8 @@ fn replace_current_linux_image_inner(
             .any(|old_mapping| old_mapping.address == mapping.address)
         {
             if let Some(entry) = current_linux_leaf(mapping.address as u64) {
-                unsafe {
-                    entry.write(value);
-                    asm!("invlpg [{}]", in(reg) mapping.address, options(nostack, preserves_flags));
-                }
+                entry.write(value);
+                invalidate_page(mapping.address as u64);
             }
         }
     }
@@ -5709,18 +5669,16 @@ fn map_current_linux_page_with_permissions(
     let Some(entry) = current_linux_leaf(address) else {
         return false;
     };
-    unsafe {
-        if entry.read() != 0 {
-            return false;
-        }
-        let flags = PRESENT
-            | USER
-            | if writable { WRITABLE } else { 0 }
-            | if executable { 0 } else { NO_EXECUTE };
-        entry.write(frame | flags);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        entry.read() & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE) == (frame | flags)
+    if entry.read() != 0 {
+        return false;
     }
+    let flags = PRESENT
+        | USER
+        | if writable { WRITABLE } else { 0 }
+        | if executable { 0 } else { NO_EXECUTE };
+    entry.write(frame | flags);
+    invalidate_page(address);
+    entry.read() & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE) == (frame | flags)
 }
 
 pub(crate) fn prepare_linux_frame(frame: u64, bytes: &[u8]) -> bool {
@@ -5890,13 +5848,13 @@ pub(crate) fn current_linux_cow_page(address: u64) -> Option<memory::FrameLease>
 /// copy-on-write to `pages`; false when the list cannot grow.
 pub(crate) fn current_linux_cow_addresses(pages: &mut Vec<u64>) -> bool {
     fn walk(table_address: u64, level: usize, base: u64, pages: &mut Vec<u64>) -> bool {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return false;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         let span = 1_u64 << (12 + 9 * (3 - level));
         (0..end).all(|index| {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             let address = base + index as u64 * span;
             if level < 3 {
                 value & (PRESENT | USER | LARGE_PAGE) != PRESENT | USER
@@ -6096,10 +6054,8 @@ pub(crate) fn set_current_linux_image_page_writable(
         value | LINUX_RUNTIME_COW
     };
     entry.write(updated);
-    // SAFETY: invlpg only drops this CPU's translation of the page.
-    unsafe {
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    // Invlpg only drops this CPU's translation of the page.
+    invalidate_page(address);
     entry.read() == updated
 }
 
@@ -6131,12 +6087,10 @@ pub(crate) fn replace_current_linux_read_only_page(
     }
     entry.write(replacement.address() | old & !ADDRESS_MASK);
     if !invalidate_changed_runtime_translation(address, old) {
-        // SAFETY: the entry is put back as it was and its translation
+        // The entry is put back as it was and its translation
         // dropped from this CPU's TLB.
-        unsafe {
-            entry.write(old);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old);
+        invalidate_page(address);
         return false;
     }
     true
@@ -6201,12 +6155,12 @@ pub(crate) struct LinuxMemoryArea {
 /// access join one area.
 pub(crate) fn linux_memory_areas(root: u64) -> Vec<LinuxMemoryArea> {
     fn walk(table_address: u64, level: usize, prefix: u64, areas: &mut Vec<LinuxMemoryArea>) {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         for index in 0..end {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             let address = prefix | (index as u64) << [39_u32, 30, 21, 12][level];
             if level < 3 {
                 if value & (PRESENT | USER | LARGE_PAGE) == PRESENT | USER {
@@ -6257,9 +6211,11 @@ pub(crate) fn current_root_address() -> u64 {
 /// `resume_live_linux_process` does after an entry.
 pub(crate) fn restore_root_after_resume(previous: u64) -> bool {
     if linux_root_is_usable(previous) {
+        // SAFETY: this root was active on entry and its address space is still live.
         unsafe { activate(previous) };
         true
     } else {
+        // SAFETY: the kernel's root maps the whole kernel and stays live.
         unsafe { activate(paging::kernel_root_address()) };
         crate::serial_write_raw(b"linox: resume returned to a released address space\r\n");
         false
@@ -6273,6 +6229,7 @@ pub(crate) fn restore_root_after_resume(previous: u64) -> bool {
 ///
 /// `root` is a live root this CPU used before, still mapping the kernel.
 pub(crate) unsafe fn activate_root(root: u64) {
+    // SAFETY: the caller's contract above is `activate`'s.
     unsafe { activate(root) };
 }
 
@@ -6291,10 +6248,10 @@ pub(crate) fn current_linux_hierarchy_matches(address: u64, frames: &[memory::Fr
         if !frames.iter().any(|frame| frame.address() == table) {
             return false;
         }
-        let Some(entries) = mapped_frame::<u64>(table) else {
+        let Some(entries) = PageTable::from_physical(table) else {
             return false;
         };
-        let entry = unsafe { entries.add(index).read() };
+        let entry = entries.get(index);
         if entry & (PRESENT | USER) != PRESENT | USER || entry & LARGE_PAGE != 0 {
             return false;
         }
@@ -6314,17 +6271,15 @@ pub(crate) fn unmap_current_linux_page(address: u64, frame: u64) -> bool {
     let Some(entry) = current_linux_leaf(address) else {
         return false;
     };
-    unsafe {
-        let value = entry.read();
-        if value & ADDRESS_MASK != frame
-            || value & (PRESENT | USER | NO_EXECUTE) != PRESENT | USER | NO_EXECUTE
-        {
-            return false;
-        }
-        entry.write(0);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        entry.read() == 0 && zero_frame(frame).is_some()
+    let value = entry.read();
+    if value & ADDRESS_MASK != frame
+        || value & (PRESENT | USER | NO_EXECUTE) != PRESENT | USER | NO_EXECUTE
+    {
+        return false;
     }
+    entry.write(0);
+    invalidate_page(address);
+    entry.read() == 0 && zero_frame(frame).is_some()
 }
 
 pub(crate) fn zero_current_linux_page(address: u64, frame: u64) -> bool {
@@ -6345,62 +6300,6 @@ pub(crate) fn zero_current_linux_page(address: u64, frame: u64) -> bool {
         return false;
     }
     zero_frame(frame).is_some()
-}
-
-/// A page-table entry the kernel reads and writes in place. Only the table
-/// walks below make one, from an entry of a page-table frame they reached
-/// through the direct map. Page-table frames are freed only when their
-/// address space is retired, after the walks of it are done.
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct PageEntry(*mut u64);
-
-impl PageEntry {
-    /// A placeholder for an array slot not yet filled: it reads as 0 and
-    /// ignores writes.
-    const UNSET: Self = Self(core::ptr::null_mut());
-
-    /// # Safety
-    ///
-    /// `entry` must point at an entry of a page-table frame, reached through
-    /// the direct map, that stays a page table while the value is used.
-    unsafe fn new(entry: *mut u64) -> Self {
-        Self(entry)
-    }
-
-    fn read(self) -> u64 {
-        if self.0.is_null() {
-            return 0;
-        }
-        // SAFETY: new's contract keeps the entry mapped and part of a table.
-        unsafe { self.0.read() }
-    }
-
-    /// Reads the entry with a volatile load, for a check the compiler must
-    /// not fold into an earlier read.
-    fn read_volatile(self) -> u64 {
-        if self.0.is_null() {
-            return 0;
-        }
-        // SAFETY: as for read.
-        unsafe { self.0.read_volatile() }
-    }
-
-    fn write(self, value: u64) {
-        if !self.0.is_null() {
-            // SAFETY: as for read.
-            unsafe { self.0.write(value) }
-        }
-    }
-
-    /// Sets `bits` atomically, so a bit the processor sets meanwhile (the
-    /// accessed or dirty bit) is kept.
-    fn set_bits(self, bits: u64) {
-        if !self.0.is_null() {
-            // SAFETY: as for read; entries are aligned u64s, and the
-            // processor updates them atomically too.
-            unsafe { AtomicU64::from_ptr(self.0) }.fetch_or(bits, Ordering::SeqCst);
-        }
-    }
 }
 
 /// Whether the present page at `address` has been read or written since
@@ -6444,13 +6343,13 @@ fn current_linux_leaf_trusted(address: u64) -> Option<PageEntry> {
     ];
     let mut table = current_root();
     for (level, index) in indexes.into_iter().enumerate() {
-        let entries = mapped_frame::<u64>(table & ADDRESS_MASK)?;
+        let entries = PageTable::from_physical(table & ADDRESS_MASK)?;
         if level == 3 {
-            // SAFETY: the walk reached this table through present user
+            // The walk reached this table through present user
             // entries of the address space's own tables.
-            return Some(unsafe { PageEntry::new(entries.add(index)) });
+            return Some(entries.entry(index));
         }
-        let entry = unsafe { entries.add(index).read() };
+        let entry = entries.get(index);
         if entry & (PRESENT | USER) != PRESENT | USER
             || (level == 1 || level == 2) && entry & LARGE_PAGE != 0
         {
@@ -6480,12 +6379,12 @@ pub(crate) fn current_linux_range_unoccupied(address: u64, pages: usize) -> bool
     'pages: while cursor < end {
         let mut table = current_root();
         for (level, shift) in [39_u32, 30, 21].into_iter().enumerate() {
-            let Some(entries) = mapped_frame::<u64>(table & ADDRESS_MASK) else {
+            let Some(entries) = PageTable::from_physical(table & ADDRESS_MASK) else {
                 return false;
             };
-            // SAFETY: the index is below 512 and the table is one of the
+            // The index is below 512 and the table is one of the
             // current address space's own, reached through its entries.
-            let entry = unsafe { entries.add(((cursor >> shift) & 0x1ff) as usize).read() };
+            let entry = entries.get(((cursor >> shift) & 0x1ff) as usize);
             if entry & PRESENT == 0 {
                 // Nothing below this entry is a mapped or reserved page.
                 let span = 1_u64 << shift;
@@ -6500,11 +6399,11 @@ pub(crate) fn current_linux_range_unoccupied(address: u64, pages: usize) -> bool
             }
             table = entry & ADDRESS_MASK;
         }
-        let Some(entries) = mapped_frame::<u64>(table & ADDRESS_MASK) else {
+        let Some(entries) = PageTable::from_physical(table & ADDRESS_MASK) else {
             return false;
         };
-        // SAFETY: as above, for the leaf table.
-        let leaf = unsafe { entries.add(((cursor >> 12) & 0x1ff) as usize).read() };
+        // As above, for the leaf table.
+        let leaf = entries.get(((cursor >> 12) & 0x1ff) as usize);
         if leaf & (PRESENT | LINUX_RUNTIME_RESERVED) != 0 {
             return false;
         }
@@ -6604,10 +6503,10 @@ fn ensure_current_linux_leaf(address: u64) -> Option<PageEntry> {
     let mut created_frames = [memory::FrameLease::EMPTY; 3];
     let mut created = 0;
     for (level, index) in indexes.into_iter().enumerate() {
-        let entries = mapped_frame::<u64>(table & ADDRESS_MASK)?;
-        // SAFETY: the walk starts at the current root and follows present
+        let entries = PageTable::from_physical(table & ADDRESS_MASK)?;
+        // The walk starts at the current root and follows present
         // user entries or tables it just made.
-        let entry = unsafe { PageEntry::new(entries.add(index)) };
+        let entry = entries.entry(index);
         if level == 3 {
             return Some(entry);
         }
@@ -6627,8 +6526,8 @@ fn ensure_current_linux_leaf(address: u64) -> Option<PageEntry> {
             };
             if let Some(template) = template {
                 let (Some(source), Some(copy)) = (
-                    mapped_frame::<u64>(template),
-                    mapped_frame::<u64>(frame.address()),
+                    PageTable::from_physical(template),
+                    PageTable::from_physical(frame.address()),
                 ) else {
                     let _ = memory::scrub_and_release_frames(
                         memory::FrameOwner::KERNEL,
@@ -6636,9 +6535,9 @@ fn ensure_current_linux_leaf(address: u64) -> Option<PageEntry> {
                     );
                     break;
                 };
-                // SAFETY: both are whole page tables; the template is
+                // Both are whole page tables; the template is
                 // read-only after boot and the frame was just allocated.
-                unsafe { core::ptr::copy_nonoverlapping(source, copy, ENTRY_COUNT) };
+                copy.copy_from(source);
             }
             entry.write(frame.address() | PRESENT | WRITABLE | USER);
             created_entries[created] = Some((entry, value));
@@ -6718,9 +6617,7 @@ pub(crate) fn refresh_current_linux_runtime_translation(
     {
         return false;
     }
-    unsafe {
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    invalidate_page(address);
     true
 }
 
@@ -6747,38 +6644,38 @@ pub(crate) fn verify_linux_runtime_translation_permissions() -> bool {
 /// Calls `visit` with the address and entry of each present 4-KiB user leaf
 /// of the active address space, in address order, until it returns false.
 fn for_each_current_linux_user_leaf(mut visit: impl FnMut(u64, PageEntry) -> bool) {
-    let Some(root) = mapped_frame::<u64>(current_root()) else {
+    let Some(root) = PageTable::from_physical(current_root()) else {
         return;
     };
     let user = |value: u64| value & (PRESENT | USER | LARGE_PAGE) == PRESENT | USER;
     for root_index in 0..ENTRY_COUNT / 2 {
-        let root_value = unsafe { root.add(root_index).read() };
+        let root_value = root.get(root_index);
         let Some(pdpt) = user(root_value)
-            .then(|| mapped_frame::<u64>(root_value & ADDRESS_MASK))
+            .then(|| PageTable::from_physical(root_value & ADDRESS_MASK))
             .flatten()
         else {
             continue;
         };
         for pdpt_index in 0..ENTRY_COUNT {
-            let pdpt_value = unsafe { pdpt.add(pdpt_index).read() };
+            let pdpt_value = pdpt.get(pdpt_index);
             let Some(directory) = user(pdpt_value)
-                .then(|| mapped_frame::<u64>(pdpt_value & ADDRESS_MASK))
+                .then(|| PageTable::from_physical(pdpt_value & ADDRESS_MASK))
                 .flatten()
             else {
                 continue;
             };
             for directory_index in 0..ENTRY_COUNT {
-                let directory_value = unsafe { directory.add(directory_index).read() };
+                let directory_value = directory.get(directory_index);
                 let Some(table) = user(directory_value)
-                    .then(|| mapped_frame::<u64>(directory_value & ADDRESS_MASK))
+                    .then(|| PageTable::from_physical(directory_value & ADDRESS_MASK))
                     .flatten()
                 else {
                     continue;
                 };
                 for leaf_index in 0..ENTRY_COUNT {
-                    // SAFETY: the table was reached through present user
+                    // The table was reached through present user
                     // entries of the active address space's own tables.
-                    let entry = unsafe { PageEntry::new(table.add(leaf_index)) };
+                    let entry = table.entry(leaf_index);
                     if entry.read() & (PRESENT | USER) != PRESENT | USER {
                         continue;
                     }
@@ -6818,9 +6715,7 @@ pub(crate) fn mark_current_linux_page_lazyfree(address: u64) -> bool {
         return false;
     }
     entry.write((value | LINUX_RUNTIME_LAZYFREE) & !DIRTY);
-    unsafe {
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    invalidate_page(address);
     true
 }
 
@@ -6849,10 +6744,10 @@ pub(crate) fn current_linux_lazyfree_pages(output: &mut [u64]) -> usize {
 }
 
 pub(crate) fn current_linux_user_page_count() -> Option<usize> {
-    let root = mapped_frame::<u64>(current_root())?;
+    let root = PageTable::from_physical(current_root())?;
     let mut pages = 0_usize;
     for root_index in 0..ENTRY_COUNT / 2 {
-        let root_value = unsafe { root.add(root_index).read() };
+        let root_value = root.get(root_index);
         if root_value == 0 {
             continue;
         }
@@ -6862,9 +6757,9 @@ pub(crate) fn current_linux_user_page_count() -> Option<usize> {
         if root_value & (PRESENT | LARGE_PAGE) != PRESENT {
             return None;
         }
-        let pdpt = mapped_frame::<u64>(root_value & ADDRESS_MASK)?;
+        let pdpt = PageTable::from_physical(root_value & ADDRESS_MASK)?;
         for pdpt_index in 0..ENTRY_COUNT {
-            let pdpt_value = unsafe { pdpt.add(pdpt_index).read() };
+            let pdpt_value = pdpt.get(pdpt_index);
             if pdpt_value == 0 {
                 continue;
             }
@@ -6878,9 +6773,9 @@ pub(crate) fn current_linux_user_page_count() -> Option<usize> {
                 pages = pages.checked_add(ENTRY_COUNT * ENTRY_COUNT)?;
                 continue;
             }
-            let directory = mapped_frame::<u64>(pdpt_value & ADDRESS_MASK)?;
+            let directory = PageTable::from_physical(pdpt_value & ADDRESS_MASK)?;
             for directory_index in 0..ENTRY_COUNT {
-                let directory_value = unsafe { directory.add(directory_index).read() };
+                let directory_value = directory.get(directory_index);
                 if directory_value == 0 {
                     continue;
                 }
@@ -6894,9 +6789,9 @@ pub(crate) fn current_linux_user_page_count() -> Option<usize> {
                     pages = pages.checked_add(ENTRY_COUNT)?;
                     continue;
                 }
-                let table = mapped_frame::<u64>(directory_value & ADDRESS_MASK)?;
+                let table = PageTable::from_physical(directory_value & ADDRESS_MASK)?;
                 for leaf_index in 0..ENTRY_COUNT {
-                    let leaf_value = unsafe { table.add(leaf_index).read() };
+                    let leaf_value = table.get(leaf_index);
                     if leaf_value & USER != 0
                         && leaf_value & (PRESENT | LINUX_RUNTIME_RESERVED) != 0
                     {
@@ -6935,10 +6830,8 @@ pub(crate) fn install_current_linux_runtime_page(
         | if file { LINUX_RUNTIME_FILE } else { 0 };
     entry.write(frame.address() | flags);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return None;
     }
     (entry.read() & (ADDRESS_MASK | PRESENT | WRITABLE | USER | NO_EXECUTE)
@@ -6990,10 +6883,8 @@ pub(crate) fn install_current_linux_shared_page(
         return false;
     };
     let value = entry.read();
-    unsafe {
-        entry.write(value | LINUX_RUNTIME_SHARED);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    entry.write(value | LINUX_RUNTIME_SHARED);
+    invalidate_page(address);
     linux_runtime_page_from_value(entry.read()).shared
 }
 
@@ -7043,11 +6934,9 @@ pub(crate) fn install_current_linux_device_page(
         | LINUX_RUNTIME_DONTFORK
         | caching.bits()
         | if writable { WRITABLE } else { 0 };
-    unsafe {
-        entry.write(value);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        entry.read() == value
-    }
+    entry.write(value);
+    invalidate_page(address);
+    entry.read() == value
 }
 
 pub(crate) fn mark_current_linux_runtime_page_secret(address: u64) -> bool {
@@ -7058,10 +6947,8 @@ pub(crate) fn mark_current_linux_runtime_page_secret(address: u64) -> bool {
     if !linux_runtime_page_from_value(value).occupied {
         return false;
     }
-    unsafe {
-        entry.write(value | LINUX_RUNTIME_SECRET);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    entry.write(value | LINUX_RUNTIME_SECRET);
+    invalidate_page(address);
     linux_runtime_page_from_value(entry.read()).secret
 }
 
@@ -7132,7 +7019,7 @@ pub(crate) fn set_current_linux_runtime_page_wipeonfork(address: u64, enabled: b
     };
     let updated = set_linux_mapping_wipe_on_fork(root, address, enabled);
     if updated {
-        unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+        invalidate_page(address as u64);
     }
     updated
 }
@@ -7164,10 +7051,8 @@ pub(crate) fn reserve_current_linux_runtime_page(
         | if file { LINUX_RUNTIME_FILE } else { 0 };
     entry.write(value);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return None;
     }
     release_linux_leaf_swap(old_value);
@@ -7182,8 +7067,8 @@ pub(crate) fn reserve_current_linux_runtime_page(
 /// change to a present entry (unmap, protection or frame change) does.
 fn invalidate_changed_runtime_translation(address: u64, old_value: u64) -> bool {
     if old_value & PRESENT == 0 {
-        // SAFETY: invalidating a translation has no effect beyond the TLB.
-        unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+        // Invalidating a translation has no effect beyond the TLB.
+        invalidate_page(address);
         return true;
     }
     smp::invalidate_runtime_translation(address)
@@ -7207,10 +7092,8 @@ pub(crate) fn remove_current_linux_runtime_page(address: u64) -> LinuxRuntimePag
         let old_value = entry.read();
         entry.write(0);
         if !invalidate_changed_runtime_translation(address, old_value) {
-            unsafe {
-                entry.write(old_value);
-                asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-            }
+            entry.write(old_value);
+            invalidate_page(address);
             return LinuxRuntimePage::EMPTY;
         }
         release_linux_leaf_swap(old_value);
@@ -7228,26 +7111,22 @@ pub(crate) fn prune_current_linux_page_tables(start: u64, end: u64) -> bool {
     if start >= end || end > 1 << 47 {
         return false;
     }
-    let table_empty = |table: u64| {
-        mapped_frame::<u64>(table).is_some_and(|entries| {
-            (0..ENTRY_COUNT).all(|index| unsafe { entries.add(index).read() } == 0)
-        })
-    };
+    let table_empty = |table: u64| PageTable::from_physical(table).is_some_and(PageTable::is_empty);
     let root = current_root();
     let mut pruned = false;
     let mut address = start & !(TABLE_SPAN - 1);
     while address < end {
         // The root, directory-pointer and directory entries leading to the
         // page table that maps `address`.
-        let mut entries = [core::ptr::null_mut::<u64>(); 3];
+        let mut entries = [PageEntry::UNSET; 3];
         let mut table = root;
         let mut complete = true;
         for (level, shift) in [39, 30, 21].into_iter().enumerate() {
-            let Some(base) = mapped_frame::<u64>(table) else {
+            let Some(base) = PageTable::from_physical(table) else {
                 return false;
             };
-            let entry = unsafe { base.add(((address >> shift) & 0x1ff) as usize) };
-            let value = unsafe { entry.read() };
+            let entry = base.entry(((address >> shift) & 0x1ff) as usize);
+            let value = entry.read();
             if value & (PRESENT | USER | LARGE_PAGE) != PRESENT | USER {
                 complete = false;
                 break;
@@ -7257,7 +7136,7 @@ pub(crate) fn prune_current_linux_page_tables(start: u64, end: u64) -> bool {
         }
         if complete {
             for entry in entries.into_iter().rev() {
-                let child = unsafe { entry.read() } & ADDRESS_MASK;
+                let child = entry.read() & ADDRESS_MASK;
                 if !table_empty(child) {
                     break;
                 }
@@ -7265,7 +7144,7 @@ pub(crate) fn prune_current_linux_page_tables(start: u64, end: u64) -> bool {
                 else {
                     return false;
                 };
-                unsafe { entry.write(0) };
+                entry.write(0);
                 if !memory::scrub_and_release_frames(
                     memory::FrameOwner::KERNEL,
                     core::slice::from_ref(&lease),
@@ -7282,6 +7161,7 @@ pub(crate) fn prune_current_linux_page_tables(start: u64, end: u64) -> bool {
     }
     if pruned {
         // Drop paging-structure caches that may still hold the freed tables.
+        // SAFETY: `root` is the active root, reloaded to drop cached translations.
         unsafe { activate(root) };
     }
     true
@@ -7404,10 +7284,8 @@ pub(crate) fn protect_current_linux_runtime_page(address: u64, protection: u8) -
     };
     entry.write(value);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return false;
     }
     linux_runtime_page_from_value(entry.read()).protection == protection
@@ -7448,10 +7326,8 @@ pub(crate) fn replace_current_linux_runtime_page(
     let old_value = entry.read();
     entry.write(value);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return None;
     }
     let current = linux_runtime_page_from_value(entry.read());
@@ -7485,10 +7361,8 @@ pub(crate) fn migrate_current_linux_runtime_page(
     let old_frame = linux_runtime_page_from_value(old_value).frame?;
     entry.write(old_value & !PRESENT);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return None;
     }
     if !copy_linux_frame(old_frame, frame) {
@@ -7496,9 +7370,9 @@ pub(crate) fn migrate_current_linux_runtime_page(
         return None;
     }
     entry.write(old_value & !ADDRESS_MASK | frame.address());
-    // SAFETY: invalidating a translation has no effect beyond the TLB; no
+    // Invalidating a translation has no effect beyond the TLB; no
     // CPU caches the non-present entry it replaces.
-    unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+    invalidate_page(address);
     Some(old_frame)
 }
 
@@ -7510,10 +7384,8 @@ pub(crate) fn seal_current_linux_runtime_page(address: u64) -> bool {
     if !linux_runtime_page_from_value(value).occupied {
         return false;
     }
-    unsafe {
-        entry.write(value | LINUX_RUNTIME_SEALED);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-    }
+    entry.write(value | LINUX_RUNTIME_SEALED);
+    invalidate_page(address);
     linux_runtime_page_from_value(entry.read()).sealed
 }
 
@@ -7569,10 +7441,8 @@ pub(crate) fn materialize_current_linux_runtime_page(
     let old_value = entry.read();
     entry.write(value);
     if !invalidate_changed_runtime_translation(address, old_value) {
-        unsafe {
-            entry.write(old_value);
-            asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        }
+        entry.write(old_value);
+        invalidate_page(address);
         return false;
     }
     release_linux_leaf_swap(old_value);
@@ -7600,12 +7470,12 @@ pub(crate) fn release_current_linux_runtime_mappings_preserving(
         return false;
     }
     let root = current_root();
-    let Some(root_entries) = mapped_frame::<u64>(root) else {
+    let Some(root_entries) = PageTable::from_physical(root) else {
         return false;
     };
     let root_index = ((base >> 39) & 0x1ff) as usize;
-    let root_entry = unsafe { root_entries.add(root_index) };
-    let root_value = unsafe { root_entry.read() };
+    let root_entry = root_entries.entry(root_index);
+    let root_value = root_entry.read();
     if root_value == 0 {
         return true;
     }
@@ -7613,13 +7483,13 @@ pub(crate) fn release_current_linux_runtime_mappings_preserving(
         return false;
     }
     let pdpt_address = root_value & ADDRESS_MASK;
-    let Some(pdpt) = mapped_frame::<u64>(pdpt_address) else {
+    let Some(pdpt) = PageTable::from_physical(pdpt_address) else {
         return false;
     };
     let mut pdpt_retained = false;
     for pdpt_index in 0..ENTRY_COUNT {
-        let pdpt_entry = unsafe { pdpt.add(pdpt_index) };
-        let pdpt_value = unsafe { pdpt_entry.read() };
+        let pdpt_entry = pdpt.entry(pdpt_index);
+        let pdpt_value = pdpt_entry.read();
         if pdpt_value == 0 {
             continue;
         }
@@ -7645,7 +7515,7 @@ pub(crate) fn release_current_linux_runtime_mappings_preserving(
             pdpt_retained = true;
             continue;
         }
-        unsafe { pdpt_entry.write(0) };
+        pdpt_entry.write(0);
         if !memory::scrub_and_release_frames(
             memory::FrameOwner::KERNEL,
             core::slice::from_ref(&directory_lease),
@@ -7660,7 +7530,7 @@ pub(crate) fn release_current_linux_runtime_mappings_preserving(
     if pdpt_retained {
         return true;
     }
-    unsafe { root_entry.write(0) };
+    root_entry.write(0);
     memory::scrub_and_release_frames(
         memory::FrameOwner::KERNEL,
         core::slice::from_ref(&pdpt_lease),
@@ -7682,21 +7552,21 @@ pub(crate) fn release_current_linux_low_mappings_preserving(
         return false;
     }
     let root = current_root();
-    let Some(root_entries) = mapped_frame::<u64>(root) else {
+    let Some(root_entries) = PageTable::from_physical(root) else {
         return false;
     };
-    let root_value = unsafe { root_entries.read() };
+    let root_value = root_entries.get(0);
     if root_value & (PRESENT | USER | LARGE_PAGE) != PRESENT | USER {
         return false;
     }
-    let Some(pdpt) = mapped_frame::<u64>(root_value & ADDRESS_MASK) else {
+    let Some(pdpt) = PageTable::from_physical(root_value & ADDRESS_MASK) else {
         return false;
     };
     let first_directory = (start >> 30) as usize;
     let mut released = false;
     for pdpt_index in first_directory..ENTRY_COUNT {
-        let pdpt_entry = unsafe { pdpt.add(pdpt_index) };
-        let pdpt_value = unsafe { pdpt_entry.read() };
+        let pdpt_entry = pdpt.entry(pdpt_index);
+        let pdpt_value = pdpt_entry.read();
         // Absent, or still the template's: nothing of the process's.
         if pdpt_value & (PRESENT | USER) != PRESENT | USER {
             continue;
@@ -7727,26 +7597,23 @@ pub(crate) fn release_current_linux_low_mappings_preserving(
         }
         let template = paging::linux_low_template_directory(pdpt_index);
         let (Some(directory), Some(lease)) = (
-            mapped_frame::<u64>(directory_address),
+            PageTable::from_physical(directory_address),
             memory::live_frame_lease(memory::FrameOwner::KERNEL, directory_address),
         ) else {
             return false;
         };
         // Only the kernel's entries, as the template has them, are left;
         // a directory holding anything else stays.
-        let template_entries = template.and_then(mapped_frame::<u64>);
+        let template_entries = template.and_then(PageTable::from_physical);
         let matches_template = (0..ENTRY_COUNT).all(|index| {
-            let value = unsafe { directory.add(index).read() };
-            let expected =
-                template_entries.map_or(0, |entries| unsafe { entries.add(index).read() });
+            let value = directory.get(index);
+            let expected = template_entries.map_or(0, |entries| entries.get(index));
             value & !(ACCESSED | DIRTY) == expected & !(ACCESSED | DIRTY)
         });
         if !matches_template {
             continue;
         }
-        unsafe {
-            pdpt_entry.write(template.map_or(0, |template| template | PRESENT | WRITABLE));
-        }
+        pdpt_entry.write(template.map_or(0, |template| template | PRESENT | WRITABLE));
         if !memory::scrub_and_release_frames(
             memory::FrameOwner::KERNEL,
             core::slice::from_ref(&lease),
@@ -7756,6 +7623,7 @@ pub(crate) fn release_current_linux_low_mappings_preserving(
     }
     if released {
         // Drop paging-structure caches that may still hold freed tables.
+        // SAFETY: `root` is the active root, reloaded to drop cached translations.
         unsafe { activate(root) };
     }
     true
@@ -7775,11 +7643,11 @@ fn release_linux_runtime_tables(
     preserve_frame: &impl Fn(memory::FrameLease) -> bool,
     preserve_mapping: &impl Fn(memory::FrameLease) -> bool,
 ) -> Option<bool> {
-    let directory = mapped_frame::<u64>(directory_address)?;
+    let directory = PageTable::from_physical(directory_address)?;
     let mut directory_retained = false;
     for directory_index in first..ENTRY_COUNT {
-        let directory_entry = unsafe { directory.add(directory_index) };
-        let directory_value = unsafe { directory_entry.read() };
+        let directory_entry = directory.entry(directory_index);
+        let directory_value = directory_entry.read();
         if directory_value == 0 || kernel_entries && directory_value & USER == 0 {
             continue;
         }
@@ -7787,18 +7655,18 @@ fn release_linux_runtime_tables(
             return None;
         }
         let table_address = directory_value & ADDRESS_MASK;
-        let table = mapped_frame::<u64>(table_address)?;
+        let table = PageTable::from_physical(table_address)?;
         let mut table_retained = false;
         for leaf_index in 0..ENTRY_COUNT {
-            let leaf = unsafe { table.add(leaf_index) };
-            let value = unsafe { leaf.read() };
+            let leaf = table.entry(leaf_index);
+            let value = leaf.read();
             let page = linux_runtime_page_from_value(value);
             if page.occupied {
                 if page.frame.is_some_and(preserve_mapping) {
                     table_retained = true;
                     continue;
                 }
-                unsafe { leaf.write(0) };
+                leaf.write(0);
                 release_linux_leaf_swap(value);
                 if let Some(frame) = page.frame.filter(|frame| {
                     !page.shared
@@ -7821,7 +7689,7 @@ fn release_linux_runtime_tables(
             directory_retained = true;
             continue;
         }
-        unsafe { directory_entry.write(0) };
+        directory_entry.write(0);
         if !memory::scrub_and_release_frames(
             memory::FrameOwner::KERNEL,
             core::slice::from_ref(&table_lease),
@@ -7839,12 +7707,12 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
         {
             return false;
         }
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return false;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         for index in 0..end {
-            let value = unsafe { table.add(index).read() };
+            let value = table.get(index);
             if value == 0 {
                 continue;
             }
@@ -7887,13 +7755,13 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
     }
 
     fn release_children(table_address: u64, level: usize) -> bool {
-        let Some(table) = mapped_frame::<u64>(table_address) else {
+        let Some(table) = PageTable::from_physical(table_address) else {
             return false;
         };
         let end = if level == 0 { 256 } else { ENTRY_COUNT };
         for index in 0..end {
-            let entry = unsafe { table.add(index) };
-            let value = unsafe { entry.read() };
+            let entry = table.entry(index);
+            let value = entry.read();
             if value == 0 {
                 continue;
             }
@@ -7910,7 +7778,7 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
                 else {
                     return false;
                 };
-                unsafe { entry.write(0) };
+                entry.write(0);
                 if !memory::scrub_and_release_frames(
                     memory::FrameOwner::KERNEL,
                     core::slice::from_ref(&child),
@@ -7919,7 +7787,7 @@ pub(crate) fn retire_linux_child_address_space(root: memory::FrameLease) -> bool
                 }
                 continue;
             }
-            unsafe { entry.write(0) };
+            entry.write(0);
             release_linux_leaf_swap(value);
             // Each private page loses this mapping; the allocator frees the
             // pages no other address space still maps.
@@ -7970,11 +7838,11 @@ pub(crate) fn next_current_linux_leaf_table(address: u64, end: u64) -> Option<u6
                 memory::FrameOwner::KERNEL,
                 &[table & ADDRESS_MASK],
             )
-            .then(|| mapped_frame::<u64>(table & ADDRESS_MASK))
+            .then(|| PageTable::from_physical(table & ADDRESS_MASK))
             .flatten()
-            // SAFETY: the walk reached this table through present user
+            // The walk reached this table through present user
             // entries of the address space's own tables; index < 512.
-            .map(|entries| unsafe { entries.add(index).read() })
+            .map(|entries| entries.get(index))
             .filter(|entry| {
                 entry & (PRESENT | USER) == PRESENT | USER
                     && (level == 0 || entry & LARGE_PAGE == 0)
@@ -8002,13 +7870,13 @@ fn linux_leaf_in_root(root: u64, address: u64) -> Option<PageEntry> {
         if !memory::frame_addresses_owned_by(memory::FrameOwner::KERNEL, &[table & ADDRESS_MASK]) {
             return None;
         }
-        let entries = mapped_frame::<u64>(table & ADDRESS_MASK)?;
+        let entries = PageTable::from_physical(table & ADDRESS_MASK)?;
         if level == 3 {
-            // SAFETY: the walk reached this table through present user
+            // The walk reached this table through present user
             // entries of the address space's own tables.
-            return Some(unsafe { PageEntry::new(entries.add(index)) });
+            return Some(entries.entry(index));
         }
-        let entry = unsafe { entries.add(index).read() };
+        let entry = entries.get(index);
         if entry & (PRESENT | USER) != PRESENT | USER
             || (level == 1 || level == 2) && entry & LARGE_PAGE != 0
         {
@@ -8076,10 +7944,10 @@ fn user_address_has_permissions(root: u64, address: u64, required: u64) -> bool 
     ];
     let mut table = root;
     for (level, index) in indexes.into_iter().enumerate() {
-        let Some(entries) = mapped_frame::<u64>(table & ADDRESS_MASK) else {
+        let Some(entries) = PageTable::from_physical(table & ADDRESS_MASK) else {
             return false;
         };
-        let entry = unsafe { entries.add(index).read() };
+        let entry = entries.get(index);
         if entry & (PRESENT | USER | required) != PRESENT | USER | required
             || (level == 1 || level == 2) && entry & LARGE_PAGE != 0
         {
@@ -8113,23 +7981,19 @@ impl AddressSpace {
             }
         }
 
-        // SAFETY: Every frame was uniquely leased from mapped conventional
+        // Every frame was uniquely leased from mapped conventional
         // memory and remains owned until this address space is released.
-        unsafe {
-            for frame in [root, user_pdpt, user_directory, user_table] {
-                zero_frame(frame)?;
-            }
-            let kernel_pml4 = mapped_frame::<u64>(kernel_root)?;
-            let root_entries = mapped_frame::<u64>(root)?;
-            root_entries.write(kernel_pml4.read());
-            root_entries
-                .add(1)
-                .write(user_pdpt | PRESENT | WRITABLE | USER);
-            root_entries.add(256).write(kernel_pml4.add(256).read());
-            mapped_frame::<u64>(user_pdpt)?.write(user_directory | PRESENT | WRITABLE | USER);
-            mapped_frame::<u64>(user_directory)?.write(user_table | PRESENT | WRITABLE | USER);
-            mapped_frame::<u64>(user_table)?.write(user_frame | PRESENT | WRITABLE | USER);
+        for frame in [root, user_pdpt, user_directory, user_table] {
+            zero_frame(frame)?;
         }
+        let kernel_pml4 = PageTable::from_physical(kernel_root)?;
+        let root_entries = PageTable::from_physical(root)?;
+        root_entries.set(0, kernel_pml4.get(0));
+        root_entries.set(1, user_pdpt | PRESENT | WRITABLE | USER);
+        root_entries.set(256, kernel_pml4.get(256));
+        PageTable::from_physical(user_pdpt)?.set(0, user_directory | PRESENT | WRITABLE | USER);
+        PageTable::from_physical(user_directory)?.set(0, user_table | PRESENT | WRITABLE | USER);
+        PageTable::from_physical(user_table)?.set(0, user_frame | PRESENT | WRITABLE | USER);
         Some(Self {
             root,
             user_frame,
@@ -8138,46 +8002,44 @@ impl AddressSpace {
     }
 
     fn layout_is_isolated(&self, kernel_root: u64) -> bool {
-        // SAFETY: Both roots and the page-table frames reachable from this
+        // Both roots and the page-table frames reachable from this
         // address space remain allocated and reachable through the direct map.
-        unsafe {
-            let Some(root) = mapped_frame::<u64>(self.root) else {
-                return false;
-            };
-            let Some(kernel) = mapped_frame::<u64>(kernel_root) else {
-                return false;
-            };
-            let kernel_entry = kernel.read();
-            let direct_entry = kernel.add(256).read();
-            if root.read() != kernel_entry
-                || kernel_entry & USER != 0
-                || root.add(256).read() != direct_entry
-                || direct_entry & USER != 0
-            {
-                return false;
-            }
-            let user_root_entry = root.add(1).read();
-            if user_root_entry & (PRESENT | WRITABLE | USER) != (PRESENT | WRITABLE | USER) {
-                return false;
-            }
-            for index in 2..ENTRY_COUNT {
-                if index != 256 && root.add(index).read() != 0 {
-                    return false;
-                }
-            }
-            let Some(pdpt) = mapped_frame::<u64>(user_root_entry & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(directory) = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(table) = mapped_frame::<u64>(directory.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            table.read() & ADDRESS_MASK == self.user_frame
-                && table.read() & (PRESENT | WRITABLE | USER) == (PRESENT | WRITABLE | USER)
-                && table.add(1).read() == 0
+        let Some(root) = PageTable::from_physical(self.root) else {
+            return false;
+        };
+        let Some(kernel) = PageTable::from_physical(kernel_root) else {
+            return false;
+        };
+        let kernel_entry = kernel.get(0);
+        let direct_entry = kernel.get(256);
+        if root.get(0) != kernel_entry
+            || kernel_entry & USER != 0
+            || root.get(256) != direct_entry
+            || direct_entry & USER != 0
+        {
+            return false;
         }
+        let user_root_entry = root.get(1);
+        if user_root_entry & (PRESENT | WRITABLE | USER) != (PRESENT | WRITABLE | USER) {
+            return false;
+        }
+        for index in 2..ENTRY_COUNT {
+            if index != 256 && root.get(index) != 0 {
+                return false;
+            }
+        }
+        let Some(pdpt) = PageTable::from_physical(user_root_entry & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(directory) = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(table) = PageTable::from_physical(directory.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        table.get(0) & ADDRESS_MASK == self.user_frame
+            && table.get(0) & (PRESENT | WRITABLE | USER) == (PRESENT | WRITABLE | USER)
+            && table.get(1) == 0
     }
 
     fn release(self) -> bool {
@@ -8199,7 +8061,7 @@ pub(crate) fn verify_isolated_user_mapping() -> bool {
     if !space.layout_is_isolated(kernel_root) {
         return false;
     }
-    let Some(user_frame) = mapped_frame::<u64>(space.user_frame) else {
+    let Some(user_frame) = Frame::from_physical(space.user_frame) else {
         let _ = space.release();
         return false;
     };
@@ -8208,16 +8070,16 @@ pub(crate) fn verify_isolated_user_mapping() -> bool {
     // and maps the test virtual page to its exclusively owned frame. Interrupts
     // remain disabled. The original root is restored before returning.
     let valid = unsafe {
-        user_frame.write_volatile(0);
+        user_frame.write_volatile_u64(0, 0);
         activate(space.root);
         let activated = current_root() == space.root;
         cpu::with_supervisor_user_access(|| {
             (USER_TEST_ADDRESS as *mut u64).write_volatile(TEST_PATTERN);
         });
-        let aliased = user_frame.read_volatile() == TEST_PATTERN;
+        let aliased = user_frame.read_volatile_u64(0) == TEST_PATTERN;
         activate(kernel_root);
         let restored = current_root() == kernel_root;
-        user_frame.write_volatile(0);
+        user_frame.write_volatile_u64(0, 0);
         activated && aliased && restored
     };
     valid && space.release()
@@ -8317,61 +8179,61 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
             return None;
         }
         let root = addresses[0];
-        let result = unsafe {
-            (|| {
-                for frame in &addresses {
-                    zero_frame(*frame)?;
+        let result = (|| {
+            for frame in &addresses {
+                zero_frame(*frame)?;
+            }
+            let root_entries = PageTable::from_physical(root)?;
+            let kernel_entries = PageTable::from_physical(kernel_root)?;
+            root_entries.set(0, kernel_entries.get(0));
+            root_entries.set(1, addresses[1] | PRESENT | WRITABLE | USER);
+            root_entries.set(256, kernel_entries.get(256));
+            PageTable::from_physical(addresses[1])?
+                .set(0, addresses[2] | PRESENT | WRITABLE | USER);
+            PageTable::from_physical(addresses[2])?
+                .set(0, addresses[3] | PRESENT | WRITABLE | USER);
+            let table = PageTable::from_physical(addresses[3])?;
+            for page in 0..image_pages {
+                let frame = addresses[4 + page];
+                let output = Frame::from_physical(frame)?;
+                if !output.with_bytes_mut(|output| image.materialize_page(page, output)) {
+                    return None;
                 }
-                let root_entries = mapped_frame::<u64>(root)?;
-                let kernel_entries = mapped_frame::<u64>(kernel_root)?;
-                root_entries.write(kernel_entries.read());
-                root_entries
-                    .add(1)
-                    .write(addresses[1] | PRESENT | WRITABLE | USER);
-                root_entries.add(256).write(kernel_entries.add(256).read());
-                mapped_frame::<u64>(addresses[1])?.write(addresses[2] | PRESENT | WRITABLE | USER);
-                mapped_frame::<u64>(addresses[2])?.write(addresses[3] | PRESENT | WRITABLE | USER);
-                let table = mapped_frame::<u64>(addresses[3])?;
-                for page in 0..image_pages {
-                    let frame = addresses[4 + page];
-                    let output = Frame::from_physical(frame)?;
-                    if !output.with_bytes_mut(|output| image.materialize_page(page, output)) {
-                        return None;
-                    }
-                    let mut flags = PRESENT | USER;
-                    if image.page_is_writable(page) {
-                        flags |= WRITABLE;
-                    }
-                    if !image.page_is_executable(page) {
-                        flags |= NO_EXECUTE;
-                    }
-                    table.add(page).write(frame | flags);
+                let mut flags = PRESENT | USER;
+                if image.page_is_writable(page) {
+                    flags |= WRITABLE;
                 }
-                table
-                    .add(Self::BOOT_INFO_PAGE)
-                    .write(addresses[Self::BOOT_INFO_FRAME] | PRESENT | USER | NO_EXECUTE);
-                table.add(Self::STACK_PAGE - 1).write(0);
-                for stack_page in 0..STACK_PAGES {
-                    table.add(Self::STACK_PAGE + stack_page).write(
-                        addresses[Self::FIRST_STACK_FRAME + stack_page]
-                            | PRESENT
-                            | WRITABLE
-                            | USER
-                            | NO_EXECUTE,
-                    );
+                if !image.page_is_executable(page) {
+                    flags |= NO_EXECUTE;
                 }
-                table.add(Self::STACK_PAGE + STACK_PAGES).write(0);
+                table.set(page, frame | flags);
+            }
+            table.set(
+                Self::BOOT_INFO_PAGE,
+                addresses[Self::BOOT_INFO_FRAME] | PRESENT | USER | NO_EXECUTE,
+            );
+            table.set(Self::STACK_PAGE - 1, 0);
+            for stack_page in 0..STACK_PAGES {
+                table.set(
+                    Self::STACK_PAGE + stack_page,
+                    addresses[Self::FIRST_STACK_FRAME + stack_page]
+                        | PRESENT
+                        | WRITABLE
+                        | USER
+                        | NO_EXECUTE,
+                );
+            }
+            table.set(Self::STACK_PAGE + STACK_PAGES, 0);
 
-                for relocation in image.relocations[..image.relocation_count].iter().flatten() {
-                    let page = usize::try_from(relocation.target / PAGE_SIZE as u64).ok()?;
-                    let offset = usize::try_from(relocation.target % PAGE_SIZE as u64).ok()?;
-                    let frame = *addresses.get(4 + page)?;
-                    let value = (USER_TEST_ADDRESS as u64).checked_add(relocation.addend)?;
-                    Frame::from_physical(frame)?.write_bytes(offset, &value.to_ne_bytes());
-                }
-                Some(())
-            })()
-        };
+            for relocation in image.relocations[..image.relocation_count].iter().flatten() {
+                let page = usize::try_from(relocation.target / PAGE_SIZE as u64).ok()?;
+                let offset = usize::try_from(relocation.target % PAGE_SIZE as u64).ok()?;
+                let frame = *addresses.get(4 + page)?;
+                let value = (USER_TEST_ADDRESS as u64).checked_add(relocation.addend)?;
+                Frame::from_physical(frame)?.write_bytes(offset, &value.to_ne_bytes());
+            }
+            Some(())
+        })();
         if result.is_none() {
             let _ = memory::scrub_and_release_frames(owner, &frames);
             return None;
@@ -8395,58 +8257,56 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         {
             return false;
         }
-        unsafe {
-            let Some(root) = mapped_frame::<u64>(self.root) else {
-                return false;
-            };
-            let Some(kernel) = mapped_frame::<u64>(self.kernel_root) else {
-                return false;
-            };
-            let Some(pdpt) = mapped_frame::<u64>(root.add(1).read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(directory) = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(table) = mapped_frame::<u64>(directory.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            if root.read() != kernel.read()
-                || root.add(256).read() != kernel.add(256).read()
-                || root.read() & USER != 0
-                || root.add(256).read() & USER != 0
-                || table.add(Self::STACK_PAGE - 1).read() != 0
-                || table.add(Self::STACK_PAGE + STACK_PAGES).read() != 0
-            {
-                return false;
-            }
-            for page in 0..self.image_pages {
-                let observed = table.add(page).read();
-                let mut expected = self.frames[4 + page].address() | PRESENT | USER;
-                if image.page_is_writable(page) {
-                    expected |= WRITABLE;
-                }
-                if !image.page_is_executable(page) {
-                    expected |= NO_EXECUTE;
-                }
-                if observed != expected {
-                    return false;
-                }
-            }
-            if (self.image_pages..IMAGE_CAPACITY).any(|page| table.add(page).read() != 0) {
-                return false;
-            }
-            table.add(Self::BOOT_INFO_PAGE).read()
-                == self.frames[Self::BOOT_INFO_FRAME].address() | PRESENT | USER | NO_EXECUTE
-                && (0..STACK_PAGES).all(|stack_page| {
-                    table.add(Self::STACK_PAGE + stack_page).read()
-                        == self.frames[Self::FIRST_STACK_FRAME + stack_page].address()
-                            | PRESENT
-                            | WRITABLE
-                            | USER
-                            | NO_EXECUTE
-                })
+        let Some(root) = PageTable::from_physical(self.root) else {
+            return false;
+        };
+        let Some(kernel) = PageTable::from_physical(self.kernel_root) else {
+            return false;
+        };
+        let Some(pdpt) = PageTable::from_physical(root.get(1) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(directory) = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(table) = PageTable::from_physical(directory.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        if root.get(0) != kernel.get(0)
+            || root.get(256) != kernel.get(256)
+            || root.get(0) & USER != 0
+            || root.get(256) & USER != 0
+            || table.get(Self::STACK_PAGE - 1) != 0
+            || table.get(Self::STACK_PAGE + STACK_PAGES) != 0
+        {
+            return false;
         }
+        for page in 0..self.image_pages {
+            let observed = table.get(page);
+            let mut expected = self.frames[4 + page].address() | PRESENT | USER;
+            if image.page_is_writable(page) {
+                expected |= WRITABLE;
+            }
+            if !image.page_is_executable(page) {
+                expected |= NO_EXECUTE;
+            }
+            if observed != expected {
+                return false;
+            }
+        }
+        if (self.image_pages..IMAGE_CAPACITY).any(|page| table.get(page) != 0) {
+            return false;
+        }
+        table.get(Self::BOOT_INFO_PAGE)
+            == self.frames[Self::BOOT_INFO_FRAME].address() | PRESENT | USER | NO_EXECUTE
+            && (0..STACK_PAGES).all(|stack_page| {
+                table.get(Self::STACK_PAGE + stack_page)
+                    == self.frames[Self::FIRST_STACK_FRAME + stack_page].address()
+                        | PRESENT
+                        | WRITABLE
+                        | USER
+                        | NO_EXECUTE
+            })
     }
 
     fn relocations_are_valid(&self, image: &crate::native_elf::NativeImage<'_>) -> bool {
@@ -8473,47 +8333,41 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
             })
     }
 
-    fn table(&self) -> Option<*mut u64> {
-        unsafe {
-            let root = mapped_frame::<u64>(self.root)?;
-            let pdpt = mapped_frame::<u64>(root.add(1).read() & ADDRESS_MASK)?;
-            let directory = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK)?;
-            mapped_frame::<u64>(directory.read() & ADDRESS_MASK)
-        }
+    fn table(&self) -> Option<PageTable> {
+        let root = PageTable::from_physical(self.root)?;
+        let pdpt = PageTable::from_physical(root.get(1) & ADDRESS_MASK)?;
+        let directory = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK)?;
+        PageTable::from_physical(directory.get(0) & ADDRESS_MASK)
     }
 
     fn map_uncached_device_page(&mut self, index: usize, physical: u64) -> bool {
         if !physical.is_multiple_of(PAGE_SIZE as u64) || physical & !ADDRESS_MASK != 0 {
             return false;
         }
-        unsafe {
-            let Some(table) = self.table() else {
-                return false;
-            };
-            let entry = table.add(index);
-            let expected =
-                physical | PRESENT | WRITABLE | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
-            if entry.read() != 0 {
-                return false;
-            }
-            entry.write(expected);
-            entry.read() == expected
+        let Some(table) = self.table() else {
+            return false;
+        };
+        let entry = table.entry(index);
+        let expected =
+            physical | PRESENT | WRITABLE | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
+        if entry.read() != 0 {
+            return false;
         }
+        entry.write(expected);
+        entry.read() == expected
     }
 
     fn device_page_mapping_is_exact(&self, index: usize, physical: u64) -> bool {
         if !physical.is_multiple_of(PAGE_SIZE as u64) || physical & !ADDRESS_MASK != 0 {
             return false;
         }
-        unsafe {
-            let Some(table) = self.table() else {
-                return false;
-            };
-            let expected =
-                physical | PRESENT | WRITABLE | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
-            let observed = table.add(index).read();
-            observed & !(ACCESSED | DIRTY) == expected
-        }
+        let Some(table) = self.table() else {
+            return false;
+        };
+        let expected =
+            physical | PRESENT | WRITABLE | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
+        let observed = table.get(index);
+        observed & !(ACCESSED | DIRTY) == expected
     }
 
     fn map_owned_dma_page(&mut self, index: usize) -> Option<(usize, u64)> {
@@ -8522,9 +8376,9 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         }
         let [frame] = memory::allocate_frames::<1>(self.owner)?;
         let physical = frame.address();
-        let mapped = unsafe {
+        let mapped = {
             let table = self.table()?;
-            let entry = table.add(index);
+            let entry = table.entry(index);
             let expected = physical | PRESENT | WRITABLE | USER | NO_EXECUTE;
             if entry.read() != 0 {
                 false
@@ -8545,14 +8399,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_virtio_block() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeServiceBootV0>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8564,14 +8414,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
     }
 
     fn write_network_boot_info_raw(&self, info: linox_native_abi::NativeNetworkBootV0) -> bool {
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV0>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8579,14 +8425,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_packet_handoff() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV1>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8594,14 +8436,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV2>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8609,14 +8447,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV3>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8624,14 +8458,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_waiting_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV4>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8639,14 +8469,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_resident_reliable_egress_transmit() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV5>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8654,14 +8480,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_resident_reliable_egress_batch() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV6>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8669,14 +8491,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_resident_reliable_egress_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV7>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8684,14 +8502,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_registry_pull() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeNetworkBootV8>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8699,14 +8513,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_arp_consumer() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV0>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8714,14 +8524,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_wait_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV1>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8729,14 +8535,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_supervised_loop() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV2>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8744,14 +8546,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_ipv4_dispatch() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV3>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8759,14 +8557,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_icmp_echo() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV4>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -8774,14 +8568,10 @@ impl<const IMAGE_CAPACITY: usize, const FRAME_COUNT: usize, const STACK_PAGES: u
         if !info.is_valid_icmp_echo_reply() {
             return false;
         }
-        let Some(page) = mapped_frame::<linox_native_abi::NativeProtocolBootV5>(
-            self.frames[Self::BOOT_INFO_FRAME].address(),
-        ) else {
+        let Some(page) = Frame::leased(self.frames[Self::BOOT_INFO_FRAME]) else {
             return false;
         };
-        unsafe {
-            page.write(info);
-        }
+        page.write_value(info);
         true
     }
 
@@ -14411,6 +14201,8 @@ fn volume_program(start: usize, end: usize) -> Option<&'static [u8]> {
     if size == 0 || size > PAGE_SIZE {
         return None;
     }
+    // SAFETY: callers pass the start and end symbols of one ring-3 program
+    // assembled into the kernel image's text, which is immutable.
     Some(unsafe { core::slice::from_raw_parts(start as *const u8, size) })
 }
 
@@ -15158,28 +14950,22 @@ impl WxAddressSpace {
                 return None;
             }
         }
-        unsafe {
-            for frame in [root, pdpt, directory, table] {
-                zero_frame(frame)?;
-            }
-            let root_entries = mapped_frame::<u64>(root)?;
-            let kernel_entries = mapped_frame::<u64>(kernel_root)?;
-            root_entries.write(kernel_entries.read());
-            root_entries.add(1).write(pdpt | PRESENT | WRITABLE | USER);
-            root_entries.add(256).write(kernel_entries.add(256).read());
-            mapped_frame::<u64>(pdpt)?.write(directory | PRESENT | WRITABLE | USER);
-            mapped_frame::<u64>(directory)?.write(table | PRESENT | WRITABLE | USER);
-            let entries = mapped_frame::<u64>(table)?;
-            entries.write(code | PRESENT | USER);
-            entries.add(1).write(0);
-            entries
-                .add(2)
-                .write(first_stack | PRESENT | WRITABLE | USER | NO_EXECUTE);
-            entries.add(3).write(0);
-            entries
-                .add(4)
-                .write(second_stack | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        for frame in [root, pdpt, directory, table] {
+            zero_frame(frame)?;
         }
+        let root_entries = PageTable::from_physical(root)?;
+        let kernel_entries = PageTable::from_physical(kernel_root)?;
+        root_entries.set(0, kernel_entries.get(0));
+        root_entries.set(1, pdpt | PRESENT | WRITABLE | USER);
+        root_entries.set(256, kernel_entries.get(256));
+        PageTable::from_physical(pdpt)?.set(0, directory | PRESENT | WRITABLE | USER);
+        PageTable::from_physical(directory)?.set(0, table | PRESENT | WRITABLE | USER);
+        let entries = PageTable::from_physical(table)?;
+        entries.set(0, code | PRESENT | USER);
+        entries.set(1, 0);
+        entries.set(2, first_stack | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        entries.set(3, 0);
+        entries.set(4, second_stack | PRESENT | WRITABLE | USER | NO_EXECUTE);
         Some(Self {
             kernel_root,
             root,
@@ -15193,49 +14979,47 @@ impl WxAddressSpace {
     }
 
     fn permissions_are_valid(&self, kernel_root: u64) -> bool {
-        unsafe {
-            let Some(root) = mapped_frame::<u64>(self.root) else {
-                return false;
-            };
-            let Some(kernel) = mapped_frame::<u64>(kernel_root) else {
-                return false;
-            };
-            if root.read() != kernel.read()
-                || root.read() & USER != 0
-                || root.add(256).read() != kernel.add(256).read()
-                || root.add(256).read() & USER != 0
-            {
-                return false;
-            }
-            let Some(pdpt) = mapped_frame::<u64>(root.add(1).read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(directory) = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(table) = mapped_frame::<u64>(directory.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let code = table.read();
-            let first_guard = table.add(1).read();
-            let first_stack = table.add(2).read();
-            let second_guard = table.add(3).read();
-            let second_stack = table.add(4).read();
-            code & (PRESENT | USER) == (PRESENT | USER)
-                && code & (WRITABLE | NO_EXECUTE) == 0
-                && first_guard == 0
-                && first_stack & (PRESENT | WRITABLE | USER | NO_EXECUTE)
-                    == (PRESENT | WRITABLE | USER | NO_EXECUTE)
-                && second_guard == 0
-                && second_stack & (PRESENT | WRITABLE | USER | NO_EXECUTE)
-                    == (PRESENT | WRITABLE | USER | NO_EXECUTE)
-                && code & ADDRESS_MASK == self.frames[4].address()
-                && first_stack & ADDRESS_MASK == self.frames[5].address()
-                && second_stack & ADDRESS_MASK == self.frames[6].address()
-                && Frame::leased(self.frames[4]) == Some(self.code_frame)
-                && Frame::leased(self.frames[5]) == Some(self.first_stack_frame)
-                && Frame::leased(self.frames[6]) == Some(self.second_stack_frame)
+        let Some(root) = PageTable::from_physical(self.root) else {
+            return false;
+        };
+        let Some(kernel) = PageTable::from_physical(kernel_root) else {
+            return false;
+        };
+        if root.get(0) != kernel.get(0)
+            || root.get(0) & USER != 0
+            || root.get(256) != kernel.get(256)
+            || root.get(256) & USER != 0
+        {
+            return false;
         }
+        let Some(pdpt) = PageTable::from_physical(root.get(1) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(directory) = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(table) = PageTable::from_physical(directory.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let code = table.get(0);
+        let first_guard = table.get(1);
+        let first_stack = table.get(2);
+        let second_guard = table.get(3);
+        let second_stack = table.get(4);
+        code & (PRESENT | USER) == (PRESENT | USER)
+            && code & (WRITABLE | NO_EXECUTE) == 0
+            && first_guard == 0
+            && first_stack & (PRESENT | WRITABLE | USER | NO_EXECUTE)
+                == (PRESENT | WRITABLE | USER | NO_EXECUTE)
+            && second_guard == 0
+            && second_stack & (PRESENT | WRITABLE | USER | NO_EXECUTE)
+                == (PRESENT | WRITABLE | USER | NO_EXECUTE)
+            && code & ADDRESS_MASK == self.frames[4].address()
+            && first_stack & ADDRESS_MASK == self.frames[5].address()
+            && second_stack & ADDRESS_MASK == self.frames[6].address()
+            && Frame::leased(self.frames[4]) == Some(self.code_frame)
+            && Frame::leased(self.frames[5]) == Some(self.first_stack_frame)
+            && Frame::leased(self.frames[6]) == Some(self.second_stack_frame)
     }
 
     fn map_uncached_device_page(&mut self, index: usize, physical: u64, writable: bool) -> bool {
@@ -15245,31 +15029,28 @@ impl WxAddressSpace {
         {
             return false;
         }
-        unsafe {
-            let Some(root) = mapped_frame::<u64>(self.root) else {
-                return false;
-            };
-            let Some(pdpt) = mapped_frame::<u64>(root.add(1).read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(directory) = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(table) = mapped_frame::<u64>(directory.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let entry = table.add(index);
-            let mut expected =
-                physical | PRESENT | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
-            if writable {
-                expected |= WRITABLE;
-            }
-            if entry.read() != 0 {
-                return false;
-            }
-            entry.write(expected);
-            self.device_page_mapping_is_exact(index, physical, writable)
+        let Some(root) = PageTable::from_physical(self.root) else {
+            return false;
+        };
+        let Some(pdpt) = PageTable::from_physical(root.get(1) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(directory) = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(table) = PageTable::from_physical(directory.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let entry = table.entry(index);
+        let mut expected = physical | PRESENT | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
+        if writable {
+            expected |= WRITABLE;
         }
+        if entry.read() != 0 {
+            return false;
+        }
+        entry.write(expected);
+        self.device_page_mapping_is_exact(index, physical, writable)
     }
 
     fn device_page_mapping_is_exact(&self, index: usize, physical: u64, writable: bool) -> bool {
@@ -15279,27 +15060,24 @@ impl WxAddressSpace {
         {
             return false;
         }
-        unsafe {
-            let Some(root) = mapped_frame::<u64>(self.root) else {
-                return false;
-            };
-            let Some(pdpt) = mapped_frame::<u64>(root.add(1).read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(directory) = mapped_frame::<u64>(pdpt.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let Some(table) = mapped_frame::<u64>(directory.read() & ADDRESS_MASK) else {
-                return false;
-            };
-            let mut expected =
-                physical | PRESENT | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
-            if writable {
-                expected |= WRITABLE;
-            }
-            let observed = table.add(index).read();
-            observed & !(ACCESSED | DIRTY) == expected && (observed & DIRTY == 0 || writable)
+        let Some(root) = PageTable::from_physical(self.root) else {
+            return false;
+        };
+        let Some(pdpt) = PageTable::from_physical(root.get(1) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(directory) = PageTable::from_physical(pdpt.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let Some(table) = PageTable::from_physical(directory.get(0) & ADDRESS_MASK) else {
+            return false;
+        };
+        let mut expected = physical | PRESENT | USER | WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE;
+        if writable {
+            expected |= WRITABLE;
         }
+        let observed = table.get(index);
+        observed & !(ACCESSED | DIRTY) == expected && (observed & DIRTY == 0 || writable)
     }
 
     fn is_disjoint_from(&self, other: &Self) -> bool {
@@ -15346,23 +15124,25 @@ impl WxAddressSpace {
 
 fn current_root() -> u64 {
     let root: u64;
+    // SAFETY: reading CR3 has no side effects.
     unsafe {
         asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
     }
     root & ADDRESS_MASK
 }
 
+/// Loads `root` into CR3.
+///
+/// # Safety
+///
+/// `root` is a live root whose kernel half maps the kernel as the kernel's
+/// own root does (the direct map's entry and the low template), as every
+/// root this module builds does, and its address space is not released
+/// while it is loaded.
 unsafe fn activate(root: u64) {
     crate::arch::x86_64::smp::note_active_root(root);
     asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
     crate::arch::x86_64::smp::note_root_loaded();
-}
-
-fn mapped_frame<T>(frame: u64) -> Option<*mut T> {
-    if !frame.is_multiple_of(PAGE_SIZE as u64) {
-        return None;
-    }
-    paging::direct_map_range_address(frame, PAGE_SIZE).map(|address| address as *mut T)
 }
 
 /// Writes page `page_index` of `segment` into `frame`: its file bytes,

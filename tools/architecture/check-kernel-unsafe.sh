@@ -8,12 +8,12 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 994 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 994 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 807 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 807 to ${unsafe_blocks}" >&2
     exit 1
 fi
-if (( safety_comments < 372 )); then
-    echo "kernel unsafe check: SAFETY comments fell from 372 to ${safety_comments}" >&2
+if (( safety_comments < 390 )); then
+    echo "kernel unsafe check: SAFETY comments fell from 390 to ${safety_comments}" >&2
     exit 1
 fi
 if (( static_mut > 43 )); then
@@ -26,12 +26,14 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "address_space.rs 222"
+    "address_space.rs 80"
+    "arch/x86_64/paging.rs 15"
     "image_store.rs 16"
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
-    "trusted/frame.rs 10"
+    "trusted/frame.rs 9"
+    "trusted/page_table.rs 2"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"

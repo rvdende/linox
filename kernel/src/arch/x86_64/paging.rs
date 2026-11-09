@@ -2,8 +2,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{arch::asm, cell::UnsafeCell};
 
 use crate::{
-    pe::ImageSummary, BootInfo, UefiMemoryDescriptor, EFI_RUNTIME_SERVICES_CODE,
-    EFI_RUNTIME_SERVICES_DATA,
+    pe::ImageSummary,
+    trusted::page_table::{invalidate_page, PageTable as TableView},
+    BootInfo, UefiMemoryDescriptor, EFI_RUNTIME_SERVICES_CODE, EFI_RUNTIME_SERVICES_DATA,
 };
 
 const ENTRY_COUNT: usize = 512;
@@ -143,14 +144,13 @@ impl ValidatedUserRootFrames {
         if self.base_count <= self.base.len() {
             return crate::memory::frame_addresses_owned_by(owner, self.base());
         }
-        let Some(table) = direct_map_range_address(self.native_table, PAGE_SIZE) else {
+        let Some(table) = TableView::from_physical(self.native_table) else {
             return false;
         };
-        let table = table as *const u64;
         let hierarchy = &self.base[..4];
         crate::memory::frame_addresses_owned_by(owner, hierarchy)
             && (0..usize::from(self.native_image_pages)).all(|index| {
-                let frame = unsafe { table.add(index).read() } & ADDRESS_MASK as u64;
+                let frame = table.get(index) & ADDRESS_MASK as u64;
                 crate::memory::frame_addresses_owned_by(owner, &[frame])
             })
             && (0..usize::from(self.native_stack_pages))
@@ -159,7 +159,7 @@ impl ValidatedUserRootFrames {
                     usize::from(self.native_stack_page) + usize::from(self.native_stack_pages) + 1,
                 ))
                 .all(|index| {
-                    let frame = unsafe { table.add(index).read() } & ADDRESS_MASK as u64;
+                    let frame = table.get(index) & ADDRESS_MASK as u64;
                     crate::memory::frame_addresses_owned_by(owner, &[frame])
                 })
     }
@@ -191,21 +191,13 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
     {
         return None;
     }
-    let entries = direct_map_range_address(root, PAGE_SIZE)? as *const u64;
-    let kernel_entry = unsafe {
-        core::ptr::addr_of!((*PAGING.pml4.get()).0)
-            .cast::<u64>()
-            .read()
-    };
-    let kernel_direct_entry = unsafe {
-        core::ptr::addr_of!((*PAGING.pml4.get()).0)
-            .cast::<u64>()
-            .add(DIRECT_MAP_PML4_INDEX)
-            .read()
-    };
-    let shared = unsafe { entries.read() };
-    let user = unsafe { entries.add(1).read() };
-    let direct = unsafe { entries.add(DIRECT_MAP_PML4_INDEX).read() };
+    let entries = TableView::from_physical(root)?;
+    let kernel = static_table(PAGING.pml4.get())?;
+    let kernel_entry = kernel.get(0);
+    let kernel_direct_entry = kernel.get(DIRECT_MAP_PML4_INDEX);
+    let shared = entries.get(0);
+    let user = entries.get(1);
+    let direct = entries.get(DIRECT_MAP_PML4_INDEX);
     if shared != kernel_entry
         || direct != kernel_direct_entry
         || shared & PRESENT == 0
@@ -214,9 +206,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         || direct & USER != 0
         || user & (PRESENT | WRITABLE | USER) != (PRESENT | WRITABLE | USER)
         || user & (LARGE_PAGE | NO_EXECUTE) != 0
-        || !(2..ENTRY_COUNT).all(|index| {
-            index == DIRECT_MAP_PML4_INDEX || unsafe { entries.add(index).read() == 0 }
-        })
+        || !(2..ENTRY_COUNT).all(|index| index == DIRECT_MAP_PML4_INDEX || entries.get(index) == 0)
     {
         return None;
     }
@@ -228,15 +218,9 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
     if table_address == 0 || table_address >= INITIAL_IDENTITY_LIMIT as u64 {
         return None;
     }
-    let table = direct_map_range_address(table_address, PAGE_SIZE)? as *const u64;
-    let code = unsafe { table.read() };
-    let first_guard = unsafe { table.add(1).read() };
-    let first_stack = unsafe { table.add(2).read() };
-    let second_guard = unsafe { table.add(3).read() };
-    let second_stack = unsafe { table.add(4).read() };
-    let device = unsafe { table.add(5).read() };
-    let dma = unsafe { table.add(6).read() };
-    let notification = unsafe { table.add(7).read() };
+    let table = TableView::from_physical(table_address)?;
+    let [code, first_guard, first_stack, second_guard, second_stack, device, dma, notification] =
+        core::array::from_fn(|index| table.get(index));
     let code_address = code & ADDRESS_MASK as u64;
     let first_stack_address = first_stack & ADDRESS_MASK as u64;
     let second_stack_address = second_stack & ADDRESS_MASK as u64;
@@ -287,7 +271,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         && device_valid
         && dma_valid
         && notification_valid
-        && (8..ENTRY_COUNT).all(|index| unsafe { table.add(index).read() == 0 })
+        && (8..ENTRY_COUNT).all(|index| table.get(index) == 0)
         && legacy_frames
             .iter()
             .all(|frame| *frame != 0 && *frame < INITIAL_IDENTITY_LIMIT as u64)
@@ -311,7 +295,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         });
     }
 
-    let native_entry = |index: usize| unsafe { table.add(index).read() };
+    let native_entry = |index: usize| table.get(index);
     let owned_flags = PRESENT | USER;
     let read_only_nx = owned_flags | NO_EXECUTE;
     let executable = owned_flags;
@@ -424,8 +408,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
             || (native_entry(common_page) == 0 && native_entry(notification_page) == 0))
         && dma_valid
         && mmio_valid
-        && (notification_page + 1..ENTRY_COUNT)
-            .all(|index| unsafe { table.add(index).read() == 0 })
+        && (notification_page + 1..ENTRY_COUNT).all(|index| table.get(index) == 0)
         && native_frames_valid
         && (native_dma == 0
             || !(0..native_frame_count).any(|index| native_frame_at(index) == native_dma_address)))
@@ -455,11 +438,11 @@ fn single_user_table_entry(table_address: u64) -> Option<u64> {
     if table_address == 0 || table_address >= INITIAL_IDENTITY_LIMIT as u64 {
         return None;
     }
-    let table = direct_map_range_address(table_address, PAGE_SIZE)? as *const u64;
-    let entry = unsafe { table.read() };
+    let table = TableView::from_physical(table_address)?;
+    let entry = table.get(0);
     (entry & (PRESENT | WRITABLE | USER) == (PRESENT | WRITABLE | USER)
         && entry & (LARGE_PAGE | NO_EXECUTE) == 0
-        && (1..ENTRY_COUNT).all(|index| unsafe { table.add(index).read() == 0 }))
+        && (1..ENTRY_COUNT).all(|index| table.get(index) == 0))
     .then_some(entry)
 }
 
@@ -500,6 +483,9 @@ struct PagingOwner {
     direct_map_limit: AtomicUsize,
 }
 
+// SAFETY: the tables are written during boot on the bootstrap CPU before
+// any other CPU starts, and afterwards only by callers that serialize
+// their writes (the kernel stack and device windows); the limit is atomic.
 unsafe impl Sync for PagingOwner {}
 
 static PAGING: PagingOwner = PagingOwner {
@@ -520,6 +506,29 @@ static PAGING: PagingOwner = PagingOwner {
     linux_low_directories: UnsafeCell::new([PageTable([0; ENTRY_COUNT]); DIRECTORY_COUNT]),
     direct_map_limit: AtomicUsize::new(0),
 };
+
+/// One of this owner's static tables as a page-table view through the
+/// direct map, for code that runs once the direct map exists. The tables
+/// lie in the identity-mapped kernel image, so a table's address is its
+/// physical address, and the kernel reaches them only through raw
+/// pointers.
+fn static_table(table: *const PageTable) -> Option<TableView> {
+    TableView::from_physical(table as u64)
+}
+
+/// Entry `region % 512` of the kernel's identity-map directory for 2-MiB
+/// region `region` of the first 4 GiB.
+fn identity_directory_entry(region: usize) -> Option<u64> {
+    let directory = PAGING
+        .page_directories
+        .get()
+        .cast::<PageTable>()
+        .wrapping_add(region / ENTRY_COUNT);
+    (region < DIRECTORY_COUNT * ENTRY_COUNT)
+        .then(|| static_table(directory))
+        .flatten()
+        .map(|directory| directory.get(region % ENTRY_COUNT))
+}
 
 pub(crate) fn kernel_root_address() -> u64 {
     PAGING.pml4.get().cast_const() as u64
@@ -561,6 +570,7 @@ fn ram_end(boot_info: &BootInfo) -> u64 {
     const RAM_TYPES: [u32; 6] = [1, 2, 3, 4, 7, 9];
     let count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
     (0..count)
+        // SAFETY: the index is below the descriptor count.
         .map(|index| unsafe { read_descriptor(boot_info, index) })
         .filter(|descriptor| RAM_TYPES.contains(&descriptor.memory_type))
         .filter_map(|descriptor| {
@@ -1613,48 +1623,42 @@ pub(crate) fn map_kernel_stack_page(
     {
         return false;
     }
-    let directory = PAGING
-        .kernel_stack_directories
-        .get()
-        .cast::<PageTable>()
-        .wrapping_add(offset >> 30)
-        .cast::<u64>();
+    // The directory is this owner's, installed in the shared direct PDPT at
+    // boot and left writable; the caller serializes writers.
+    let Some(directory) = static_table(
+        PAGING
+            .kernel_stack_directories
+            .get()
+            .cast::<PageTable>()
+            .wrapping_add(offset >> 30),
+    ) else {
+        return false;
+    };
     let directory_index = (offset % (1 << 30)) / LARGE_PAGE_SIZE as usize;
-    // SAFETY: the directory is this owner's, installed in the shared direct
-    // PDPT at boot and left writable; the caller serializes writers.
-    let entry = unsafe { directory.add(directory_index).read() };
+    let entry = directory.get(directory_index);
     let table_physical = if entry & PRESENT != 0 {
         entry & ADDRESS_MASK as u64
     } else {
         let Some(frame) = table.take() else {
             return false;
         };
-        // SAFETY: as above; the frame is zeroed and now belongs to the window.
-        unsafe {
-            directory
-                .add(directory_index)
-                .write(frame | PRESENT | WRITABLE)
-        };
+        // The frame is zeroed and now belongs to the window.
+        directory.set(directory_index, frame | PRESENT | WRITABLE);
         frame
     };
-    let Some(entries) = direct_map_range_address(table_physical, PAGE_SIZE) else {
+    // The table frame is only written here, under the caller's
+    // serialization.
+    let Some(entries) = TableView::from_physical(table_physical) else {
         return false;
     };
-    let entries = entries as *mut u64;
     let index = (offset % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-    // SAFETY: the table frame is mapped through the direct map and is only
-    // written here, under the caller's serialization.
-    unsafe {
-        if entries.add(index).read() & PRESENT != 0 {
-            return false;
-        }
-        entries
-            .add(index)
-            .write(physical | PRESENT | WRITABLE | NO_EXECUTE);
-        // This CPU may still hold the page's translation from before an
-        // unmap on another CPU.
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
+    if entries.get(index) & PRESENT != 0 {
+        return false;
     }
+    entries.set(index, physical | PRESENT | WRITABLE | NO_EXECUTE);
+    // This CPU may still hold the page's translation from before an unmap
+    // on another CPU.
+    invalidate_page(address as u64);
     true
 }
 
@@ -1671,32 +1675,30 @@ pub(crate) fn unmap_kernel_stack_page(address: usize) -> Option<u64> {
     if offset >= KERNEL_STACK_WINDOW_SIZE || !offset.is_multiple_of(PAGE_SIZE) {
         return None;
     }
-    let directory = PAGING
-        .kernel_stack_directories
-        .get()
-        .cast::<PageTable>()
-        .wrapping_add(offset >> 30)
-        .cast::<u64>();
+    // As in `map_kernel_stack_page`.
+    let directory = static_table(
+        PAGING
+            .kernel_stack_directories
+            .get()
+            .cast::<PageTable>()
+            .wrapping_add(offset >> 30),
+    )?;
     let directory_index = (offset % (1 << 30)) / LARGE_PAGE_SIZE as usize;
-    // SAFETY: as in `map_kernel_stack_page`.
-    let entry = unsafe { directory.add(directory_index).read() };
+    let entry = directory.get(directory_index);
     if entry & PRESENT == 0 {
         return None;
     }
-    let entries = direct_map_range_address(entry & ADDRESS_MASK as u64, PAGE_SIZE)? as *mut u64;
+    // The table frame is written only under the caller's serialization;
+    // invlpg drops only this CPU's translation of the page.
+    let entries = TableView::from_physical(entry & ADDRESS_MASK as u64)?;
     let index = (offset % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-    // SAFETY: the table frame is mapped through the direct map and written
-    // only under the caller's serialization; invlpg drops only this CPU's
-    // translation of the page.
-    unsafe {
-        let value = entries.add(index).read();
-        if value & PRESENT == 0 {
-            return None;
-        }
-        entries.add(index).write(0);
-        asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags));
-        Some(value & ADDRESS_MASK as u64)
+    let value = entries.get(index);
+    if value & PRESENT == 0 {
+        return None;
     }
+    entries.set(index, 0);
+    invalidate_page(address as u64);
+    Some(value & ADDRESS_MASK as u64)
 }
 
 /// Programs this CPU's page attribute table, which is per CPU: entry 0 stays
@@ -1833,11 +1835,10 @@ pub(crate) fn kernel_address_is_mapped(address: u64) -> bool {
     let mut table = root & ADDRESS_MASK as u64;
     for level in 0..4 {
         let index = ((address >> (39 - 9 * level)) & 0x1ff) as usize;
-        let Some(entries) = direct_map_range_address(table, PAGE_SIZE) else {
+        let Some(entries) = TableView::from_physical(table) else {
             return false;
         };
-        // SAFETY: the table page lies inside the direct map, checked above.
-        let entry = unsafe { (entries as *const u64).add(index).read_volatile() };
+        let entry = entries.entry(index).read_volatile();
         if entry & PRESENT == 0 {
             return false;
         }
@@ -1871,9 +1872,11 @@ pub(crate) fn direct_map_translation_is_bounded() -> bool {
 }
 
 pub(crate) fn direct_map_alias_is_valid() -> bool {
-    let pml4 = unsafe { core::ptr::addr_of!((*PAGING.pml4.get()).0).cast::<u64>() };
-    let identity = unsafe { pml4.read() };
-    let direct = unsafe { pml4.add(DIRECT_MAP_PML4_INDEX).read() };
+    let Some(pml4) = static_table(PAGING.pml4.get()) else {
+        return false;
+    };
+    let identity = pml4.get(0);
+    let direct = pml4.get(DIRECT_MAP_PML4_INDEX);
     let expected_identity = PAGING.pdpt.get().cast_const() as u64 | PRESENT | WRITABLE;
     let expected_direct = PAGING.direct_pdpt.get().cast_const() as u64 | PRESENT | WRITABLE;
     if (identity ^ expected_identity) & !ACCESSED != 0
@@ -1883,12 +1886,14 @@ pub(crate) fn direct_map_alias_is_valid() -> bool {
     {
         return false;
     }
-    let identity_pdpt = unsafe { core::ptr::addr_of!((*PAGING.pdpt.get()).0).cast::<u64>() };
-    let direct_pdpt = unsafe { core::ptr::addr_of!((*PAGING.direct_pdpt.get()).0).cast::<u64>() };
+    let (Some(identity_pdpt), Some(direct_pdpt)) = (
+        static_table(PAGING.pdpt.get()),
+        static_table(PAGING.direct_pdpt.get()),
+    ) else {
+        return false;
+    };
     for index in 0..DIRECTORY_COUNT {
-        if unsafe { (identity_pdpt.add(index).read() ^ direct_pdpt.add(index).read()) & !ACCESSED }
-            != 0
-        {
+        if (identity_pdpt.get(index) ^ direct_pdpt.get(index)) & !ACCESSED != 0 {
             return false;
         }
     }
@@ -1896,6 +1901,9 @@ pub(crate) fn direct_map_alias_is_valid() -> bool {
     let Some(alias) = direct_map_address(physical) else {
         return false;
     };
+    // SAFETY: both addresses name the kernel's root table, a static the
+    // kernel reaches only through raw pointers: through the direct map and
+    // through the identity map of the kernel image.
     unsafe { (alias as *const u64).read() == (physical as *const u64).read() }
 }
 
@@ -1921,36 +1929,36 @@ pub(crate) fn mmio_mapping_is_valid(mapping: MmioMapping) -> bool {
     {
         return false;
     }
-    unsafe {
-        let direct_pdpt = core::ptr::addr_of!((*PAGING.direct_pdpt.get()).0).cast::<u64>();
-        let directory_entry = direct_pdpt.add(MMIO_PDPT_INDEX).read();
-        if directory_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE)
-            != PRESENT | WRITABLE
-            || directory_entry & ADDRESS_MASK as u64
-                != PAGING.mmio_directory.get().cast_const() as u64
-        {
-            return false;
-        }
-        let directory = core::ptr::addr_of!((*PAGING.mmio_directory.get()).0).cast::<u64>();
-        let table_entry = directory.read();
-        if table_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE) != PRESENT | WRITABLE
-            || table_entry & ADDRESS_MASK as u64 != PAGING.mmio_table.get().cast_const() as u64
-            || (1..ENTRY_COUNT).any(|index| directory.add(index).read() != 0)
-        {
-            return false;
-        }
-        let table = core::ptr::addr_of!((*PAGING.mmio_table.get()).0).cast::<u64>();
-        let page_count = mapping.mapped_length / PAGE_SIZE;
-        let first_page = window_offset / PAGE_SIZE;
-        let expected_flags =
-            PRESENT | CACHE_DISABLE | NO_EXECUTE | if mapping.writable { WRITABLE } else { 0 };
-        (0..page_count).all(|index| {
-            let entry = table.add(first_page + index).read();
-            entry & (ADDRESS_MASK as u64 | PRESENT | WRITABLE | USER | CACHE_DISABLE | NO_EXECUTE)
-                == (mapping.physical_page + (index * PAGE_SIZE) as u64) | expected_flags
-                && entry & LARGE_PAGE == 0
-        })
+    let (Some(direct_pdpt), Some(directory), Some(table)) = (
+        static_table(PAGING.direct_pdpt.get()),
+        static_table(PAGING.mmio_directory.get()),
+        static_table(PAGING.mmio_table.get()),
+    ) else {
+        return false;
+    };
+    let directory_entry = direct_pdpt.get(MMIO_PDPT_INDEX);
+    if directory_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE) != PRESENT | WRITABLE
+        || directory_entry & ADDRESS_MASK as u64 != PAGING.mmio_directory.get().cast_const() as u64
+    {
+        return false;
     }
+    let table_entry = directory.get(0);
+    if table_entry & (PRESENT | WRITABLE | USER | LARGE_PAGE | NO_EXECUTE) != PRESENT | WRITABLE
+        || table_entry & ADDRESS_MASK as u64 != PAGING.mmio_table.get().cast_const() as u64
+        || (1..ENTRY_COUNT).any(|index| directory.get(index) != 0)
+    {
+        return false;
+    }
+    let page_count = mapping.mapped_length / PAGE_SIZE;
+    let first_page = window_offset / PAGE_SIZE;
+    let expected_flags =
+        PRESENT | CACHE_DISABLE | NO_EXECUTE | if mapping.writable { WRITABLE } else { 0 };
+    (0..page_count).all(|index| {
+        let entry = table.get(first_page + index);
+        entry & (ADDRESS_MASK as u64 | PRESENT | WRITABLE | USER | CACHE_DISABLE | NO_EXECUTE)
+            == (mapping.physical_page + (index * PAGE_SIZE) as u64) | expected_flags
+            && entry & LARGE_PAGE == 0
+    })
 }
 
 pub(crate) fn mmio_mappings_are_exact<const N: usize>(mappings: [MmioMapping; N]) -> bool {
@@ -1980,7 +1988,9 @@ pub(crate) fn mmio_mappings_are_exact<const N: usize>(mappings: [MmioMapping; N]
             }
         }
     }
-    let table = unsafe { core::ptr::addr_of!((*PAGING.mmio_table.get()).0).cast::<u64>() };
+    let Some(table) = static_table(PAGING.mmio_table.get()) else {
+        return false;
+    };
     (0..ENTRY_COUNT).all(|index| {
         let expected = mappings.into_iter().find_map(|mapping| {
             let first_index = (mapping.virtual_page - MMIO_WINDOW_BASE) / PAGE_SIZE;
@@ -1996,9 +2006,9 @@ pub(crate) fn mmio_mappings_are_exact<const N: usize>(mappings: [MmioMapping; N]
                 })
         });
         let Some(expected) = expected else {
-            return unsafe { table.add(index).read() == 0 };
+            return table.get(index) == 0;
         };
-        let entry = unsafe { table.add(index).read() };
+        let entry = table.get(index);
         entry & (ADDRESS_MASK as u64 | PRESENT | WRITABLE | USER | CACHE_DISABLE | NO_EXECUTE)
             == expected
             && entry & LARGE_PAGE == 0
@@ -2020,20 +2030,15 @@ pub(crate) fn mmio_identity_alias_is_absent(mapping: MmioMapping) -> bool {
         .all(|physical| {
             let physical = physical as usize;
             let region = physical / LARGE_PAGE_SIZE as usize;
-            let directory = PAGING
-                .page_directories
-                .get()
-                .cast_const()
-                .cast::<PageTable>()
-                .wrapping_add(region / ENTRY_COUNT);
-            let directory_entries = unsafe { core::ptr::addr_of!((*directory).0).cast::<u64>() };
-            let directory_entry = unsafe { directory_entries.add(region % ENTRY_COUNT).read() };
+            let Some(directory_entry) = identity_directory_entry(region) else {
+                return false;
+            };
             if directory_entry & (PRESENT | LARGE_PAGE) != PRESENT {
                 return false;
             }
-            let table = (directory_entry as usize & ADDRESS_MASK) as *const u64;
             let page = (physical % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-            unsafe { table.add(page).read() == 0 }
+            TableView::from_physical(directory_entry & ADDRESS_MASK as u64)
+                .is_some_and(|table| table.get(page) == 0)
         })
 }
 
@@ -2193,21 +2198,12 @@ unsafe fn install_linux_low_template(
 /// Writes the ranges of the first 4 GiB that Linux processes cannot map,
 /// the kernel's own (`install_linux_low_template`), to the kernel log.
 pub(crate) fn report_linux_low_template() {
-    let directories = PAGING
-        .linux_low_directories
-        .get()
-        .cast_const()
-        .cast::<PageTable>();
+    let directories = PAGING.linux_low_directories.get().cast::<PageTable>();
+    // The template is read-only after boot.
     let kept = |region: usize| {
         region < DIRECTORY_COUNT * ENTRY_COUNT
-            // SAFETY: the template is read-only after boot.
-            && unsafe {
-                core::ptr::addr_of!((*directories.add(region / ENTRY_COUNT)).0)
-                    .cast::<u64>()
-                    .add(region % ENTRY_COUNT)
-                    .read()
-            } & PRESENT
-                != 0
+            && static_table(directories.wrapping_add(region / ENTRY_COUNT))
+                .is_some_and(|directory| directory.get(region % ENTRY_COUNT) & PRESENT != 0)
     };
     crate::serial_write("linox: kernel ranges in Linux address spaces:");
     let mut run_start = None;
@@ -2228,77 +2224,67 @@ pub(crate) fn report_linux_low_template() {
 }
 
 pub(crate) fn static_page_tables_are_read_only() -> bool {
-    static_table_pages().into_iter().all(|address| unsafe {
+    static_table_pages().into_iter().all(|address| {
         let region = address / LARGE_PAGE_SIZE as usize;
-        let directory = PAGING
-            .page_directories
-            .get()
-            .cast_const()
-            .cast::<PageTable>()
-            .add(region / ENTRY_COUNT);
-        let directory_entries = core::ptr::addr_of!((*directory).0).cast::<u64>();
-        let directory_entry = directory_entries.add(region % ENTRY_COUNT).read();
+        let Some(directory_entry) = identity_directory_entry(region) else {
+            return false;
+        };
         if directory_entry & PRESENT == 0 || directory_entry & LARGE_PAGE != 0 {
             return false;
         }
-        let table = (directory_entry as usize & ADDRESS_MASK) as *const u64;
         let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-        let entry = table.add(page).read();
-        entry & PRESENT != 0 && entry & WRITABLE == 0
+        TableView::from_physical(directory_entry & ADDRESS_MASK as u64).is_some_and(|table| {
+            let entry = table.get(page);
+            entry & PRESENT != 0 && entry & WRITABLE == 0
+        })
     })
 }
 
 pub(crate) fn identity_map_obeys_wx(boot_info: &BootInfo, image: &ImageSummary) -> bool {
-    unsafe {
-        let directories = PAGING
-            .page_directories
-            .get()
-            .cast_const()
-            .cast::<PageTable>();
-        for region in 0..DIRECTORY_COUNT * ENTRY_COUNT {
-            let directory = directories.add(region / ENTRY_COUNT);
-            let entries = core::ptr::addr_of!((*directory).0).cast::<u64>();
-            let entry = entries.add(region % ENTRY_COUNT).read();
-            if entry & PRESENT == 0 {
+    for region in 0..DIRECTORY_COUNT * ENTRY_COUNT {
+        let Some(entry) = identity_directory_entry(region) else {
+            return false;
+        };
+        if entry & PRESENT == 0 {
+            return false;
+        }
+        let region_start = region * LARGE_PAGE_SIZE as usize;
+        let region_end = region_start + LARGE_PAGE_SIZE as usize;
+        if entry & LARGE_PAGE != 0 {
+            if entry & NO_EXECUTE == 0
+                || range_contains_executable(boot_info, image, region_start, region_end)
+                || ranges_overlap(image.image_range(), (region_start, region_end))
+            {
                 return false;
             }
-            let region_start = region * LARGE_PAGE_SIZE as usize;
-            let region_end = region_start + LARGE_PAGE_SIZE as usize;
-            if entry & LARGE_PAGE != 0 {
-                if entry & NO_EXECUTE == 0
-                    || range_contains_executable(boot_info, image, region_start, region_end)
-                    || ranges_overlap(image.image_range(), (region_start, region_end))
-                {
-                    return false;
-                }
+            continue;
+        }
+        let Some(table) = TableView::from_physical(entry & ADDRESS_MASK as u64) else {
+            return false;
+        };
+        for page in 0..ENTRY_COUNT {
+            let leaf = table.get(page);
+            if leaf & PRESENT == 0 {
                 continue;
             }
-            let table = (entry as usize & ADDRESS_MASK) as *const u64;
-            for page in 0..ENTRY_COUNT {
-                let leaf = table.add(page).read();
-                if leaf & PRESENT == 0 {
-                    continue;
-                }
-                let address = region_start + page * PAGE_SIZE;
-                let image_code = image
-                    .executable_ranges()
-                    .iter()
-                    .any(|(start, end)| address < *end && *start < address + PAGE_SIZE);
-                let image_page =
-                    ranges_overlap(image.image_range(), (address, address + PAGE_SIZE));
-                let image_writable = image
-                    .writable_ranges()
-                    .iter()
-                    .any(|(start, end)| address < *end && *start < address + PAGE_SIZE);
-                let expected_writable = image_writable && !is_static_table_page(address);
-                let executable = image_code
-                    || address == super::smp::TRAMPOLINE_PHYSICAL
-                    || range_contains_runtime_code(boot_info, address, address + PAGE_SIZE);
-                if executable == (leaf & NO_EXECUTE != 0)
-                    || (image_page && expected_writable != (leaf & WRITABLE != 0))
-                {
-                    return false;
-                }
+            let address = region_start + page * PAGE_SIZE;
+            let image_code = image
+                .executable_ranges()
+                .iter()
+                .any(|(start, end)| address < *end && *start < address + PAGE_SIZE);
+            let image_page = ranges_overlap(image.image_range(), (address, address + PAGE_SIZE));
+            let image_writable = image
+                .writable_ranges()
+                .iter()
+                .any(|(start, end)| address < *end && *start < address + PAGE_SIZE);
+            let expected_writable = image_writable && !is_static_table_page(address);
+            let executable = image_code
+                || address == super::smp::TRAMPOLINE_PHYSICAL
+                || range_contains_runtime_code(boot_info, address, address + PAGE_SIZE);
+            if executable == (leaf & NO_EXECUTE != 0)
+                || (image_page && expected_writable != (leaf & WRITABLE != 0))
+            {
+                return false;
             }
         }
     }
@@ -2320,28 +2306,23 @@ pub(crate) fn identity_range_is_read_only_data(start: usize, length: usize) -> b
     let mut address = first_page;
     loop {
         let region = address / LARGE_PAGE_SIZE as usize;
-        let directory = unsafe {
-            PAGING
-                .page_directories
-                .get()
-                .cast_const()
-                .cast::<PageTable>()
-                .add(region / ENTRY_COUNT)
+        let Some(directory_entry) = identity_directory_entry(region) else {
+            return false;
         };
-        let entries = unsafe { core::ptr::addr_of!((*directory).0).cast::<u64>() };
-        let directory_entry = unsafe { entries.add(region % ENTRY_COUNT).read() };
         let permissions_valid = if directory_entry & LARGE_PAGE != 0 {
             directory_entry & PRESENT != 0
                 && directory_entry & WRITABLE == 0
                 && directory_entry & NO_EXECUTE != 0
         } else {
-            let table = (directory_entry as usize & ADDRESS_MASK) as *const u64;
-            if directory_entry & PRESENT == 0 || table.is_null() {
+            let table = directory_entry & ADDRESS_MASK as u64;
+            if directory_entry & PRESENT == 0 || table == 0 {
                 false
             } else {
                 let page = (address % LARGE_PAGE_SIZE as usize) / PAGE_SIZE;
-                let leaf = unsafe { table.add(page).read() };
-                leaf & PRESENT != 0 && leaf & WRITABLE == 0 && leaf & NO_EXECUTE != 0
+                TableView::from_physical(table).is_some_and(|table| {
+                    let leaf = table.get(page);
+                    leaf & PRESENT != 0 && leaf & WRITABLE == 0 && leaf & NO_EXECUTE != 0
+                })
             }
         };
         if !permissions_valid {
@@ -2357,6 +2338,12 @@ pub(crate) fn identity_range_is_read_only_data(start: usize, length: usize) -> b
     }
 }
 
+/// Descriptor `index` of the firmware's memory map.
+///
+/// # Safety
+///
+/// `index` is below `memory_map_size / memory_descriptor_size`, and the
+/// memory map the boot loader passed is still mapped.
 unsafe fn read_descriptor(boot_info: &BootInfo, index: usize) -> UefiMemoryDescriptor {
     let address = boot_info
         .memory_map
@@ -2390,6 +2377,7 @@ fn runtime_code_bounds(
 fn range_contains_runtime_code(boot_info: &BootInfo, start: usize, end: usize) -> bool {
     let descriptor_count = boot_info.memory_map_size / boot_info.memory_descriptor_size;
     for index in 0..descriptor_count {
+        // SAFETY: the index is below the descriptor count.
         let descriptor = unsafe { read_descriptor(boot_info, index) };
         let Ok(Some((code_start, code_end))) = runtime_code_bounds(descriptor) else {
             continue;
@@ -2447,6 +2435,11 @@ fn is_static_table_page(address: usize) -> bool {
         || (fine_tables..fine_tables_end).contains(&address)
 }
 
+/// Clears a table during boot, before the direct map exists.
+///
+/// # Safety
+///
+/// `entries` points at a whole page table the caller owns.
 unsafe fn zero_entries(entries: *mut u64) {
     for index in 0..ENTRY_COUNT {
         entries.add(index).write(0);

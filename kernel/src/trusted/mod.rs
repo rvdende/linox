@@ -4,9 +4,11 @@
 //!
 //! - [`frame`]: a physical frame of RAM, read and written by copying
 //!   through the direct map.
+//! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //!
 //! Each module says who may construct its types; the constructors from a
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
 pub(crate) mod frame;
+pub(crate) mod page_table;
