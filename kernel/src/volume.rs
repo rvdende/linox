@@ -1,11 +1,9 @@
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    sync::atomic::{AtomicBool, Ordering},
-};
+#![forbid(unsafe_code)]
 
 use linox_volume_format::{encode, PAYLOAD_CAPACITY, SECTOR_SIZE, SLOT_COUNT};
 use linox_volume_service::{commit_through, recover_with_slot, CommitStage, ScanError};
+
+use crate::sync::{LockRank, SpinLock};
 
 pub(crate) use linox_volume_service::{
     commit, commit_local_config, commit_oci_catalog, open_host_volume, recover,
@@ -28,17 +26,11 @@ struct MemoryBlockDevice {
     pending: [[u8; SECTOR_SIZE]; SLOT_COUNT],
 }
 
-struct LiveVolumeOwner {
-    installed: AtomicBool,
-    device: UnsafeCell<MaybeUninit<MemoryBlockDevice>>,
-}
-
-unsafe impl Sync for LiveVolumeOwner {}
-
-static LIVE_VOLUME: LiveVolumeOwner = LiveVolumeOwner {
-    installed: AtomicBool::new(false),
-    device: UnsafeCell::new(MaybeUninit::uninit()),
-};
+/// The live volume, once installed. Its operations take nothing else
+/// while they hold it (they scan and write the in-memory slots), so it
+/// ranks high, above the locks its callers may hold.
+static LIVE_VOLUME: SpinLock<Option<MemoryBlockDevice>> =
+    SpinLock::new(LockRank::LIVE_VOLUME, None);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LiveError {
@@ -50,27 +42,24 @@ pub(crate) enum LiveError {
 }
 
 pub(crate) fn install_live() -> bool {
-    if LIVE_VOLUME.installed.swap(true, Ordering::AcqRel) {
+    let mut live = LIVE_VOLUME.lock();
+    if live.is_some() {
         return false;
     }
-    unsafe {
-        LIVE_VOLUME
-            .device
-            .get()
-            .write(MaybeUninit::new(MemoryBlockDevice::new()));
-    }
-    live_device_mut().is_some_and(|device| recover(device).is_none())
+    recover(live.insert(MemoryBlockDevice::new())).is_none()
 }
 
 pub(crate) fn live_generation() -> Result<u64, LiveError> {
-    let device = live_device_mut().ok_or(LiveError::Device)?;
+    let mut live = LIVE_VOLUME.lock();
+    let device = live.as_mut().ok_or(LiveError::Device)?;
     recover_with_slot(device)
         .map_err(live_scan_error)
         .map(|record| record.map_or(0, |(_, record)| record.generation))
 }
 
 pub(crate) fn read_live(expected_generation: u64, output: &mut [u8]) -> Result<usize, LiveError> {
-    let device = live_device_mut().ok_or(LiveError::Device)?;
+    let mut live = LIVE_VOLUME.lock();
+    let device = live.as_mut().ok_or(LiveError::Device)?;
     let record = recover_with_slot(device)
         .map_err(live_scan_error)?
         .map(|(_, record)| record)
@@ -87,7 +76,8 @@ pub(crate) fn read_live(expected_generation: u64, output: &mut [u8]) -> Result<u
 }
 
 pub(crate) fn commit_live(expected_generation: u64, payload: &[u8]) -> Result<u64, LiveError> {
-    let device = live_device_mut().ok_or(LiveError::Device)?;
+    let mut live = LIVE_VOLUME.lock();
+    let device = live.as_mut().ok_or(LiveError::Device)?;
     let current = recover_with_slot(device).map_err(live_scan_error)?;
     let current_generation = current.map_or(0, |(_, record)| record.generation);
     if current_generation != expected_generation {
@@ -108,13 +98,6 @@ fn live_scan_error(error: ScanError) -> LiveError {
         ScanError::Ambiguous | ScanError::Corrupt => LiveError::Corrupt,
         ScanError::Device => LiveError::Device,
     }
-}
-
-fn live_device_mut() -> Option<&'static mut MemoryBlockDevice> {
-    if !LIVE_VOLUME.installed.load(Ordering::Acquire) {
-        return None;
-    }
-    Some(unsafe { &mut *LIVE_VOLUME.device.get().cast::<MemoryBlockDevice>() })
 }
 
 impl MemoryBlockDevice {

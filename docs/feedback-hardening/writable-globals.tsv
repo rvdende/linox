@@ -520,7 +520,7 @@ interior-mutable	kernel/src/sync.rs	HIGH	verification-only	allowlist	none	verifi
 interior-mutable	kernel/src/sync.rs	KERNEL_ENTRY_LOCK	shared-runtime	allowlist	none	explicit-ranked-kernel-entry-lock
 interior-mutable	kernel/src/sync.rs	LOW	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/sync.rs	PLAIN	verification-only	allowlist	none	verification-build-only
-interior-mutable	kernel/src/volume.rs	LIVE_VOLUME	platform-device	allowlist	none	explicit-host-live-volume-owner-root
+interior-mutable	kernel/src/volume.rs	LIVE_VOLUME	platform-device	allowlist	none	ranked-live-volume-leaf
 interior-mutable	services/network/src/main.rs	REGISTRY_HEAP	service-runtime	allowlist	none	explicit-service-generation-heap-owner-root
 interior-mutable	services/network/src/registry.rs	REGISTRY_PULL	service-runtime	allowlist	none	explicit-service-generation-pull-owner-root
 interior-mutable	services/network/src/registry.rs	REGISTRY_SERVICE	service-runtime	allowlist	none	explicit-service-generation-network-owner-root

@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 603 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 603 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 601 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 601 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 268 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 268 to ${undocumented}" >&2
+if (( undocumented > 266 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 266 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 19 )); then
@@ -79,6 +79,7 @@ forbidding_files=(
     "linux_input.rs"
     "linux_sysv_ipc.rs"
     "linux_tmpfs.rs"
+    "volume.rs"
 )
 for file in "${forbidding_files[@]}"; do
     if ! rg -q '^#!\[forbid\(unsafe_code\)\]$' "${kernel_source}/${file}"; then

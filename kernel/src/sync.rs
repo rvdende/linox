@@ -152,6 +152,10 @@ impl LockRank {
     pub(crate) const FILESYSTEM: Self = Self(600);
     pub(crate) const IPC_SIGNAL: Self = Self(700);
     pub(crate) const DEVICE_NETWORK: Self = Self(800);
+    /// The live (in-memory) volume (`volume::install_live`): a leaf that
+    /// only scans and writes its slots, so it ranks above the locks its
+    /// callers may hold.
+    pub(crate) const LIVE_VOLUME: Self = Self(880);
     pub(crate) const DIAGNOSTICS: Self = Self(900);
     /// The evdev input queues (`linux_input`): drivers queue events from
     /// interrupt handlers, over whatever lock the interrupted code holds,
