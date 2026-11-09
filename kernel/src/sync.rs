@@ -162,6 +162,17 @@ impl LockRank {
     /// The kernel heap refills from the frame allocator while holding its
     /// lock, so it ranks just below it.
     pub(crate) const KERNEL_HEAP: Self = Self(190);
+    /// Each domain's overlay nodes (`linux_overlay`): a leaf held only to
+    /// read and write node fields, its hint tables and file data through
+    /// frame copies. It allocates, frees and calls nothing while held: the
+    /// heap memory, frames and pages back from swap an operation needs are
+    /// got with it released, and the tmpfs limits, the unlinked-file list,
+    /// the swap areas and memory cgroup charges are called after. The
+    /// overlay is called under the volumes, the overlay mounts, the
+    /// pseudo-terminals, the loop devices, the swap areas and the
+    /// unlinked-file list, so it ranks above them all and the heap, below
+    /// the other leaves (none of which calls it).
+    pub(crate) const OVERLAY_NODES: Self = Self(191);
     /// The mount namespace table (`linux_mount`): a leaf that copies its
     /// fixed records in and out and calls nothing while held. Path walks
     /// ask for the current namespace under the route, overlay and volume

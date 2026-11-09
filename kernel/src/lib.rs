@@ -62,7 +62,6 @@ mod linux_mount;
 mod linux_mount_paths;
 mod linux_mounts;
 mod linux_namespace;
-#[allow(unsafe_code)]
 mod linux_overlay;
 mod linux_overlayfs;
 mod linux_path_views;

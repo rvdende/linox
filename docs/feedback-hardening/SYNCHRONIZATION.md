@@ -70,6 +70,35 @@ get leaf locks ranked 191-199: each critical section only reads or writes
 the table's own records, never allocates or frees heap memory, and calls
 nothing that takes a lock. Two such leaves are never held together.
 
+- `OVERLAY_NODES` (191, `linux_overlay`): one lock per instance over
+  each domain's in-memory files (nodes, their hint tables, shared-mapping
+  registrations) and, through `Frame` copies, the file data frames they
+  index. The overlay is called under VOLUMES (a loop device's backing
+  file, a volume's page cache), OVERLAY_MOUNTS (overlayfs copy-up and its
+  `create` callback), PTYS, LOOP, SWAPS and UNLINKED_FILES, and its work
+  reaches VOLUMES, OVERLAY_MOUNTS, SOCKETS (FIFOs), TMPFS_LIMITS,
+  UNLINKED_FILES, SWAPS (freeing and reading swap entries, which for a
+  loop device comes back into the overlay), the heap and the frame
+  allocator. No rank fits a lock held across that, so the lock is a leaf
+  held only to read and write node fields, the hint tables and frame
+  data: every other call is made with it released. An operation that
+  needs heap memory (a chunk of node slots, room in the chunk list, the
+  mapping list, a node's attribute list or a hint table), zeroed frames,
+  or a page back from swap returns what it needs; `locked_with` gets it
+  with the lock released and runs the operation again, which looks its
+  node up again by handle (a chunk list and hint tables twice as large
+  are built outside and moved into under the lock, as FILE_CACHE does).
+  Operations check what they need before they change anything. What they
+  take out (old paths, removed attributes, forgotten nodes, a file's
+  frames, swap entries and detached data chains) is released after the
+  lock, as are the tmpfs-limit charges, the unlinked-file list and memory
+  cgroup charges. Work done on a copy with the lock released (moving a
+  file's chain into a frame index for MAP_SHARED, a directory rename's
+  new paths) checks the node's data `version`, or the moved nodes'
+  handles and paths, before it is put in place, and starts again if they
+  changed. Ranked just above the heap, it may be taken under any lock
+  but the other leaves, none of which calls the overlay. Never taken in
+  interrupt context.
 - `MOUNT_NAMESPACES` (192, `linux_mount`): the mount namespace table.
   Records are copied out; the domain and published-root checks that
   `current_root_is_read_only` makes run after the lock is released.
@@ -117,22 +146,6 @@ nothing that takes a lock. Two such leaves are never held together.
   counts (`memory::owner_live_frame_count`) read them before taking it.
   Interrupts stay off while it is held, so a timer interrupt's scheduler
   work on the same CPU cannot reach it while it is held.
-
-## Owner cells still without a lock
-
-The overlay (`linux_overlay`, each domain's in-memory files) keeps an
-owner cell serialized by the kernel-entry lock. Its operations hold node
-references while they call the volumes (VOLUMES, 186), the overlay mounts
-(182), the socket table (140, FIFOs and socket names), the tmpfs limits
-(189), the unlinked-file list (188) and the heap, and they are called
-under several of those (a loop device's backing file under VOLUMES, a
-pseudo-terminal's node under PTYS, overlayfs copy-up under
-OVERLAY_MOUNTS). A lock held across an operation would have to rank both
-below and above those, so the overlay needs leaf locking instead: node
-fields read and written under a short lock, with the calls out made
-between. Its nodes are now heap objects (chunks that never move) and its
-file data frames are reached only through `Frame` copies, which that
-refactor builds on.
 
 ## Local interrupt audit
 

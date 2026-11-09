@@ -652,16 +652,22 @@ undocumented 266 -> 218.
 - Forbid `unsafe_code`: `domain.rs`, `ipc.rs`, `packet.rs`,
   `linux_mount.rs`, `linux_user.rs`, `linux_file_cache.rs`,
   `published_rootfs.rs`, `initramfs.rs`, `manifest.rs`, `pe.rs`.
+- The overlay (`linux_overlay`) is behind a leaf lock per domain
+  (OVERLAY_NODES, 191, just above the heap): node fields, the node and
+  path hints (now open-addressed tables that never allocate under the
+  lock) and file data are read and written under it, and everything else
+  an operation does (the volumes, overlay mounts, sockets, tmpfs limits,
+  the unlinked-file list, swap, heap and frame allocation, memory cgroup
+  charges) happens with it released: an operation returns what it needs,
+  gets it outside, and runs again, revalidating its node by handle and,
+  for work done on a copy, by the file's data `version`. 6 -> 0 sites;
+  `linux_overlay.rs` forbids `unsafe_code` and `lib.rs` allows unsafe in
+  7 modules. Unsafe blocks 363 -> 359, undocumented 121 -> 119.
 
-Still to do in steps 6 and 7: the overlay's owner cell. No rank fits one
-lock held across an overlay operation (it calls the volumes, the overlay
-mounts, the sockets and the tmpfs limits while it holds nodes, and is
-called under several of those), so it needs leaf locking: node fields
-read and written under a short lock, the calls out made between
-(SYNCHRONIZATION.md, "Owner cells still without a lock"). The published
-root filesystem's entries are `Entry<'static>` borrowed by callers in
-`cpu/`; giving them a lifetime tied to the publication would let
-`PublishedImage::retire` become safe. And the signal queues
+Still to do in steps 6 and 7: the published root filesystem's entries
+are `Entry<'static>` borrowed by callers in `cpu/`; giving them a
+lifetime tied to the publication would let `PublishedImage::retire`
+become safe. And the signal queues
 (`linux_signal`: senders hold locks up to the heap's rank, so its lock
 needs a rank audit first).
 
