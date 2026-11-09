@@ -1513,13 +1513,21 @@ pub(super) fn settle_linux_process_exit(pid: u32, status: u8) -> bool {
     }
     discard_linux_process_extended_state(pid);
     wake_linux_descriptor_waits();
-    // A domain exec's command that ends gives the console back.
+    // A domain exec's command that ends gives the console back, and the
+    // domain goes back to the background: the loop suspends it at its next
+    // scheduling point (`suspend_linux_runtime_from_loop`), with every other
+    // process where it was. What the domain does with the console meanwhile
+    // (a shell polling its standard input, which only a read would suspend
+    // on) must not keep the controller from its prompt.
     if let Some(slot) = active_container_slot() {
         if X86_RUNTIME.CONTAINER_EXEC_CHILD[slot]
             .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             X86_RUNTIME.CONTAINER_CONSOLE_ATTACHED[slot].store(false, Ordering::Release);
+            X86_RUNTIME
+                .LINUX_RUNTIME_BACKGROUND_YIELD_REQUESTED
+                .store(true, Ordering::Release);
         }
     }
     exited && release_linux_process_runtime_slot(pid)

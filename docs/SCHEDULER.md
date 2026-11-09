@@ -189,7 +189,11 @@ How the old init-only assumptions were resolved:
   instead of returning the fork's pid as a byte count. While the command
   (`CONTAINER_EXEC_CHILD`) lives, only it and its descendants read the
   console (`linux_console_held_by_domain_exec`); its exit detaches the
-  console, and the next console read suspends the domain as before.
+  console and asks the loop to suspend the domain (a background yield),
+  since the suspended process may go back to polling the console, which
+  never suspends it, rather than reading it. Still open, as on the
+  previous base: an interactive `domain exec` into an Alpine domain whose
+  init is busybox sh reads stray console bytes and ends at once.
 - **Suspension.** A process that suspends the runtime is settled like any
   other; on resume its registry context (with the call's result, or the
   console byte's count) is entered by the loop, so its kernel state is

@@ -1298,6 +1298,11 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         .LINUX_RUNTIME_BACKGROUND_SUSPENDED
         .store(false, Ordering::Release);
     X86_RUNTIME.CONTAINER_BACKGROUND_SUSPENDED[slot].store(false, Ordering::Release);
+    // A request to give the CPU back made before this suspension (a domain
+    // exec's command that ended, the timer) was answered by it.
+    X86_RUNTIME
+        .LINUX_RUNTIME_BACKGROUND_YIELD_REQUESTED
+        .store(false, Ordering::Release);
     X86_RUNTIME
         .LINUX_RUNTIME_MODE
         .store(true, Ordering::Release);
