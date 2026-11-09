@@ -42,7 +42,7 @@ Detailed bounded behavior for implemented calls lives in
 The matrix must be updated in the same commit whenever syscall dispatch or its
 documented behavior changes.
 
-Current totals: **91 Complete**, **251 Partial**, **33 Policy-denied**, **0 Missing**.
+Current totals: **91 Complete**, **252 Partial**, **33 Policy-denied**, **0 Missing**.
 
 ## Current stopping point
 
@@ -566,8 +566,9 @@ in-flight work, vectored requests, poll, and eventfd completion remain pending.
 ## Syscall index
 
 The table includes every native `common` or `64` entry in Linux v6.12's
-x86-64 syscall table. Number gaps reserved by Linux are not syscalls and are
-therefore omitted.
+x86-64 syscall table, plus the later syscalls Linox implements (467,
+`open_tree_attr`, from Linux 6.15). Number gaps reserved by Linux are not
+syscalls and are therefore omitted.
 
 | Number | Syscall | Status |
 |---:|---|---|
@@ -946,6 +947,7 @@ therefore omitted.
 | 460 | lsm_set_self_attr | Partial |
 | 461 | lsm_list_modules | Partial |
 | 462 | mseal | Partial |
+| 467 | open_tree_attr | Partial |
 
 ## Completion requirements
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 matrix="${repo_root}/docs/LINUX-COMPATIBILITY.md"
-dispatcher="${repo_root}/kernel/src/arch/x86_64/cpu.rs"
+dispatcher="${repo_root}/kernel/src/arch/x86_64/cpu/linux_abi.rs"
 
 awk '
 BEGIN {
@@ -48,7 +48,8 @@ FNR == NR {
     have_previous = 1
     next
 }
-$0 ~ /^const LINUX_[A-Z0-9_]+_SYSCALL: u64 = [0-9]+;$/ {
+$0 ~ /^(pub(\([a-z]+\))? )?const LINUX_[A-Z0-9_]+_SYSCALL: u64 = [0-9]+;$/ {
+    sub(/^pub(\([a-z]+\))? /, "")
     constant = $2
     sub(/:$/, "", constant)
     number = $5
