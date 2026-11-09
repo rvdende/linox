@@ -1,5 +1,6 @@
+#![forbid(unsafe_code)]
+
 use super::*;
-use crate::trusted::scratch::ScratchBuffer;
 
 /// The text of the /proc/sys value a descriptor state names, as a read
 /// shows it: the domain's name for kernel/domainname, its core pattern for
@@ -1944,8 +1945,7 @@ pub(super) fn linux_user_namespace_file(state: u16) -> Option<&'static [u8]> {
 /// Renders /proc/meminfo from the frame allocator's counts.
 /// /proc/uptime: seconds since boot, and idle time, which Linox does not
 /// account and reports as zero.
-pub(super) fn linux_proc_uptime() -> &'static [u8] {
-    static UPTIME: ScratchBuffer<[u8; 32]> = ScratchBuffer::new([0; 32]);
+pub(super) fn linux_proc_uptime() -> Option<RegularFile> {
     // CLOCK_BOOTTIME as the reader's time namespace shows it.
     let centiseconds = linux_elapsed_nanoseconds()
         .unwrap_or(0)
@@ -1962,9 +1962,7 @@ pub(super) fn linux_proc_uptime() -> &'static [u8] {
             break;
         }
     }
-    // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
-    // the bytes before another read can rewrite them.
-    let buffer = unsafe { UPTIME.rewrite() };
+    let mut buffer = [0_u8; 32];
     let mut length = 0;
     for digit in digits[..count].iter().rev() {
         buffer[length] = *digit;
@@ -1982,7 +1980,7 @@ pub(super) fn linux_proc_uptime() -> &'static [u8] {
         buffer[length] = byte;
         length += 1;
     }
-    &buffer[..length]
+    RegularFile::generated(&buffer[..length])
 }
 
 /// The frames the current domain counts as its memory (total, free): the
@@ -2003,7 +2001,7 @@ pub(super) fn linux_domain_frame_counts() -> (u64, u64) {
     (total.min(budget), free.min(budget.saturating_sub(used)))
 }
 
-pub(super) fn linux_proc_meminfo() -> &'static [u8] {
+pub(super) fn linux_proc_meminfo() -> Option<RegularFile> {
     struct Buffer {
         bytes: [u8; 1024],
         length: usize,
@@ -2019,10 +2017,6 @@ pub(super) fn linux_proc_meminfo() -> &'static [u8] {
             Ok(())
         }
     }
-    static MEMINFO: ScratchBuffer<Buffer> = ScratchBuffer::new(Buffer {
-        bytes: [0; 1024],
-        length: 0,
-    });
     let (total, free) = linux_domain_frame_counts();
     let (total, free) = (total * 4, free * 4);
     let used = total - free;
@@ -2031,12 +2025,12 @@ pub(super) fn linux_proc_meminfo() -> &'static [u8] {
     let slab = crate::heap::slab_bytes() / 1024;
     let (swap_total, swap_free) = crate::linux_swap::totals(linux_execution_instance());
     let swap_cached = crate::linux_swap::cached_pages(linux_execution_instance()) * 4;
-    // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
-    // the bytes before another read can rewrite them.
-    let buffer = unsafe { MEMINFO.rewrite() };
-    buffer.length = 0;
+    let mut buffer = Buffer {
+        bytes: [0; 1024],
+        length: 0,
+    };
     let _ = core::fmt::Write::write_fmt(
-        buffer,
+        &mut buffer,
         format_args!(
             "MemTotal:       {total:>10} kB\nMemFree:        {free:>10} kB\n\
              MemAvailable:   {free:>10} kB\nBuffers:        {zero:>10} kB\n\
@@ -2059,7 +2053,7 @@ pub(super) fn linux_proc_meminfo() -> &'static [u8] {
             hugetlb = huge.total * 2048,
         ),
     );
-    &buffer.bytes[..buffer.length]
+    RegularFile::generated(&buffer.bytes[..buffer.length])
 }
 
 /// The program the link at absolute `path` names, when it is

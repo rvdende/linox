@@ -30,14 +30,11 @@
 //!
 //! A view can also be made of one frame-allocator page whose lease its
 //! holder keeps and admits to a device itself (the virtio queues in
-//! `arch/x86_64/pci.rs` and `linux_socket/virtio_net.rs`, which activate
-//! their own I/O MMU translations): [`DmaView::leased`] from the
-//! `FrameLease`, by any code, as `trusted::frame::Frame::leased` (and as
-//! sound as the lease, that module's known gap), or
-//! [`DmaView::from_direct_map`] from the physical address and its
-//! direct-map address, only in the `pci.rs` entry points `address_space.rs`
-//! calls with the pages it owns (`tools/architecture/check-kernel-unsafe.sh`
-//! keeps it there and in the memory layer).
+//! `arch/x86_64/pci.rs`, whose pages `address_space.rs` leases for the
+//! native network and block services, and `linux_socket/virtio_net.rs`,
+//! which activate their own I/O MMU translations): [`DmaView::leased`]
+//! from the `FrameLease`, by any code, as `trusted::frame::Frame::leased`
+//! (and as sound as the lease, that module's known gap).
 //!
 //! A `DmaSpan` does not own its pages: spans may be cloned, and an arena
 //! may hand pages it took back out again. Every access is volatile and
@@ -130,19 +127,10 @@ impl DmaView {
     /// the module comment).
     pub(crate) fn leased(lease: FrameLease) -> Option<Self> {
         let physical = lease.address();
-        Self::from_direct_map(
-            physical,
-            paging::direct_map_range_address(physical, PAGE_SIZE)?,
-        )
-    }
-
-    /// The frame at `physical`, if `address` is its direct-map address.
-    /// Only `pci.rs` and the memory layer call this (see the module
-    /// comment).
-    pub(crate) fn from_direct_map(physical: u64, address: usize) -> Option<Self> {
-        (physical.is_multiple_of(PAGE_SIZE as u64)
-            && paging::direct_map_range_address(physical, PAGE_SIZE) == Some(address))
-        .then(|| Self::new(address, PAGE_SIZE, physical))
+        let address = paging::direct_map_range_address(physical, PAGE_SIZE)?;
+        physical
+            .is_multiple_of(PAGE_SIZE as u64)
+            .then(|| Self::new(address, PAGE_SIZE, physical))
     }
 
     fn duplicate(&self) -> Self {

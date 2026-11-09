@@ -11,14 +11,16 @@
 //! - [`boot`]: the loader's boot handoff (the firmware memory map).
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
-//! - [`root`]: reading and reloading the page-table root register, and
-//!   loading the kernel's own root.
+//! - [`root`]: the page-table root register: reading it, reloading it,
+//!   and loading a root only the memory layer makes.
 //! - [`firmware`]: firmware (ACPI) tables viewed in place for parsing.
 //! - [`dma`]: DMA memory the drivers' devices reach: static pages claimed
 //!   by one driver instance at a time, a static pool sub-allocated by one
 //!   instance at a time, frame-allocator buffers, and views of leased
 //!   frames shared with a virtio device.
 //! - [`pixels`]: a display surface the console and /dev/fb0 draw into.
+//! - [`programs`]: the ring-3 test programs assembled into the kernel
+//!   image, as byte slices.
 //! - [`claim`]: a value one context at a time may claim, the others
 //!   skipping it while it is busy.
 //! - [`pci_config`]: PCI configuration space.
@@ -42,8 +44,6 @@
 //! - [`crash`]: the bring-up exception table, the live page-table walk and
 //!   the reads crash reports make.
 //! - [`take_once`]: a static handed out as `&'static mut` once.
-//! - [`scratch`]: a static buffer rewritten under the kernel-entry lock and
-//!   viewed until the next rewrite (generated /proc files).
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
 //! - [`owned_state`]: set-once owners for long-lived kernel objects.
@@ -76,9 +76,9 @@ pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod pixels;
 pub(crate) mod port;
+pub(crate) mod programs;
 pub(crate) mod random;
 pub(crate) mod root;
-pub(crate) mod scratch;
 pub(crate) mod take_once;
 pub(crate) mod tsc;
 pub(crate) mod user_copy;

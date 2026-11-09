@@ -15,7 +15,6 @@ extern crate alloc;
 #[cfg(all(target_os = "uefi", not(all(aes_force_soft, polyval_force_soft))))]
 compile_error!("the kernel must be built with --cfg aes_force_soft --cfg polyval_force_soft");
 
-#[allow(unsafe_code)]
 mod address_space;
 #[allow(unsafe_code)]
 mod arch;

@@ -950,7 +950,8 @@ pub(super) fn linux_runtime_mmap(
             let rootfs_entry = linux_rootfs_entry(fd);
             let Some(file) = rootfs_entry
                 .map(|entry| entry.data)
-                .or_else(|| linux_regular_file(state))
+                .map(RegularFile::Fixed)
+                .or_else(|| linux_regular_file_contents(state))
             else {
                 return if linux_descriptor_open(fd) {
                     LINUX_ENODEV
@@ -1070,8 +1071,8 @@ pub(super) fn linux_runtime_mmap(
                     crate::linux_overlay::read(handle, page_start, &mut overlay_bytes).unwrap_or(0);
                 &overlay_bytes[..length]
             } else {
-                file.map_or(&[][..], |(file, start)| {
-                    let page_start = start + page * PAGE_SIZE;
+                file.as_ref().map_or(&[][..], |(file, start)| {
+                    let page_start = *start + page * PAGE_SIZE;
                     file.get(page_start..file.len().min(page_start + PAGE_SIZE))
                         .unwrap_or(&[])
                 })
@@ -2468,7 +2469,8 @@ pub(super) fn linux_mmap(
             let state = linux_device_descriptor(fd);
             let Some(file) = linux_rootfs_entry(fd)
                 .map(|entry| entry.data)
-                .or_else(|| linux_regular_file(state))
+                .map(RegularFile::Fixed)
+                .or_else(|| linux_regular_file_contents(state))
             else {
                 return if linux_descriptor_open(fd) {
                     LINUX_ENODEV
@@ -2564,8 +2566,8 @@ pub(super) fn linux_mmap(
         return LINUX_ENOMEM;
     };
     for offset in 0..usize::from(pages) {
-        let bytes = file_source.map_or(&[][..], |(file, start)| {
-            let page_start = start + offset * PAGE_SIZE;
+        let bytes = file_source.as_ref().map_or(&[][..], |(file, start)| {
+            let page_start = *start + offset * PAGE_SIZE;
             &file[page_start..page_start.saturating_add(PAGE_SIZE).min(file.len())]
         });
         if !address_space::prepare_linux_frame(leases[offset].address(), bytes) {
@@ -2711,7 +2713,7 @@ fn linux_mmap_fixed_file(
         return LINUX_EINVAL;
     }
     let state = linux_device_descriptor(fd);
-    let Some(file) = linux_regular_file(state) else {
+    let Some(file) = linux_regular_file_contents(state) else {
         return if linux_descriptor_open(fd) {
             LINUX_ENODEV
         } else {

@@ -3446,13 +3446,6 @@ pub(crate) fn initialize_user_call_gate() -> bool {
         && user_interrupt_surface_is_minimal()
 }
 
-pub(crate) unsafe fn with_supervisor_user_access<T>(operation: impl FnOnce() -> T) -> T {
-    asm!("stac", options(nostack));
-    let result = operation();
-    asm!("clac", options(nostack));
-    result
-}
-
 /// A process's page-table frames and mapped pages. The lists are work
 /// areas as long as the largest address space seen lately (they grow when a
 /// walk fills them and shrink back); the first `*_count` entries are the

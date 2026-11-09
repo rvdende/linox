@@ -2575,7 +2575,9 @@ pub(super) fn linux_readahead(descriptor: u64, offset: u64, count: u64) -> u64 {
         // in-memory overlay's contents are resident already.
         let _ = crate::linux_blockfs::read_ahead(handle, offset, count);
         0
-    } else if linux_rootfs_entry(descriptor).is_some() || linux_regular_file(state).is_some() {
+    } else if linux_rootfs_entry(descriptor).is_some()
+        || linux_regular_file_contents(state).is_some()
+    {
         0
     } else {
         LINUX_EINVAL
@@ -3035,6 +3037,6 @@ pub(super) fn linux_file_size(state: u16) -> u64 {
             .and_then(linux_tmpfs::size)
             .map_or(0, |size| size as u64)
     } else {
-        linux_regular_file(state).map_or(0, |file| file.len() as u64)
+        linux_regular_file_contents(state).map_or(0, |file| file.len() as u64)
     }
 }

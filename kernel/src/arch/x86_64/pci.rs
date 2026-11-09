@@ -12,6 +12,7 @@ use crate::trusted::interrupts;
 use crate::trusted::{dma::DmaView, entry, mmio::Mmio};
 use crate::{
     control_abi,
+    memory::FrameLease,
     scheduler::{self, UserInterruptFrame},
     trusted::pci_config,
     volume,
@@ -1421,10 +1422,10 @@ pub(crate) fn prepare_network_for_isolated_service(
 pub(crate) fn activate_isolated_network_empty_queues(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma_page: FrameLease,
 ) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -1514,12 +1515,12 @@ pub(crate) fn arm_isolated_network_tx_interrupt(
 pub(crate) fn activate_isolated_network_interrupt_queues(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma_page: FrameLease,
     domain: u64,
     request: u64,
 ) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -1834,8 +1835,9 @@ pub(crate) fn quiesce_isolated_network_interrupt(
         && receive_retired
 }
 
-pub(crate) fn network_service_transmit_is_complete(dma_physical: u64, dma_virtual: usize) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn network_service_transmit_is_complete(dma_page: FrameLease) -> bool {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -1871,11 +1873,11 @@ pub(crate) fn network_service_transmit_is_complete(dma_physical: u64, dma_virtua
 }
 
 pub(crate) fn network_service_egress_transmit_count_is_complete(
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma_page: FrameLease,
     completed: u16,
 ) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -1916,11 +1918,9 @@ pub(crate) fn network_service_egress_transmit_count_is_complete(
     })
 }
 
-pub(crate) fn network_service_arp_exchange_is_complete(
-    dma_physical: u64,
-    dma_virtual: usize,
-) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn network_service_arp_exchange_is_complete(dma_page: FrameLease) -> bool {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -1986,8 +1986,9 @@ pub(crate) fn network_service_arp_exchange_is_complete(
     })
 }
 
-pub(crate) fn network_service_arp_reuse_is_complete(dma_physical: u64, dma_virtual: usize) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn network_service_arp_reuse_is_complete(dma_page: FrameLease) -> bool {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -2058,11 +2059,9 @@ pub(crate) fn network_service_arp_reuse_is_complete(dma_physical: u64, dma_virtu
     })
 }
 
-pub(crate) fn network_service_icmp_exchange_is_complete(
-    dma_physical: u64,
-    dma_virtual: usize,
-) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn network_service_icmp_exchange_is_complete(dma_page: FrameLease) -> bool {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -2117,11 +2116,9 @@ pub(crate) fn network_service_icmp_exchange_is_complete(
     })
 }
 
-pub(crate) fn network_service_dhcp_exchange_is_complete(
-    dma_physical: u64,
-    dma_virtual: usize,
-) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn network_service_dhcp_exchange_is_complete(dma_page: FrameLease) -> bool {
+    let dma_physical = dma_page.address();
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
@@ -2169,13 +2166,13 @@ pub(crate) fn network_service_dhcp_exchange_is_complete(
         && read_dma_u8(dma, rx + 42) == 2
 }
 
-pub(crate) fn corrupt_network_service_arp_reply(dma_physical: u64, dma_virtual: usize) -> bool {
-    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+pub(crate) fn corrupt_network_service_arp_reply(dma_page: FrameLease) -> bool {
+    let Some(dma) = DmaView::leased(dma_page) else {
         return false;
     };
     let dma = &dma;
     const ARP_OPERATION_LOW_BYTE: usize = NET_RX_BUFFER_OFFSET + 12 + 14 + 7;
-    if !network_service_arp_exchange_is_complete(dma_physical, dma_virtual) {
+    if !network_service_arp_exchange_is_complete(dma_page) {
         return false;
     }
     write_dma_u8(dma, ARP_OPERATION_LOW_BYTE, 3);

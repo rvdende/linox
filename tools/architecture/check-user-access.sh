@@ -33,12 +33,12 @@ for required in \
     rg -Fq "$required" "$address_space" || fail "missing audited user-copy API: $required"
 done
 
-# The SMAP-opening closure remains available only for page-table construction
-# and address-space verification. Syscall implementation code must use the
-# fault-recovering raw or public copy APIs instead of opening SMAP directly.
-cpu_smap_sites=$(rg -F 'with_supervisor_user_access' "${cpu_tree[@]}" | wc -l | tr -d ' ')
-[[ "$cpu_smap_sites" == 1 ]] || \
-    fail "expected only the helper definition in cpu.rs and cpu/, found $cpu_smap_sites sites"
+# SMAP is opened only by the fault-recovering copy loops: the closure that
+# opened it for arbitrary code (with_supervisor_user_access) is gone, and
+# address-space verification reads user memory through trusted::user_copy.
+smap_sites=$({ rg -F 'with_supervisor_user_access' "$root/kernel/src" || true; } | wc -l | tr -d ' ')
+[[ "$smap_sites" == 0 ]] || \
+    fail "with_supervisor_user_access is gone; found $smap_sites sites"
 
 if rg -Uq '\bas \*(const|mut) u(8|16|32|64)\)[[:space:]]*\.(read|write)(_volatile)?\(' "${cpu_tree[@]}"; then
     fail 'cpu.rs or cpu/ directly dereferences a cast userspace scalar pointer'

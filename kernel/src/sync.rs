@@ -44,6 +44,14 @@ impl LockRank {
     /// The mounts domains made; ranks below the heap so the table may grow
     /// while held, and above ARCHITECTURE, which system calls run under.
     pub(crate) const MOUNTS: Self = Self(105);
+    /// The auxiliary (native service) domains' address spaces
+    /// (`address_space`): taken by native service calls and the user-fault
+    /// path at system-call level, never under another lock. Held while it
+    /// binds and quiesces a domain's virtio device, so the domain manager,
+    /// the frame allocator, the I/O MMU and the scheduler are taken under
+    /// it and it ranks below them all; user copies are made before it is
+    /// taken.
+    pub(crate) const AUXILIARY_ADDRESS_SPACES: Self = Self(106);
     /// The UTS, IPC, PID and time namespaces domains made; ranks below the
     /// heap so the table may grow while held.
     pub(crate) const NAMESPACES: Self = Self(107);
@@ -200,6 +208,13 @@ impl LockRank {
     /// (`image_store`): a leaf, taken after the image store and the
     /// published root filesystems; images are freed after it is released.
     pub(crate) const ROOTFS_IMAGES: Self = Self(198);
+    /// Each domain slot's suspended init frames (`address_space`): a leaf
+    /// held only to copy the leases in or out.
+    pub(crate) const SUSPENDED_INIT_FRAMES: Self = Self(193);
+    /// The address-space clone and validation work lists
+    /// (`address_space::take_scratch`): a leaf held only to take a list out
+    /// or put it back; the lists are freed with it released.
+    pub(crate) const ADDRESS_SPACE_SCRATCH: Self = Self(199);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);

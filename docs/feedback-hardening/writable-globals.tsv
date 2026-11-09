@@ -1,8 +1,9 @@
 kind	file	symbol	ownership-group	disposition	migration-gate	contract
 static-mut	boot/efi/src/main.rs	MEMORY_MAP_STORAGE	bootstrap-init	allowlist	none	firmware-single-writer
-interior-mutable	kernel/src/address_space.rs	ADDRESS_SPACE_SERVICES	platform-device	allowlist	none	explicit-host-address-space-service-owner-root
-interior-mutable	kernel/src/address_space.rs	LINUX_PROCESS_SCRATCH	process-runtime	allowlist	none	explicit-process-scratch-owner-root
-interior-mutable	kernel/src/address_space.rs	LINUX_RUNTIME	domain-runtime	allowlist	none	explicit-domain-linux-runtime-owner-root
+interior-mutable	kernel/src/address_space.rs	ADDRESS_SPACE_SERVICES	platform-device	allowlist	none	ranked-auxiliary-address-space-registry-lock
+interior-mutable	kernel/src/address_space.rs	LINUX_PROCESS_CLONE_SCRATCH	process-runtime	allowlist	none	ranked-leaf-taken-and-returned-scratch-list
+interior-mutable	kernel/src/address_space.rs	LINUX_PROCESS_VALIDATION_SCRATCH	process-runtime	allowlist	none	ranked-leaf-taken-and-returned-scratch-list
+interior-mutable	kernel/src/address_space.rs	LINUX_RUNTIME	domain-runtime	allowlist	none	ranked-per-slot-suspended-init-frames-lock
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	BREAKPOINT_HANDLED	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	CONTROL_DESCRIPTOR_OVERRIDE_DOMAIN	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	CONTROL_DISCOVERY_OVERRIDE_DOMAIN	verification-only	allowlist	none	verification-build-only
@@ -539,9 +540,6 @@ interior-mutable	kernel/src/lib.rs	SERIAL_PRESENT	platform-device	allowlist	none
 interior-mutable	kernel/src/linux_process.rs	PROCESS_SCRATCH	process-runtime	allowlist	none	explicit-process-fork-scratch-owner-root
 interior-mutable	kernel/src/linux_process.rs	REFRESH_REJECTIONS	process-runtime	allowlist	none	diagnostic-counter
 static-mut	boot/efi/src/main.rs	BOOT_INFO	bootstrap-init	allowlist	none	firmware-single-writer
-interior-mutable	kernel/src/arch/x86_64/cpu/linux_procfs.rs	MEMINFO	shared-runtime	allowlist	none	serialized-proc-meminfo-render-buffer-in-trusted-scratch-buffer
-interior-mutable	kernel/src/arch/x86_64/cpu/linux_cgroupfs.rs	CGROUP_FILE	shared-runtime	allowlist	none	serialized-proc-cgroup-render-buffer-in-trusted-scratch-buffer
-interior-mutable	kernel/src/arch/x86_64/cpu/linux_procfs.rs	UPTIME	shared-runtime	allowlist	none	serialized-proc-uptime-render-buffer-in-trusted-scratch-buffer
 interior-mutable	kernel/src/bringup/mod.rs	PROBE	platform-device	allowlist	none	claimed-static-dma-pages
 interior-mutable	kernel/src/bringup/mod.rs	TRANSACTION	platform-device	allowlist	none	atomic-dhcp-transaction-counter
 interior-mutable	kernel/src/drivers/ahci.rs	BUFFERS	platform-device	allowlist	none	claimed-static-dma-pages

@@ -1,35 +1,72 @@
+#![forbid(unsafe_code)]
 use alloc::vec::Vec;
 use core::{
-    arch::{asm, global_asm},
-    cell::UnsafeCell,
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
 };
+
+use crate::owned_state::OwnedState;
+use crate::sync::{LockRank, SpinLock};
 
 /// Work lists for cloning and validating a process's address space, as long
 /// as the largest address space handled so far (they grow with the process,
 /// not to a fixed page limit).
+#[derive(Default)]
 struct LinuxProcessCloneScratch {
     visited_mappings: Vec<bool>,
     child_mappings: Vec<cpu::LinuxExecMapping>,
 }
 
-struct LinuxProcessScratchOwner {
-    clone: UnsafeCell<LinuxProcessCloneScratch>,
-    validation: UnsafeCell<Vec<bool>>,
+/// Takes the work list `slot` keeps between operations (so its memory is
+/// reused) for one operation, holding the lock only to take it and to put
+/// it back, so no lock is held across the work; an operation that finds it
+/// taken (a nested one) starts from an empty list.
+fn take_scratch<T: Default + 'static>(slot: &'static SpinLock<T>) -> TakenScratch<T> {
+    let value = core::mem::take(&mut *slot.lock());
+    TakenScratch { slot, value }
 }
 
-// SAFETY: the scratch lists are only used by address-space clones and
-// validations, which run under the kernel-entry lock and do not nest.
-unsafe impl Sync for LinuxProcessScratchOwner {}
+/// A work list taken from its slot, put back when dropped.
+struct TakenScratch<T: Default + 'static> {
+    slot: &'static SpinLock<T>,
+    value: T,
+}
 
-static LINUX_PROCESS_SCRATCH: LinuxProcessScratchOwner = LinuxProcessScratchOwner {
-    clone: UnsafeCell::new(LinuxProcessCloneScratch {
+impl<T: Default + 'static> Deref for TakenScratch<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: Default + 'static> DerefMut for TakenScratch<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T: Default + 'static> Drop for TakenScratch<T> {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock();
+        let displaced = core::mem::replace(&mut *slot, core::mem::take(&mut self.value));
+        drop(slot);
+        // A list a nested operation put back meanwhile is freed with the
+        // lock released (the lock ranks above the heap's).
+        drop(displaced);
+    }
+}
+
+static LINUX_PROCESS_CLONE_SCRATCH: SpinLock<LinuxProcessCloneScratch> = SpinLock::new(
+    LockRank::ADDRESS_SPACE_SCRATCH,
+    LinuxProcessCloneScratch {
         visited_mappings: Vec::new(),
         child_mappings: Vec::new(),
-    }),
-    validation: UnsafeCell::new(Vec::new()),
-};
+    },
+);
+static LINUX_PROCESS_VALIDATION_SCRATCH: SpinLock<Vec<bool>> =
+    SpinLock::new(LockRank::ADDRESS_SPACE_SCRATCH, Vec::new());
 
 /// Makes `list` `length` copies of `value`, reusing its buffer; `None` when
 /// memory for it runs out. A buffer much larger than needed is given back.
@@ -97,65 +134,14 @@ use crate::{
     domain, ipc, memory, network, packet, scheduler,
     trusted::{
         frame::Frame,
+        interrupts,
         page_table::{invalidate_page, PageEntry, PageTable},
+        programs::{self, Program},
+        root::{self, Root},
+        user_copy,
     },
     volume,
 };
-
-global_asm!(include_str!("../volume-service.S"));
-global_asm!(include_str!("../packet-consumer.S"));
-global_asm!(include_str!("../packet-wait.S"));
-global_asm!(include_str!("../packet-backpressure.S"));
-global_asm!(include_str!("../packet-protocol-loop.S"));
-global_asm!(include_str!("../packet-ipv4.S"));
-global_asm!(include_str!("../packet-egress-consumer.S"));
-global_asm!(include_str!("../packet-egress-wait.S"));
-global_asm!(include_str!("../packet-egress-backpressure.S"));
-global_asm!(include_str!("../packet-egress-ack-backpressure.S"));
-global_asm!(include_str!("../packet-egress-reuse.S"));
-global_asm!(include_str!("../packet-egress-batch.S"));
-
-extern "C" {
-    fn linox_volume_writer_start();
-    fn linox_volume_writer_fault();
-    fn linox_volume_writer_end();
-    fn linox_volume_reader_start();
-    fn linox_volume_reader_end();
-    fn linox_packet_consumer_start();
-    fn linox_packet_consumer_end();
-    fn linox_packet_wait_producer_start();
-    fn linox_packet_wait_producer_end();
-    fn linox_packet_wait_consumer_start();
-    fn linox_packet_wait_consumer_end();
-    fn linox_packet_wait_stop_helper_start();
-    fn linox_packet_wait_stop_helper_end();
-    fn linox_packet_wait_timeout_consumer_start();
-    fn linox_packet_wait_timeout_consumer_end();
-    fn linox_packet_wait_timeout_helper_start();
-    fn linox_packet_wait_timeout_helper_end();
-    fn linox_packet_egress_wait_producer_start();
-    fn linox_packet_egress_wait_producer_end();
-    fn linox_packet_egress_backpressure_producer_start();
-    fn linox_packet_egress_backpressure_producer_end();
-    fn linox_packet_egress_backpressure_consumer_start();
-    fn linox_packet_egress_backpressure_consumer_end();
-    fn linox_packet_egress_ack_backpressure_producer_start();
-    fn linox_packet_egress_ack_backpressure_producer_end();
-    fn linox_packet_egress_reuse_producer_start();
-    fn linox_packet_egress_reuse_producer_end();
-    fn linox_packet_egress_batch_producer_start();
-    fn linox_packet_egress_batch_producer_end();
-    fn linox_packet_backpressure_producer_start();
-    fn linox_packet_backpressure_producer_end();
-    fn linox_packet_backpressure_consumer_start();
-    fn linox_packet_backpressure_consumer_end();
-    fn linox_packet_protocol_loop_producer_start();
-    fn linox_packet_protocol_loop_producer_end();
-    fn linox_packet_ipv4_producer_start();
-    fn linox_packet_ipv4_producer_end();
-    fn linox_packet_egress_consumer_start();
-    fn linox_packet_egress_consumer_end();
-}
 
 const PAGE_SIZE: usize = 4096;
 const ENTRY_COUNT: usize = 512;
@@ -211,56 +197,59 @@ pub(crate) const USER_ADDRESS_SPACE_FRAMES: usize = 7;
 const PAGE_ATTRIBUTE_TABLE: u64 = 1 << 12;
 
 struct AddressSpaceServicesOwner {
+    /// The auxiliary services' address spaces (see
+    /// `LockRank::AUXILIARY_ADDRESS_SPACES`).
     auxiliary_address_spaces:
-        UnsafeCell<[Option<RegisteredAuxiliaryAddressSpace>; domain::MAX_AUXILIARY_SERVICES]>,
+        SpinLock<[Option<RegisteredAuxiliaryAddressSpace>; domain::MAX_AUXILIARY_SERVICES]>,
     native_volume_completion: AtomicU8,
     last_unsafe_device_quiesce_domain: AtomicU64,
     last_unsafe_device_quiesce_was_active: AtomicBool,
-    interactive_controller_image: AtomicUsize,
-    interactive_controller_image_size: AtomicUsize,
+    /// The embedded interactive controller, installed once at boot.
+    interactive_controller_image: OwnedState<&'static [u8]>,
     interactive_controller_domain: AtomicU64,
 }
 
-// SAFETY: the auxiliary registry is reached only from domain control
-// paths serialized by the kernel-entry lock; the other fields are atomics.
-unsafe impl Sync for AddressSpaceServicesOwner {}
-
 static ADDRESS_SPACE_SERVICES: AddressSpaceServicesOwner = AddressSpaceServicesOwner {
-    auxiliary_address_spaces: UnsafeCell::new([const { None }; domain::MAX_AUXILIARY_SERVICES]),
+    auxiliary_address_spaces: SpinLock::new(
+        LockRank::AUXILIARY_ADDRESS_SPACES,
+        [const { None }; domain::MAX_AUXILIARY_SERVICES],
+    ),
     native_volume_completion: AtomicU8::new(0),
     last_unsafe_device_quiesce_domain: AtomicU64::new(0),
     last_unsafe_device_quiesce_was_active: AtomicBool::new(false),
-    interactive_controller_image: AtomicUsize::new(0),
-    interactive_controller_image_size: AtomicUsize::new(0),
+    interactive_controller_image: OwnedState::empty(),
     interactive_controller_domain: AtomicU64::new(0),
 };
 // An init image may fill every image mapping slot that exec allows; the heap
 // and stack pages come from the same extent.
 const LINUX_RUNTIME_FRAME_CAPACITY: usize = cpu::LINUX_ACTIVE_IMAGE_MAPPING_LIMIT + 64;
 const LINUX_OWNED_FRAME_COUNT: usize = 10;
-struct LinuxRuntimeOwner {
-    active: [AtomicBool; crate::control_abi::DOMAIN_LIMIT],
-    owned_frames: UnsafeCell<
-        [[memory::FrameLease; LINUX_OWNED_FRAME_COUNT]; crate::control_abi::DOMAIN_LIMIT],
-    >,
-    runtime_frames: UnsafeCell<
-        [[memory::FrameLease; LINUX_RUNTIME_FRAME_CAPACITY]; crate::control_abi::DOMAIN_LIMIT],
-    >,
+/// The frames of a domain's suspended init: its page-table hierarchy and
+/// kernel-owned pages, and its runtime extent.
+#[derive(Clone, Copy)]
+struct SuspendedInitFrames {
+    owned: [memory::FrameLease; LINUX_OWNED_FRAME_COUNT],
+    runtime: [memory::FrameLease; LINUX_RUNTIME_FRAME_CAPACITY],
 }
 
-// SAFETY: a domain's slot is written only by its own runtime launch and
-// resume, which the kernel-entry lock serializes; `active` is atomic.
-unsafe impl Sync for LinuxRuntimeOwner {}
+impl SuspendedInitFrames {
+    const EMPTY: Self = Self {
+        owned: [memory::FrameLease::EMPTY; LINUX_OWNED_FRAME_COUNT],
+        runtime: [memory::FrameLease::EMPTY; LINUX_RUNTIME_FRAME_CAPACITY],
+    };
+}
+
+struct LinuxRuntimeOwner {
+    active: [AtomicBool; crate::control_abi::DOMAIN_LIMIT],
+    /// Each domain slot's suspended init, written by its own runtime launch
+    /// and resume: a leaf held only to copy the leases in or out.
+    frames: [SpinLock<SuspendedInitFrames>; crate::control_abi::DOMAIN_LIMIT],
+}
 
 static LINUX_RUNTIME: LinuxRuntimeOwner = LinuxRuntimeOwner {
     active: [const { AtomicBool::new(false) }; crate::control_abi::DOMAIN_LIMIT],
-    owned_frames: UnsafeCell::new(
-        [[memory::FrameLease::EMPTY; LINUX_OWNED_FRAME_COUNT]; crate::control_abi::DOMAIN_LIMIT],
-    ),
-    runtime_frames: UnsafeCell::new(
-        [[memory::FrameLease::EMPTY; LINUX_RUNTIME_FRAME_CAPACITY];
-            crate::control_abi::DOMAIN_LIMIT],
-    ),
+    frames: [const { SpinLock::new(LockRank::SUSPENDED_INIT_FRAMES, SuspendedInitFrames::EMPTY) };
+        crate::control_abi::DOMAIN_LIMIT],
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -278,49 +267,28 @@ pub(crate) fn linux_runtime_is_suspended(slot: usize) -> bool {
 }
 
 pub(crate) fn install_interactive_controller_image(
-    image: &crate::native_elf::NativeImage<'_>,
+    image: &crate::native_elf::NativeImage<'static>,
 ) -> bool {
-    if image.bytes.is_empty()
-        || ADDRESS_SPACE_SERVICES
+    !image.bytes.is_empty()
+        && ADDRESS_SPACE_SERVICES
             .interactive_controller_image
-            .compare_exchange(
-                0,
-                image.bytes.as_ptr() as usize,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-    {
-        return false;
-    }
-    ADDRESS_SPACE_SERVICES
-        .interactive_controller_image_size
-        .store(image.bytes.len(), Ordering::Release);
-    true
+            .try_install(image.bytes)
+            .is_ok()
 }
 
 pub(crate) fn run_installed_interactive_controller() -> bool {
-    let address = ADDRESS_SPACE_SERVICES
-        .interactive_controller_image
-        .load(Ordering::Acquire);
-    let size = ADDRESS_SPACE_SERVICES
-        .interactive_controller_image_size
-        .load(Ordering::Acquire);
-    if address == 0 || size == 0 {
+    // The measured controller embedded in the boot image, immutable for the
+    // whole boot.
+    let Some(&bytes) = ADDRESS_SPACE_SERVICES.interactive_controller_image.get() else {
         return false;
-    }
-    // SAFETY: installation accepts the measured controller slice embedded in
-    // the boot image, whose storage remains immutable for the entire boot.
-    let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, size) };
+    };
     let linux_root = current_root();
     let kernel_root = paging::kernel_root_address();
-    // SAFETY: the kernel's root maps the whole kernel and stays live.
-    unsafe { activate(kernel_root) };
+    activate(kernel_root);
     let valid = current_root() == kernel_root
         && crate::native_elf::inspect_controller(bytes)
             .is_some_and(|image| run_interactive_controller(&image));
-    // SAFETY: this root was active on entry and its address space is still live.
-    unsafe { activate(linux_root) };
+    activate(linux_root);
     valid && current_root() == linux_root
 }
 
@@ -619,9 +587,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         let loader_code = plan.loader_executable()?;
         stage = 6;
 
-        // SAFETY: a live process root built by this module, holding the kernel's entries (see
-        // `activate`).
-        unsafe { activate(root.address()) };
+        activate(root.address());
         let result = cpu::verify_linux_elf_entry(&cpu::LinuxElfExecution {
             runtime: true,
             entry: startup.initial_entry as usize,
@@ -664,24 +630,20 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
             system_init: false,
             initial_image_mappings: &initial_image_mappings[..initial_image_count],
         });
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(kernel_root) };
+        activate(kernel_root);
         stage = 7;
         (current_root() == kernel_root).then_some(result)
     })()
     .unwrap_or(cpu::LinuxElfResult::FAILED);
     let valid = result.valid;
     if current_root() != kernel_root {
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(kernel_root) };
+        activate(kernel_root);
     }
     if valid && result.suspended {
-        // SAFETY: only this slot's runtime touches its entries (see
-        // `LinuxRuntimeOwner`).
-        unsafe {
-            (*LINUX_RUNTIME.owned_frames.get())[slot] = frames;
-            (*LINUX_RUNTIME.runtime_frames.get())[slot] = runtime_frames;
-        }
+        *LINUX_RUNTIME.frames[slot].lock() = SuspendedInitFrames {
+            owned: frames,
+            runtime: runtime_frames,
+        };
         LINUX_RUNTIME.active[slot].store(true, Ordering::Release);
         return LinuxProcessOutcome::Suspended;
     }
@@ -744,31 +706,19 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
 }
 
 fn resume_linux_init(slot: usize, mmap: u64) -> LinuxProcessOutcome {
-    // SAFETY: as in `run_linux_init`.
-    let (frames, runtime_frames) = unsafe {
-        (
-            (*LINUX_RUNTIME.owned_frames.get())[slot],
-            (*LINUX_RUNTIME.runtime_frames.get())[slot],
-        )
-    };
+    let SuspendedInitFrames {
+        owned: frames,
+        runtime: runtime_frames,
+    } = *LINUX_RUNTIME.frames[slot].lock();
     let kernel_root = current_root();
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(frames[0].address()) };
+    activate(frames[0].address());
     let result = cpu::resume_suspended_linux_runtime(mmap);
-    // SAFETY: the kernel's root maps the whole kernel and stays live.
-    unsafe { activate(kernel_root) };
+    activate(kernel_root);
     if result.valid && result.suspended {
         return LinuxProcessOutcome::Suspended;
     }
     LINUX_RUNTIME.active[slot].store(false, Ordering::Release);
-    // SAFETY: as in `run_linux_init`.
-    unsafe {
-        (*LINUX_RUNTIME.owned_frames.get())[slot] =
-            [memory::FrameLease::EMPTY; LINUX_OWNED_FRAME_COUNT];
-        (*LINUX_RUNTIME.runtime_frames.get())[slot] =
-            [memory::FrameLease::EMPTY; LINUX_RUNTIME_FRAME_CAPACITY];
-    }
+    *LINUX_RUNTIME.frames[slot].lock() = SuspendedInitFrames::EMPTY;
     let released = memory::scrub_runtime_extent(runtime_frames)
         && memory::release_frames(
             memory::FrameOwner::KERNEL,
@@ -998,7 +948,7 @@ pub(crate) fn verify_linux_elf_mapping(
     let mut exec_heap_frame = None;
     let mut exec_page_table_frames = [None; 6];
     let valid = (|| -> Option<bool> {
-        unsafe {
+        {
             for frame in [root, pdpt, directory, table, header_table] {
                 zero_frame(frame)?;
             }
@@ -1375,14 +1325,13 @@ pub(crate) fn verify_linux_elf_mapping(
                     &rollback_mappings[..exec_mapping_count],
                     &initial_image_mappings[..initial_image_count],
                 );
-            let observed = cpu::with_supervisor_user_access(|| {
-                (first.virtual_address as *const u8).read_volatile() == first.bytes[0]
-                    && (second.virtual_address as *const u64).read_volatile()
-                        == u64::from_le_bytes(*b"PROBE!!\n")
+            let observed = {
+                user_u8(first.virtual_address) == Some(first.bytes[0])
+                    && user_u64(second.virtual_address) == Some(u64::from_le_bytes(*b"PROBE!!\n"))
                     && header.is_none_or(|segment| {
-                        (segment.virtual_address as *const u8).read_volatile() == segment.bytes[0]
+                        user_u8(segment.virtual_address) == Some(segment.bytes[0])
                     })
-            });
+            };
             let execution_result = if exec_rollback_valid && observed {
                 crate::serial_write("linox: entering Linux ELF verification process\r\n");
                 cpu::verify_linux_elf_entry(&cpu::LinuxElfExecution {
@@ -1539,8 +1488,7 @@ pub(crate) fn verify_linux_elf_mapping(
     // loaded; they are scrubbed below, and the kernel would then fetch its
     // own code through zeroed tables.
     if current_root() != kernel_root_physical {
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(kernel_root_physical) };
+        activate(kernel_root_physical);
     }
     let cleared = frames.iter().enumerate().all(|(index, frame)| {
         if memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]) {
@@ -2104,7 +2052,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
     let mut exec_sibling_stack_frame = None;
     let mut exec_page_table_frames = [None; 6];
     let valid = (|| -> Option<bool> {
-        unsafe {
+        {
             for frame in [
                 root,
                 pdpt,
@@ -2330,67 +2278,65 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 && stack_bytes.read_u64(stack_words + 14) == startup.interpreter_base
                 && stack_bytes.read_u64(stack_words + 30) == startup.main_entry;
             activate(root);
-            let observed = current_root() == root
-                && cpu::with_supervisor_user_access(|| {
-                    (interpreter_rx.virtual_address as *const u8).read_volatile() == 0x7f
-                        && (plan.initial_entry as *const u8).read_volatile() == 0x48
-                        && ((interpreter_rx.virtual_page + PAGE_SIZE as u64) as *const u8)
-                            .read_volatile()
-                            == interpreter_rx.bytes[PAGE_SIZE]
-                        && (interpreter_rw.virtual_address as *const u64).read_volatile()
-                            == u64::from_le_bytes(*b"DYNAMIC!")
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + auxiliary_tls_start_offset) as *const u8,
-                            auxiliary_tls.bytes.len(),
-                        ) == auxiliary_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
-                                + auxiliary_tls_start_offset
-                                + auxiliary_tls.bytes.len())
-                                as *const u8,
-                            auxiliary_tls_memory_size - auxiliary_tls.bytes.len(),
-                        )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + dependency_tls_start_offset) as *const u8,
-                            dependency_tls.bytes.len(),
-                        ) == dependency_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
-                                + dependency_tls_start_offset
-                                + dependency_tls.bytes.len())
-                                as *const u8,
-                            dependency_tls_memory_size - dependency_tls.bytes.len(),
-                        )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + main_tls_start_offset) as *const u8,
-                            main_tls.bytes.len(),
-                        ) == main_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
-                                + main_tls_start_offset
-                                + main_tls.bytes.len()) as *const u8,
-                            main_tls_memory_size - main_tls.bytes.len(),
-                        )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && (tls_base as *const u64).read_volatile() == tls_base
-                        && ((tls_base + size_of::<u64>() as u64) as *const u64).read_volatile() == 0
-                        && core::slice::from_raw_parts(
-                            (sibling_tls_virtual_page as usize + tls_start_offset) as *const u8,
+            let observed = current_root() == root && {
+                user_u8(interpreter_rx.virtual_address) == Some(0x7f)
+                    && user_u8(plan.initial_entry) == Some(0x48)
+                    && user_u8(interpreter_rx.virtual_page + PAGE_SIZE as u64)
+                        == Some(interpreter_rx.bytes[PAGE_SIZE])
+                    && user_u64(interpreter_rw.virtual_address)
+                        == Some(u64::from_le_bytes(*b"DYNAMIC!"))
+                    && user_bytes(
+                        tls_virtual_page as usize + auxiliary_tls_start_offset,
+                        auxiliary_tls.bytes.len(),
+                    )
+                    .as_deref()
+                        == Some(auxiliary_tls.bytes)
+                    && user_bytes(
+                        tls_virtual_page as usize
+                            + auxiliary_tls_start_offset
+                            + auxiliary_tls.bytes.len(),
+                        auxiliary_tls_memory_size - auxiliary_tls.bytes.len(),
+                    )
+                    .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                    && user_bytes(
+                        tls_virtual_page as usize + dependency_tls_start_offset,
+                        dependency_tls.bytes.len(),
+                    )
+                    .as_deref()
+                        == Some(dependency_tls.bytes)
+                    && user_bytes(
+                        tls_virtual_page as usize
+                            + dependency_tls_start_offset
+                            + dependency_tls.bytes.len(),
+                        dependency_tls_memory_size - dependency_tls.bytes.len(),
+                    )
+                    .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                    && user_bytes(
+                        tls_virtual_page as usize + main_tls_start_offset,
+                        main_tls.bytes.len(),
+                    )
+                    .as_deref()
+                        == Some(main_tls.bytes)
+                    && user_bytes(
+                        tls_virtual_page as usize + main_tls_start_offset + main_tls.bytes.len(),
+                        main_tls_memory_size - main_tls.bytes.len(),
+                    )
+                    .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                    && user_u64(tls_base) == Some(tls_base)
+                    && user_u64(tls_base + size_of::<u64>() as u64) == Some(0)
+                    && user_bytes(
+                        sibling_tls_virtual_page as usize + tls_start_offset,
+                        tls_extent_size - LINUX_TLS_TCB_SIZE,
+                    )
+                    .is_some_and(|bytes| {
+                        user_bytes(
+                            tls_virtual_page as usize + tls_start_offset,
                             tls_extent_size - LINUX_TLS_TCB_SIZE,
-                        ) == core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + tls_start_offset) as *const u8,
-                            tls_extent_size - LINUX_TLS_TCB_SIZE,
-                        )
-                        && (sibling_tls_base as *const u64).read_volatile() == sibling_tls_base
-                        && ((sibling_tls_base + size_of::<u64>() as u64) as *const u64)
-                            .read_volatile()
-                            == 0
-                });
+                        ) == Some(bytes)
+                    })
+                    && user_u64(sibling_tls_base) == Some(sibling_tls_base)
+                    && user_u64(sibling_tls_base + size_of::<u64>() as u64) == Some(0)
+            };
             let file_mapping = |segment: crate::linux_elf::PlannedSegment<'_>, page| {
                 Some(cpu::LinuxFileMapping {
                     address: usize::try_from(
@@ -2589,47 +2535,48 @@ pub(crate) fn verify_interpreted_elf_mapping(
                         | USER
                         | WRITABLE
                         | NO_EXECUTE
-                && cpu::with_supervisor_user_access(|| {
-                    core::slice::from_raw_parts(
-                        (tls_virtual_page as usize + auxiliary_tls_start_offset) as *const u8,
+                && {
+                    user_bytes(
+                        tls_virtual_page as usize + auxiliary_tls_start_offset,
                         auxiliary_tls.bytes.len(),
-                    ) == auxiliary_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
+                    )
+                    .as_deref()
+                        == Some(auxiliary_tls.bytes)
+                        && user_bytes(
+                            tls_virtual_page as usize
                                 + auxiliary_tls_start_offset
-                                + auxiliary_tls.bytes.len())
-                                as *const u8,
+                                + auxiliary_tls.bytes.len(),
                             auxiliary_tls_memory_size - auxiliary_tls.bytes.len(),
                         )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + dependency_tls_start_offset) as *const u8,
+                        .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                        && user_bytes(
+                            tls_virtual_page as usize + dependency_tls_start_offset,
                             dependency_tls.bytes.len(),
-                        ) == dependency_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
+                        )
+                        .as_deref()
+                            == Some(dependency_tls.bytes)
+                        && user_bytes(
+                            tls_virtual_page as usize
                                 + dependency_tls_start_offset
-                                + dependency_tls.bytes.len())
-                                as *const u8,
+                                + dependency_tls.bytes.len(),
                             dependency_tls_memory_size - dependency_tls.bytes.len(),
                         )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize + main_tls_start_offset) as *const u8,
+                        .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                        && user_bytes(
+                            tls_virtual_page as usize + main_tls_start_offset,
                             main_tls.bytes.len(),
-                        ) == main_tls.bytes
-                        && core::slice::from_raw_parts(
-                            (tls_virtual_page as usize
+                        )
+                        .as_deref()
+                            == Some(main_tls.bytes)
+                        && user_bytes(
+                            tls_virtual_page as usize
                                 + main_tls_start_offset
-                                + main_tls.bytes.len()) as *const u8,
+                                + main_tls.bytes.len(),
                             main_tls_memory_size - main_tls.bytes.len(),
                         )
-                        .iter()
-                        .all(|byte| *byte == 0)
-                        && (tls_base as *const u64).read_volatile() == tls_base
-                });
+                        .is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+                        && user_u64(tls_base) == Some(tls_base)
+                };
             let sibling_tls_runtime_valid = executed
                 && main_entries.get(sibling_tls_indexes[3])
                     & (ADDRESS_MASK | PRESENT | USER | WRITABLE | NO_EXECUTE)
@@ -2638,16 +2585,19 @@ pub(crate) fn verify_interpreted_elf_mapping(
                         | USER
                         | WRITABLE
                         | NO_EXECUTE
-                && cpu::with_supervisor_user_access(|| {
-                    core::slice::from_raw_parts(
-                        (sibling_tls_virtual_page as usize + tls_start_offset) as *const u8,
+                && {
+                    user_bytes(
+                        sibling_tls_virtual_page as usize + tls_start_offset,
                         tls_extent_size - LINUX_TLS_TCB_SIZE,
-                    ) == core::slice::from_raw_parts(
-                        (tls_virtual_page as usize + tls_start_offset) as *const u8,
-                        tls_extent_size - LINUX_TLS_TCB_SIZE,
-                    ) && (sibling_tls_base as *const u64).read_volatile() == sibling_tls_base
+                    )
+                    .is_some_and(|bytes| {
+                        user_bytes(
+                            tls_virtual_page as usize + tls_start_offset,
+                            tls_extent_size - LINUX_TLS_TCB_SIZE,
+                        ) == Some(bytes)
+                    }) && user_u64(sibling_tls_base) == Some(sibling_tls_base)
                         && sibling_tls_base != tls_base
-                });
+                };
             let sibling_stack_runtime_valid = executed
                 && main_entries.get(sibling_stack_lower_guard_indexes[3]) == 0
                 && main_entries.get(sibling_stack_indexes[3])
@@ -2712,18 +2662,15 @@ pub(crate) fn verify_interpreted_elf_mapping(
                             })
                 });
             let selected_dependency_base = selected_dependency_bases[0];
-            let interpreter_relocated = cpu::with_supervisor_user_access(|| {
-                (interpreter_dynamic.relocation_target as *const u64).read_volatile()
-                    == interpreter_relocation_value
-            });
-            let main_image_valid = executed
-                && main_permissions_valid
-                && cpu::with_supervisor_user_access(|| {
-                    (main_ro.virtual_address as *const u8).read_volatile() == 0x7f
-                        && (main_rx.virtual_address as *const u8).read_volatile()
-                            == main_rx.bytes[0]
-                        && (plan.main.entry as *const u8).read_volatile() == 0x48
-                });
+            let interpreter_relocated = {
+                user_u64(interpreter_dynamic.relocation_target)
+                    == Some(interpreter_relocation_value)
+            };
+            let main_image_valid = executed && main_permissions_valid && {
+                user_u8(main_ro.virtual_address) == Some(0x7f)
+                    && user_u8(main_rx.virtual_address) == Some(main_rx.bytes[0])
+                    && user_u8(plan.main.entry) == Some(0x48)
+            };
             let (
                 main_preinit_value,
                 main_relative_value,
@@ -2732,16 +2679,14 @@ pub(crate) fn verify_interpreted_elf_mapping(
                 main_auxiliary_symbol_value,
                 main_auxiliary_jump_value,
             ) = if main_image_valid {
-                cpu::with_supervisor_user_access(|| {
-                    (
-                        (main_preinit_target as *const u64).read_volatile(),
-                        (main_dynamic.relocation_target as *const u64).read_volatile(),
-                        (main_symbol.target as *const u64).read_volatile(),
-                        (main_jump_slot.target as *const u64).read_volatile(),
-                        (main_auxiliary_symbol.target as *const u64).read_volatile(),
-                        (main_auxiliary_jump_slot.target as *const u64).read_volatile(),
-                    )
-                })
+                (
+                    user_u64(main_preinit_target).unwrap_or(u64::MAX),
+                    user_u64(main_dynamic.relocation_target).unwrap_or(u64::MAX),
+                    user_u64(main_symbol.target).unwrap_or(u64::MAX),
+                    user_u64(main_jump_slot.target).unwrap_or(u64::MAX),
+                    user_u64(main_auxiliary_symbol.target).unwrap_or(u64::MAX),
+                    user_u64(main_auxiliary_jump_slot.target).unwrap_or(u64::MAX),
+                )
             } else {
                 (0, 0, 0, 0, 0, 0)
             };
@@ -2771,21 +2716,19 @@ pub(crate) fn verify_interpreted_elf_mapping(
                             ))
                             .is_some_and(
                                 |(((relative_target, symbol_target), jump_target), tls_target)| {
-                                    cpu::with_supervisor_user_access(|| {
-                                        (actual_dependency_rx as *const u8).read_volatile()
-                                            == dependency_rx.bytes[0]
-                                            && (actual_dependency_entry as *const u8)
-                                                .read_volatile()
-                                                == dependency_entry_byte
-                                            && (relative_target as *const u64).read_volatile()
-                                                == actual_dependency_relative_value
-                                            && (symbol_target as *const u64).read_volatile()
-                                                == actual_dependency_entry
-                                            && (jump_target as *const u64).read_volatile()
-                                                == actual_dependency_entry
-                                            && (tls_target as *const u64).read_volatile()
-                                                == dependency_tls_offset
-                                    })
+                                    {
+                                        user_u8(actual_dependency_rx)
+                                            == Some(dependency_rx.bytes[0])
+                                            && user_u8(actual_dependency_entry)
+                                                == Some(dependency_entry_byte)
+                                            && user_u64(relative_target)
+                                                == Some(actual_dependency_relative_value)
+                                            && user_u64(symbol_target)
+                                                == Some(actual_dependency_entry)
+                                            && user_u64(jump_target)
+                                                == Some(actual_dependency_entry)
+                                            && user_u64(tls_target) == Some(dependency_tls_offset)
+                                    }
                                 },
                             )
                     },
@@ -2819,20 +2762,17 @@ pub(crate) fn verify_interpreted_elf_mapping(
                             .zip(relocate_auxiliary_address(auxiliary_tls_relocation_target))
                             .is_some_and(
                                 |(((relative_target, symbol_target), jump_target), tls_target)| {
-                                    cpu::with_supervisor_user_access(|| {
-                                        (actual_auxiliary_rx as *const u8).read_volatile()
-                                            == auxiliary_rx.bytes[0]
-                                            && (actual_auxiliary_entry as *const u8).read_volatile()
-                                                == auxiliary_entry_byte
-                                            && (relative_target as *const u64).read_volatile()
-                                                == actual_auxiliary_relative_value
-                                            && (symbol_target as *const u64).read_volatile()
-                                                == actual_auxiliary_entry
-                                            && (jump_target as *const u64).read_volatile()
-                                                == actual_auxiliary_entry
-                                            && (tls_target as *const u64).read_volatile()
-                                                == auxiliary_tls_offset
-                                    })
+                                    {
+                                        user_u8(actual_auxiliary_rx) == Some(auxiliary_rx.bytes[0])
+                                            && user_u8(actual_auxiliary_entry)
+                                                == Some(auxiliary_entry_byte)
+                                            && user_u64(relative_target)
+                                                == Some(actual_auxiliary_relative_value)
+                                            && user_u64(symbol_target)
+                                                == Some(actual_auxiliary_entry)
+                                            && user_u64(jump_target) == Some(actual_auxiliary_entry)
+                                            && user_u64(tls_target) == Some(auxiliary_tls_offset)
+                                    }
                                 },
                             )
                     },
@@ -2928,8 +2868,7 @@ pub(crate) fn verify_interpreted_elf_mapping(
     // loaded; they are scrubbed below, and the kernel would then fetch its
     // own code through zeroed tables.
     if current_root() != kernel_root_physical {
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(kernel_root_physical) };
+        activate(kernel_root_physical);
     }
     let cleared = frames.iter().enumerate().all(|(index, frame)| {
         if memory::frames_owned_by(memory::FrameOwner::KERNEL, &[*frame]) {
@@ -3130,12 +3069,10 @@ pub(crate) fn copy_from_current_user_partial(address: u64, output: &mut [u8]) ->
     if !current_user_root_is_owned(root) {
         return 0;
     }
-    // SAFETY: the range lies in the user half of an address space this
-    // kernel owns; the fault-recovering copy turns an unmapped page into a
-    // short copy, and `output` is a kernel buffer of the copied length.
-    let remaining =
-        unsafe { cpu::raw_copy_from_user(output.as_mut_ptr(), address as *const u8, output.len()) };
-    output.len().saturating_sub(remaining)
+    // The range lies in the user half of an address space this kernel
+    // owns; the copy stops at the first page that is not a user page or
+    // faults.
+    user_copy::copy_from_user(address, output)
 }
 
 pub(crate) fn copy_to_current_user(address: u64, input: &[u8]) -> bool {
@@ -3156,10 +3093,8 @@ pub(crate) fn copy_to_current_user_partial(address: u64, input: &[u8]) -> usize 
     if !current_user_root_is_owned(root) {
         return 0;
     }
-    // SAFETY: as in `copy_from_current_user_partial`, in the other direction.
-    let remaining =
-        unsafe { cpu::raw_copy_to_user(address as *mut u8, input.as_ptr(), input.len()) };
-    input.len().saturating_sub(remaining)
+    // As in `copy_from_current_user_partial`, in the other direction.
+    user_copy::copy_to_user(address, input)
 }
 
 /// Copy a small result into the active Linux address space without repeating
@@ -3196,9 +3131,9 @@ pub(crate) fn copy_to_current_linux_user_fast(address: u64, input: &[u8]) -> boo
             None => return false,
         };
     }
-    // SAFETY: every page of the user range was checked present, user and
-    // writable above, and the copy recovers from a fault regardless.
-    unsafe { cpu::raw_copy_to_user(address as *mut u8, input.as_ptr(), input.len()) == 0 }
+    // Every page of the user range was checked present, user and writable
+    // above, and the copy recovers from a fault regardless.
+    user_copy::copy_to_user(address, input) == input.len()
 }
 
 pub(crate) fn protect_current_user_page_read_only(address: u64) -> bool {
@@ -3690,12 +3625,9 @@ pub(crate) fn replace_current_linux_image_and_hierarchy(
     {
         return false;
     }
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(new_hierarchy[0].address()) };
+    activate(new_hierarchy[0].address());
     if current_root() != new_hierarchy[0].address() {
-        // SAFETY: this root was active on entry and its address space is still live.
-        unsafe { activate(old_hierarchy[0].address()) };
+        activate(old_hierarchy[0].address());
         return false;
     }
     memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, retired_mappings)
@@ -4015,9 +3947,8 @@ fn clone_linux_process_hierarchy_inner(
     {
         return false;
     }
-    // SAFETY: the kernel-entry lock serializes address-space clones, and no
-    // other reference to the clone scratch lists is live during one.
-    let scratch = unsafe { &mut *LINUX_PROCESS_SCRATCH.clone.get() };
+    let mut scratch = take_scratch(&LINUX_PROCESS_CLONE_SCRATCH);
+    let scratch = &mut *scratch;
     let child_mapping_capacity = parent_mappings.len();
     let (Some(mut visited_hierarchy), Some(()), Some(())) = (
         filled_list(
@@ -4506,8 +4437,7 @@ fn install_linux_fork_cow(
     // a parent that runs before its child would write through them into
     // frames the child shares. Reloading CR3 drops them (there is no PCID).
     if parent_root.address() == current_root() {
-        // SAFETY: reloading the active root changes no mapping.
-        unsafe { activate(parent_root.address()) };
+        activate(parent_root.address());
     }
     true
 }
@@ -4538,9 +4468,8 @@ pub(crate) fn validate_linux_process_address_space(
     {
         return false;
     }
-    // SAFETY: as for the clone scratch lists: validations are serialized by
-    // the kernel-entry lock and never nest.
-    let visited_mappings = unsafe { &mut *LINUX_PROCESS_SCRATCH.validation.get() };
+    let mut visited_mappings = take_scratch(&LINUX_PROCESS_VALIDATION_SCRATCH);
+    let visited_mappings = &mut *visited_mappings;
     let (Some(mut visited_hierarchy), Some(())) = (
         filled_list(hierarchy.len(), false),
         fill_list(visited_mappings, mappings.len(), false),
@@ -4922,12 +4851,9 @@ pub(crate) fn inherit_linux_process_kernel_mappings(root: memory::FrameLease) ->
 
 pub(crate) fn verify_linux_process_root_activation(root: memory::FrameLease) -> bool {
     let previous = current_root();
-    let rflags: u64;
-    // SAFETY: reading RFLAGS through the stack has no other effect.
-    unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(preserves_flags)) };
     if !memory::frames_owned_by(memory::FrameOwner::KERNEL, &[root])
         || root.address() == previous
-        || rflags & (1 << 9) != 0
+        || interrupts::enabled()
     {
         return false;
     }
@@ -4946,17 +4872,14 @@ pub(crate) fn verify_linux_process_root_activation(root: memory::FrameLease) -> 
     }) {
         return false;
     }
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(root.address()) };
+    activate(root.address());
     let selected = current_root() == root.address();
     let process_visible = PageTable::from_physical(root.address()).is_some_and(|active| {
         [256_usize]
             .into_iter()
             .all(|index| active.get(index) & USER == 0)
     });
-    // SAFETY: this root was active on entry and its address space is still live.
-    unsafe { activate(previous) };
+    activate(previous);
     selected && process_visible && current_root() == previous
 }
 
@@ -4974,15 +4897,12 @@ pub(crate) fn execute_linux_process_child(
     if !verify_linux_process_root_activation(root) || current_root() != previous {
         return None;
     }
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(root.address()) };
+    activate(root.address());
     let selected = current_root() == root.address();
     let exit_status = selected
         .then(|| cpu::execute_linux_process_child(entry, stack, fs_base, general))
         .flatten();
-    // SAFETY: this root was active on entry and its address space is still live.
-    unsafe { activate(previous) };
+    activate(previous);
     (current_root() == previous)
         .then_some(exit_status)
         .flatten()
@@ -5022,17 +4942,14 @@ pub(crate) fn resume_live_linux_process(
         }
         return false;
     }
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(root.address()) };
+    activate(root.address());
     let resumed = current_root() == root.address()
         && cpu::resume_live_linux_process(entry, stack, fs_base, general, rflags);
     // The process that was running before may have been torn down while the
     // resumed one ran; loading its freed root would leave no kernel mapping
     // and triple-fault. Fall back to the kernel's tables and report it.
     if !linux_root_is_usable(previous) {
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(paging::kernel_root_address()) };
+        activate(paging::kernel_root_address());
         crate::serial_write_raw(b"linox: resume returned to a released address space; root ");
         crate::serial_write_u64(previous);
         crate::serial_write_raw(b" resumed root ");
@@ -5040,8 +4957,7 @@ pub(crate) fn resume_live_linux_process(
         crate::serial_write_raw(b"\r\n");
         return false;
     }
-    // SAFETY: this root was active on entry and its address space is still live.
-    unsafe { activate(previous) };
+    activate(previous);
     resumed && current_root() == previous
 }
 
@@ -5065,17 +4981,13 @@ pub(crate) fn with_live_linux_process_root<T>(
     if !verify_linux_process_root_activation(root) || current_root() != previous {
         return None;
     }
-    // SAFETY: a live process root built by this module, holding the kernel's entries (see
-    // `activate`).
-    unsafe { activate(root.address()) };
+    activate(root.address());
     if current_root() != root.address() {
-        // SAFETY: this root was active on entry and its address space is still live.
-        unsafe { activate(previous) };
+        activate(previous);
         return None;
     }
     let result = operation();
-    // SAFETY: this root was active on entry and its address space is still live.
-    unsafe { activate(previous) };
+    activate(previous);
     (current_root() == previous).then_some(result)
 }
 
@@ -6186,12 +6098,10 @@ pub(crate) fn current_root_address() -> u64 {
 /// `resume_live_linux_process` does after an entry.
 pub(crate) fn restore_root_after_resume(previous: u64) -> bool {
     if linux_root_is_usable(previous) {
-        // SAFETY: this root was active on entry and its address space is still live.
-        unsafe { activate(previous) };
+        activate(previous);
         true
     } else {
-        // SAFETY: the kernel's root maps the whole kernel and stays live.
-        unsafe { activate(paging::kernel_root_address()) };
+        activate(paging::kernel_root_address());
         crate::serial_write_raw(b"linox: resume returned to a released address space\r\n");
         false
     }
@@ -7125,8 +7035,7 @@ pub(crate) fn prune_current_linux_page_tables(start: u64, end: u64) -> bool {
     }
     if pruned {
         // Drop paging-structure caches that may still hold the freed tables.
-        // SAFETY: `root` is the active root, reloaded to drop cached translations.
-        unsafe { activate(root) };
+        activate(root);
     }
     true
 }
@@ -7587,8 +7496,7 @@ pub(crate) fn release_current_linux_low_mappings_preserving(
     }
     if released {
         // Drop paging-structure caches that may still hold freed tables.
-        // SAFETY: `root` is the active root, reloaded to drop cached translations.
-        unsafe { activate(root) };
+        activate(root);
     }
     true
 }
@@ -8030,16 +7938,13 @@ pub(crate) fn verify_isolated_user_mapping() -> bool {
         return false;
     };
 
-    // SAFETY: The new root preserves the active supervisor-only kernel entry,
-    // and maps the test virtual page to its exclusively owned frame. Interrupts
-    // remain disabled. The original root is restored before returning.
-    let valid = unsafe {
+    let valid = {
         user_frame.write_volatile_u64(0, 0);
         activate(space.root);
         let activated = current_root() == space.root;
-        cpu::with_supervisor_user_access(|| {
-            (USER_TEST_ADDRESS as *mut u64).write_volatile(TEST_PATTERN);
-        });
+        {
+            write_user_u64(USER_TEST_ADDRESS, TEST_PATTERN);
+        };
         let aliased = user_frame.read_volatile_u64(0) == TEST_PATTERN;
         activate(kernel_root);
         let restored = current_root() == kernel_root;
@@ -8061,21 +7966,19 @@ pub(crate) fn verify_control_plane_wx_layout() -> bool {
         return false;
     }
 
-    // SAFETY: Both mapped pages and all page tables have unique leases until
-    // release. The kernel mapping is preserved and interrupts are disabled.
-    let valid = unsafe {
+    let valid = {
         space.code_frame.write_u8(0, 0x90);
         space.first_stack_frame.write_volatile_u64(0, 0);
         space.second_stack_frame.write_volatile_u64(0, 0);
         activate(space.root);
         let first_stack_address = USER_TEST_ADDRESS + 2 * PAGE_SIZE;
         let second_stack_address = USER_TEST_ADDRESS + 4 * PAGE_SIZE;
-        let code_visible = cpu::with_supervisor_user_access(|| {
-            let visible = (USER_TEST_ADDRESS as *const u8).read_volatile() == 0x90;
-            (first_stack_address as *mut u64).write_volatile(TEST_PATTERN);
-            (second_stack_address as *mut u64).write_volatile(!TEST_PATTERN);
+        let code_visible = {
+            let visible = user_u8(USER_TEST_ADDRESS) == Some(0x90);
+            write_user_u64(first_stack_address, TEST_PATTERN);
+            write_user_u64(second_stack_address, !TEST_PATTERN);
             visible
-        });
+        };
         let stacks_writable = space.first_stack_frame.read_volatile_u64(0) == TEST_PATTERN
             && space.second_stack_frame.read_volatile_u64(0) == !TEST_PATTERN;
         activate(kernel_root);
@@ -8698,12 +8601,10 @@ fn verify_native_service_materialization_with_capacity<
         let _ = space.release();
         return false;
     };
-    let valid = unsafe {
+    let valid = {
         activate(space.root);
         let activated = current_root() == space.root;
-        let entry_matches = cpu::with_supervisor_user_access(|| {
-            (space.entry as *const u8).read_volatile() == expected_entry_byte
-        });
+        let entry_matches = { user_u8(space.entry) == Some(expected_entry_byte) };
         activate(kernel_root);
         activated && entry_matches && current_root() == kernel_root
     };
@@ -9844,14 +9745,8 @@ pub(crate) fn verify_packet_wait_wakeup(timed: bool) -> bool {
         return false;
     }
     let (Some(producer_program), Some(consumer_program)) = (
-        volume_program(
-            linox_packet_wait_producer_start as *const () as usize,
-            linox_packet_wait_producer_end as *const () as usize,
-        ),
-        volume_program(
-            linox_packet_wait_consumer_start as *const () as usize,
-            linox_packet_wait_consumer_end as *const () as usize,
-        ),
+        Program::PacketWaitProducer.bytes(),
+        Program::PacketWaitConsumer.bytes(),
     ) else {
         return false;
     };
@@ -10007,14 +9902,8 @@ pub(crate) fn verify_packet_wait_cancellation() -> bool {
         return false;
     }
     let (Some(waiter_program), Some(helper_program)) = (
-        volume_program(
-            linox_packet_wait_consumer_start as *const () as usize,
-            linox_packet_wait_consumer_end as *const () as usize,
-        ),
-        volume_program(
-            linox_packet_wait_stop_helper_start as *const () as usize,
-            linox_packet_wait_stop_helper_end as *const () as usize,
-        ),
+        Program::PacketWaitConsumer.bytes(),
+        Program::PacketWaitStopHelper.bytes(),
     ) else {
         return false;
     };
@@ -10137,14 +10026,8 @@ pub(crate) fn verify_packet_wait_timeout() -> bool {
         return false;
     }
     let (Some(waiter_program), Some(helper_program)) = (
-        volume_program(
-            linox_packet_wait_timeout_consumer_start as *const () as usize,
-            linox_packet_wait_timeout_consumer_end as *const () as usize,
-        ),
-        volume_program(
-            linox_packet_wait_timeout_helper_start as *const () as usize,
-            linox_packet_wait_timeout_helper_end as *const () as usize,
-        ),
+        Program::PacketWaitTimeoutConsumer.bytes(),
+        Program::PacketWaitTimeoutHelper.bytes(),
     ) else {
         return false;
     };
@@ -10247,14 +10130,8 @@ pub(crate) fn verify_packet_backpressure_wakeup() -> bool {
         return false;
     }
     let (Some(producer_program), Some(consumer_program)) = (
-        volume_program(
-            linox_packet_backpressure_producer_start as *const () as usize,
-            linox_packet_backpressure_producer_end as *const () as usize,
-        ),
-        volume_program(
-            linox_packet_backpressure_consumer_start as *const () as usize,
-            linox_packet_backpressure_consumer_end as *const () as usize,
-        ),
+        Program::PacketBackpressureProducer.bytes(),
+        Program::PacketBackpressureConsumer.bytes(),
     ) else {
         return false;
     };
@@ -10372,14 +10249,8 @@ pub(crate) fn verify_egress_backpressure_wakeup() -> bool {
         return false;
     }
     let (Some(producer_program), Some(consumer_program)) = (
-        volume_program(
-            linox_packet_egress_backpressure_producer_start as *const () as usize,
-            linox_packet_egress_backpressure_producer_end as *const () as usize,
-        ),
-        volume_program(
-            linox_packet_egress_backpressure_consumer_start as *const () as usize,
-            linox_packet_egress_backpressure_consumer_end as *const () as usize,
-        ),
+        Program::PacketEgressBackpressureProducer.bytes(),
+        Program::PacketEgressBackpressureConsumer.bytes(),
     ) else {
         return false;
     };
@@ -10705,10 +10576,7 @@ pub(crate) fn verify_native_protocol_wait_loop(image: &crate::native_elf::Native
     if first_sequence == 0 || second_sequence == u64::MAX || packet::pending_metadata().is_some() {
         return false;
     }
-    let Some(producer_program) = volume_program(
-        linox_packet_protocol_loop_producer_start as *const () as usize,
-        linox_packet_protocol_loop_producer_end as *const () as usize,
-    ) else {
+    let Some(producer_program) = Program::PacketProtocolLoopProducer.bytes() else {
         return false;
     };
     let Some(consumer) = domain::initialize_boot_auxiliary_service(
@@ -10841,10 +10709,7 @@ pub(crate) fn verify_supervised_native_protocol_loop(
     if first_sequence == 0 || third_sequence == u64::MAX || packet::pending_metadata().is_some() {
         return false;
     }
-    let Some(producer_program) = volume_program(
-        linox_packet_protocol_loop_producer_start as *const () as usize,
-        linox_packet_protocol_loop_producer_end as *const () as usize,
-    ) else {
+    let Some(producer_program) = Program::PacketProtocolLoopProducer.bytes() else {
         return false;
     };
     let Some(consumer) = domain::initialize_boot_auxiliary_service(
@@ -11023,10 +10888,7 @@ fn verify_native_protocol_ipv4_mode(
     {
         return false;
     }
-    let Some(producer_program) = volume_program(
-        linox_packet_ipv4_producer_start as *const () as usize,
-        linox_packet_ipv4_producer_end as *const () as usize,
-    ) else {
+    let Some(producer_program) = Program::PacketIpv4Producer.bytes() else {
         return false;
     };
     let consumer = if icmp_reply {
@@ -11246,10 +11108,7 @@ fn verify_ring3_egress_consumer(expected_sequence: u64) -> bool {
     if expected_sequence == 0 || expected_sequence == u64::MAX {
         return false;
     }
-    let Some(program) = volume_program(
-        linox_packet_egress_consumer_start as *const () as usize,
-        linox_packet_egress_consumer_end as *const () as usize,
-    ) else {
+    let Some(program) = Program::PacketEgressConsumer.bytes() else {
         return false;
     };
     let Some(auxiliary) = domain::initialize_boot_auxiliary_service(
@@ -11336,10 +11195,7 @@ fn verify_ring3_packet_consumer(expected_sequence: u64, more_pending: bool) -> b
     if expected_sequence == 0 || expected_sequence == u64::MAX {
         return false;
     }
-    let Some(program) = volume_program(
-        linox_packet_consumer_start as *const () as usize,
-        linox_packet_consumer_end as *const () as usize,
-    ) else {
+    let Some(program) = Program::PacketConsumer.bytes() else {
         return false;
     };
     let Some(auxiliary) = domain::initialize_boot_auxiliary_service(
@@ -12032,25 +11888,13 @@ fn verify_native_network_bootstrap_run_with_evidence(
     });
     let egress_producer = if egress_wait {
         let program = if egress_batch {
-            volume_program(
-                linox_packet_egress_batch_producer_start as *const () as usize,
-                linox_packet_egress_batch_producer_end as *const () as usize,
-            )
+            Program::PacketEgressBatchProducer.bytes()
         } else if egress_reuse {
-            volume_program(
-                linox_packet_egress_reuse_producer_start as *const () as usize,
-                linox_packet_egress_reuse_producer_end as *const () as usize,
-            )
+            Program::PacketEgressReuseProducer.bytes()
         } else if egress_ack_backpressure {
-            volume_program(
-                linox_packet_egress_ack_backpressure_producer_start as *const () as usize,
-                linox_packet_egress_ack_backpressure_producer_end as *const () as usize,
-            )
+            Program::PacketEgressAckBackpressureProducer.bytes()
         } else {
-            volume_program(
-                linox_packet_egress_wait_producer_start as *const () as usize,
-                linox_packet_egress_wait_producer_end as *const () as usize,
-            )
+            Program::PacketEgressWaitProducer.bytes()
         };
         let Some(program) = program else {
             return false;
@@ -12418,11 +12262,8 @@ pub(crate) fn verify_auxiliary_address_space_lifecycle() -> bool {
 }
 
 fn registered_auxiliary_address_space_count() -> usize {
-    let registry = ADDRESS_SPACE_SERVICES
-        .auxiliary_address_spaces
-        .get()
-        .cast_const();
-    unsafe { (*registry).iter().flatten().count() }
+    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    registry.iter().flatten().count()
 }
 
 pub(crate) fn load_and_queue_auxiliary_from_current_user(
@@ -12501,8 +12342,15 @@ pub(crate) fn initialize_staged_auxiliary_from_current_user(
     if !(1..=PAGE_SIZE).contains(&length) || !scheduler::auxiliary_is_staged(domain_id) {
         return false;
     }
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    // Copied before the registry is locked: a user copy may fault.
+    let mut payload = [0; PAGE_SIZE];
+    if !copy_from_current_user(source, &mut payload[..length]) {
+        return false;
+    }
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12513,10 +12361,6 @@ pub(crate) fn initialize_staged_auxiliary_from_current_user(
     let AuxiliaryAddressSpace::Wx(space) = &mut registered.space else {
         return false;
     };
-    let mut payload = [0; PAGE_SIZE];
-    if !copy_from_current_user(source, &mut payload[..length]) {
-        return false;
-    }
     space
         .first_stack_frame
         .write_bytes(offset, &payload[..length]);
@@ -12549,25 +12393,24 @@ fn register_auxiliary_address_space(domain_id: u64, space: WxAddressSpace) -> bo
 }
 
 fn register_address_space(domain_id: u64, space: AuxiliaryAddressSpace) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(slot) =
-        (0..domain::MAX_AUXILIARY_SERVICES).find(|index| unsafe { (*registry)[*index].is_none() })
-    else {
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(slot) = registry.iter().position(Option::is_none) else {
+        drop(registry);
         let _ = space.release();
         return false;
     };
-    if unsafe {
-        (*registry)
-            .iter()
-            .flatten()
-            .any(|registered| registered.domain == domain_id)
-    } || !domain::bind_auxiliary_address_space(domain_id, space.root())
+    if registry
+        .iter()
+        .flatten()
+        .any(|registered| registered.domain == domain_id)
+        || !domain::bind_auxiliary_address_space(domain_id, space.root())
     {
+        drop(registry);
         let _ = space.release();
         return false;
     }
-    unsafe {
-        (*registry)[slot] = Some(RegisteredAuxiliaryAddressSpace {
+    {
+        registry[slot] = Some(RegisteredAuxiliaryAddressSpace {
             domain: domain_id,
             space,
             device_teardown: None,
@@ -12591,15 +12434,15 @@ fn register_address_space(domain_id: u64, space: AuxiliaryAddressSpace) -> bool 
 }
 
 pub(crate) fn release_auxiliary_address_space(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(slot) = (0..domain::MAX_AUXILIARY_SERVICES).find(|index| unsafe {
-        (*registry)[*index]
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(slot) = registry.iter().position(|registered| {
+        registered
             .as_ref()
             .is_some_and(|registered| registered.domain == domain_id)
     }) else {
         return false;
     };
-    let Some(registered) = (unsafe { (*registry)[slot].as_mut() }) else {
+    let Some(registered) = registry[slot].as_mut() else {
         return false;
     };
     let root = registered.space.root();
@@ -12624,9 +12467,10 @@ pub(crate) fn release_auxiliary_address_space(domain_id: u64) -> bool {
     if !domain::unbind_auxiliary_address_space(domain_id, root) {
         return false;
     }
-    let Some(registered) = (unsafe { (*registry)[slot].take() }) else {
+    let Some(registered) = registry[slot].take() else {
         return false;
     };
+    drop(registry);
     registered.space.release()
 }
 
@@ -12634,8 +12478,10 @@ pub(crate) fn bind_auxiliary_iommu_translation(
     domain_id: u64,
     profile: iommu::DeviceTranslationProfile,
 ) -> Option<iommu::TranslationEvidence> {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let registered = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let registered = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)?;
     let teardown = registered.device_teardown?;
     let dma_frame = registered.space.dma_lease()?;
@@ -12660,8 +12506,10 @@ fn bind_auxiliary_network_iommu_translation(
     profile: iommu::DeviceTranslationProfile,
     device: VirtioNetworkDevice,
 ) -> Option<iommu::TranslationEvidence> {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let registered = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let registered = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)?;
     let dma_frame = registered.space.dma_lease()?;
     if registered.device_teardown.is_some()
@@ -12686,8 +12534,10 @@ fn bind_auxiliary_network_teardown(
     mapping: paging::MmioMapping,
     msix_mapping: Option<paging::MmioMapping>,
 ) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12710,8 +12560,10 @@ fn bind_auxiliary_network_teardown(
 }
 
 pub(crate) fn activate_auxiliary_network_empty_queues(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12720,9 +12572,6 @@ pub(crate) fn activate_auxiliary_network_empty_queues(domain_id: u64) -> bool {
         return false;
     };
     let Some(dma) = registered.space.dma_lease() else {
-        return false;
-    };
-    let Some(dma_virtual) = dma.direct_map_address() else {
         return false;
     };
     let activated = !registered.device_quiesced
@@ -12734,25 +12583,21 @@ pub(crate) fn activate_auxiliary_network_empty_queues(domain_id: u64) -> bool {
             pci::activate_isolated_network_interrupt_queues(
                 teardown.device,
                 teardown.mapping,
-                dma.address(),
-                dma_virtual,
+                dma,
                 domain_id,
                 teardown.interrupt_request,
             )
         } else {
-            pci::activate_isolated_network_empty_queues(
-                teardown.device,
-                teardown.mapping,
-                dma.address(),
-                dma_virtual,
-            )
+            pci::activate_isolated_network_empty_queues(teardown.device, teardown.mapping, dma)
         };
     activated && !registered.fail_network_activation_return
 }
 
 fn arm_auxiliary_network_activation_fault(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12768,8 +12613,10 @@ fn arm_auxiliary_network_activation_fault(domain_id: u64) -> bool {
 }
 
 fn arm_auxiliary_network_transmit_expectation(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12785,8 +12632,10 @@ fn arm_auxiliary_network_transmit_expectation(domain_id: u64) -> bool {
 }
 
 fn arm_auxiliary_network_receive_expectation(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12803,8 +12652,10 @@ fn arm_auxiliary_network_receive_expectation(domain_id: u64) -> bool {
 }
 
 fn arm_auxiliary_network_egress_expectation(domain_id: u64, reliable: bool) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12825,8 +12676,10 @@ fn arm_auxiliary_network_egress_expectation(domain_id: u64, reliable: bool) -> b
 }
 
 fn arm_auxiliary_network_egress_reuse_expectation(domain_id: u64, limit: u8) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12845,8 +12698,10 @@ fn arm_auxiliary_network_egress_reuse_expectation(domain_id: u64, limit: u8) -> 
 }
 
 fn arm_auxiliary_network_receive_corruption(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12862,8 +12717,10 @@ fn arm_auxiliary_network_receive_corruption(domain_id: u64) -> bool {
 }
 
 fn arm_auxiliary_network_reuse_expectation(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12880,8 +12737,10 @@ fn arm_auxiliary_network_reuse_expectation(domain_id: u64) -> bool {
 }
 
 fn arm_auxiliary_network_dhcp_expectation(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -12898,12 +12757,11 @@ fn arm_auxiliary_network_dhcp_expectation(domain_id: u64) -> bool {
 }
 
 pub(crate) fn auxiliary_network_wait_ready(domain_id: u64, command: u64, request: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES
-        .auxiliary_address_spaces
-        .get()
-        .cast_const();
-    let Some(registered) =
-        (unsafe { (*registry).iter().flatten() }).find(|registered| registered.domain == domain_id)
+    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter()
+        .flatten()
+        .find(|registered| registered.domain == domain_id)
     else {
         return false;
     };
@@ -12958,20 +12816,16 @@ pub(crate) fn auxiliary_network_wait_ready(domain_id: u64, command: u64, request
 }
 
 pub(crate) fn auxiliary_network_egress_transmit_complete(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES
-        .auxiliary_address_spaces
-        .get()
-        .cast_const();
-    let Some(registered) =
-        (unsafe { (*registry).iter().flatten() }).find(|registered| registered.domain == domain_id)
+    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter()
+        .flatten()
+        .find(|registered| registered.domain == domain_id)
     else {
         return false;
     };
     let (Some(teardown), Some(dma)) = (registered.network_teardown, registered.space.dma_lease())
     else {
-        return false;
-    };
-    let Some(dma_virtual) = dma.direct_map_address() else {
         return false;
     };
     let final_request = if registered.network_egress_transmit_limit != 0 {
@@ -12982,11 +12836,7 @@ pub(crate) fn auxiliary_network_egress_transmit_complete(domain_id: u64) -> bool
     let completed = registered.network_interrupt_request_completed;
     let acknowledged = registered.network_egress_acknowledged;
     let dma_valid = u16::try_from(completed).is_ok_and(|completed| {
-        pci::network_service_egress_transmit_count_is_complete(
-            dma.address(),
-            dma_virtual,
-            completed,
-        )
+        pci::network_service_egress_transmit_count_is_complete(dma, completed)
     });
     !registered.device_quiesced
         && registered.expect_network_egress
@@ -13001,8 +12851,10 @@ pub(crate) fn auxiliary_network_egress_transmit_complete(domain_id: u64) -> bool
 }
 
 pub(crate) fn record_auxiliary_network_egress_ack(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -13024,8 +12876,10 @@ pub(crate) fn complete_auxiliary_network_wait(
     command: u64,
     request: u64,
 ) -> AuxiliaryDeviceWaitCompletion {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return AuxiliaryDeviceWaitCompletion::Failed;
@@ -13087,15 +12941,12 @@ pub(crate) fn complete_auxiliary_network_wait(
                 let Some(dma) = registered.space.dma_lease() else {
                     return AuxiliaryDeviceWaitCompletion::Failed;
                 };
-                let Some(dma_virtual) = dma.direct_map_address() else {
-                    return AuxiliaryDeviceWaitCompletion::Failed;
-                };
                 if registered.expect_network_reuse
                     && request == 2
                     && !registered.expect_network_dhcp
-                    && !pci::network_service_arp_exchange_is_complete(dma.address(), dma_virtual)
+                    && !pci::network_service_arp_exchange_is_complete(dma)
                     || registered.corrupt_network_receive
-                        && !pci::corrupt_network_service_arp_reply(dma.address(), dma_virtual)
+                        && !pci::corrupt_network_service_arp_reply(dma)
                 {
                     return AuxiliaryDeviceWaitCompletion::Failed;
                 }
@@ -13114,6 +12965,8 @@ pub(crate) fn complete_auxiliary_network_wait(
             AuxiliaryDeviceWaitCompletion::Completed
         }
         pci::IsolatedInterruptCompletion::TimedOut => {
+            // Quiescing takes the registry itself.
+            drop(registry);
             if quiesce_auxiliary_device_for(domain_id, false) {
                 AuxiliaryDeviceWaitCompletion::Cancelled
             } else {
@@ -13132,8 +12985,10 @@ pub(crate) fn bind_auxiliary_device_teardown(
     notification_page: Option<u64>,
     interrupt_request: u64,
 ) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -13158,12 +13013,11 @@ pub(crate) fn bind_auxiliary_device_teardown(
 }
 
 pub(crate) fn auxiliary_device_wait_ready(domain_id: u64, request: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES
-        .auxiliary_address_spaces
-        .get()
-        .cast_const();
-    let Some(registered) =
-        (unsafe { (*registry).iter().flatten() }).find(|registered| registered.domain == domain_id)
+    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter()
+        .flatten()
+        .find(|registered| registered.domain == domain_id)
     else {
         return false;
     };
@@ -13201,8 +13055,10 @@ pub(crate) fn complete_auxiliary_device_wait(
     request: u64,
     notified: bool,
 ) -> AuxiliaryDeviceWaitCompletion {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return AuxiliaryDeviceWaitCompletion::Failed;
@@ -13233,6 +13089,8 @@ pub(crate) fn complete_auxiliary_device_wait(
             AuxiliaryDeviceWaitCompletion::Completed
         }
         pci::IsolatedInterruptCompletion::TimedOut if notified => {
+            // Quiescing takes the registry itself.
+            drop(registry);
             if quiesce_auxiliary_device_for(domain_id, false) {
                 AuxiliaryDeviceWaitCompletion::Cancelled
             } else {
@@ -13253,8 +13111,10 @@ pub(crate) fn quiesce_faulted_auxiliary_device(domain_id: u64) -> bool {
 }
 
 fn quiesce_auxiliary_device_for(domain_id: u64, require_completed_dma: bool) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.get();
-    let Some(registered) = (unsafe { (*registry).iter_mut().flatten() })
+    let mut registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter_mut()
+        .flatten()
         .find(|registered| registered.domain == domain_id)
     else {
         return false;
@@ -13273,9 +13133,6 @@ fn quiesce_auxiliary_device_for(domain_id: u64, require_completed_dma: bool) -> 
         let Some(dma) = registered.space.dma_lease() else {
             return false;
         };
-        let Some(dma_virtual) = dma.direct_map_address() else {
-            return false;
-        };
         let active = if teardown.msix_mapping.is_some() {
             pci::network_interrupt_queues_are_bound(
                 teardown.device,
@@ -13292,11 +13149,10 @@ fn quiesce_auxiliary_device_for(domain_id: u64, require_completed_dma: bool) -> 
             )
         };
         let transmit_complete = if registered.expect_network_dhcp {
-            pci::network_service_dhcp_exchange_is_complete(dma.address(), dma_virtual)
+            pci::network_service_dhcp_exchange_is_complete(dma)
         } else if registered.expect_network_egress {
             pci::network_service_egress_transmit_count_is_complete(
-                dma.address(),
-                dma_virtual,
+                dma,
                 if registered.network_egress_transmit_limit != 0 {
                     u16::from(registered.network_egress_transmit_limit)
                 } else {
@@ -13304,13 +13160,12 @@ fn quiesce_auxiliary_device_for(domain_id: u64, require_completed_dma: bool) -> 
                 },
             )
         } else if registered.expect_network_reuse {
-            pci::network_service_arp_reuse_is_complete(dma.address(), dma_virtual)
-                || pci::network_service_icmp_exchange_is_complete(dma.address(), dma_virtual)
+            pci::network_service_arp_reuse_is_complete(dma)
+                || pci::network_service_icmp_exchange_is_complete(dma)
         } else if registered.expect_network_receive {
-            pci::network_service_arp_exchange_is_complete(dma.address(), dma_virtual)
+            pci::network_service_arp_exchange_is_complete(dma)
         } else {
-            !registered.expect_network_transmit
-                || pci::network_service_transmit_is_complete(dma.address(), dma_virtual)
+            !registered.expect_network_transmit || pci::network_service_transmit_is_complete(dma)
         };
         if !require_completed_dma {
             ADDRESS_SPACE_SERVICES
@@ -13414,21 +13269,18 @@ fn unsafe_device_quiesce_was_active(domain_id: u64) -> Option<bool> {
 }
 
 pub(crate) fn activate_kernel_root_for_auxiliary(domain_id: u64) -> bool {
-    let registry = ADDRESS_SPACE_SERVICES
-        .auxiliary_address_spaces
-        .get()
-        .cast_const();
-    let Some(registered) =
-        (unsafe { (*registry).iter().flatten() }).find(|registered| registered.domain == domain_id)
+    let registry = ADDRESS_SPACE_SERVICES.auxiliary_address_spaces.lock();
+    let Some(registered) = registry
+        .iter()
+        .flatten()
+        .find(|registered| registered.domain == domain_id)
     else {
         return false;
     };
     if current_root() != registered.space.root() {
         return false;
     }
-    unsafe {
-        activate(registered.space.kernel_root());
-    }
+    activate(registered.space.kernel_root());
     current_root() == registered.space.kernel_root()
 }
 
@@ -13478,7 +13330,7 @@ pub(crate) fn verify_ring3_control_plane(
     {
         return false;
     }
-    unsafe {
+    {
         first_space.code_frame.write_bytes(0, program);
         second_space.code_frame.write_bytes(0, program);
         first_space
@@ -13491,13 +13343,9 @@ pub(crate) fn verify_ring3_control_plane(
             .first_stack_frame
             .write_volatile_u64(ROOT_HANDLE_STACK_OFFSET, handles[0][3]);
         activate(first_space.root);
-        let first_marker = cpu::with_supervisor_user_access(|| {
-            ((USER_TEST_ADDRESS + 2 * PAGE_SIZE) as *const u64).read_volatile()
-        });
+        let first_marker = { user_u64(USER_TEST_ADDRESS + 2 * PAGE_SIZE) };
         activate(second_space.root);
-        let second_marker = cpu::with_supervisor_user_access(|| {
-            ((USER_TEST_ADDRESS + 2 * PAGE_SIZE) as *const u64).read_volatile()
-        });
+        let second_marker = { user_u64(USER_TEST_ADDRESS + 2 * PAGE_SIZE) };
         activate(kernel_root);
         first_space.first_stack_frame.write_volatile_u64(0, 0);
         second_space.first_stack_frame.write_volatile_u64(0, 0);
@@ -13505,7 +13353,10 @@ pub(crate) fn verify_ring3_control_plane(
             .first_stack_frame
             .read_volatile_u64(ROOT_HANDLE_STACK_OFFSET)
             == handles[0][3];
-        if first_marker != TEST_PATTERN || second_marker != !TEST_PATTERN || !root_handle_seeded {
+        if first_marker != Some(TEST_PATTERN)
+            || second_marker != Some(!TEST_PATTERN)
+            || !root_handle_seeded
+        {
             return false;
         }
         if !ipc::initialize_control_channel(domains[0], domains[1])
@@ -14084,10 +13935,7 @@ struct VolumeAuxiliaryResult {
 }
 
 pub(crate) fn verify_ring3_volume_service() -> bool {
-    let Some(writer_program) = volume_program(
-        linox_volume_writer_start as *const () as usize,
-        linox_volume_writer_end as *const () as usize,
-    ) else {
+    let Some(writer_program) = Program::VolumeWriter.bytes() else {
         return false;
     };
     let Some(writer) = run_volume_auxiliary(writer_program, crate::capability::Rights::WRITE)
@@ -14105,10 +13953,7 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
                 vector: 6,
                 error: 0,
                 address: 0,
-                instruction: (USER_TEST_ADDRESS
-                    + (linox_volume_writer_fault as *const () as usize
-                        - linox_volume_writer_start as *const () as usize))
-                    as u64,
+                instruction: (USER_TEST_ADDRESS + programs::volume_writer_fault_offset()) as u64,
             },
         )
         || volume::live_generation() != Ok(1)
@@ -14126,10 +13971,7 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
         return false;
     }
 
-    let Some(reader_program) = volume_program(
-        linox_volume_reader_start as *const () as usize,
-        linox_volume_reader_end as *const () as usize,
-    ) else {
+    let Some(reader_program) = Program::VolumeReader.bytes() else {
         return false;
     };
     let Some(reader) = run_volume_auxiliary(reader_program, crate::capability::Rights::READ) else {
@@ -14158,16 +14000,6 @@ pub(crate) fn verify_ring3_volume_service() -> bool {
         crate::serial_write_u64(volume::live_generation().unwrap_or(u64::MAX));
     }
     valid
-}
-
-fn volume_program(start: usize, end: usize) -> Option<&'static [u8]> {
-    let size = end.checked_sub(start)?;
-    if size == 0 || size > PAGE_SIZE {
-        return None;
-    }
-    // SAFETY: callers pass the start and end symbols of one ring-3 program
-    // assembled into the kernel image's text, which is immutable.
-    Some(unsafe { core::slice::from_raw_parts(start as *const u8, size) })
 }
 
 fn run_volume_auxiliary(
@@ -15087,26 +14919,55 @@ impl WxAddressSpace {
 }
 
 fn current_root() -> u64 {
-    let root: u64;
-    // SAFETY: reading CR3 has no side effects.
-    unsafe {
-        asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
-    }
-    root & ADDRESS_MASK
+    root::current_address()
 }
 
-/// Loads `root` into CR3.
-///
-/// # Safety
-///
-/// `root` is a live root whose kernel half maps the kernel as the kernel's
-/// own root does (the direct map's entry and the low template), as every
-/// root this module builds does, and its address space is not released
-/// while it is loaded.
-unsafe fn activate(root: u64) {
-    crate::arch::x86_64::smp::note_active_root(root);
-    asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
-    crate::arch::x86_64::smp::note_root_loaded();
+/// The byte at `address` in the loaded address space, if it lies on a
+/// user page (`trusted::user_copy`), for the verification walks that read
+/// back what a process image put there.
+fn user_u8(address: impl TryInto<u64>) -> Option<u8> {
+    let mut byte = [0];
+    (user_copy::copy_from_user(address.try_into().ok()?, &mut byte) == 1).then_some(byte[0])
+}
+
+/// The little-endian word at `address` in the loaded address space, if it
+/// lies on user pages.
+fn user_u64(address: impl TryInto<u64>) -> Option<u64> {
+    let mut word = [0; 8];
+    (user_copy::copy_from_user(address.try_into().ok()?, &mut word) == word.len())
+        .then(|| u64::from_le_bytes(word))
+}
+
+/// `length` bytes from `address` in the loaded address space, if they lie
+/// on user pages.
+fn user_bytes(address: impl TryInto<u64>, length: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length).ok()?;
+    bytes.resize(length, 0);
+    (user_copy::copy_from_user(address.try_into().ok()?, &mut bytes) == length).then_some(bytes)
+}
+
+/// Stores `value` at `address` in the loaded address space, if it lies on
+/// writable user pages; the verification walks check the frame behind it.
+fn write_user_u64(address: impl TryInto<u64>, value: u64) {
+    if let Ok(address) = address.try_into() {
+        user_copy::copy_to_user(address, &value.to_le_bytes());
+    }
+}
+
+/// Loads the root at `root` into CR3: a root this module built (holding
+/// the kernel's entries, live while loaded) or the kernel's own. A root
+/// that fails `Root::from_physical`'s checks (one released meanwhile, its
+/// frame scrubbed) is not loaded; the kernel's root is, and the caller's
+/// check of `current_root` afterwards fails.
+fn activate(root: u64) {
+    let loadable = Root::from_physical(root).unwrap_or_else(|| {
+        crate::serial_write_raw(b"linox: refused to load an unusable page-table root ");
+        crate::serial_write_u64(root);
+        crate::serial_write_raw(b"\r\n");
+        Root::kernel()
+    });
+    root::activate(loadable);
 }
 
 /// Writes page `page_index` of `segment` into `frame`: its file bytes,

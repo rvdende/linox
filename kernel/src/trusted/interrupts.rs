@@ -47,6 +47,17 @@ pub(crate) fn save_and_disable() -> InterruptState {
     }
 }
 
+/// Whether interrupts are enabled on this CPU (RFLAGS.IF).
+pub(crate) fn enabled() -> bool {
+    let flags: u64;
+    // SAFETY: reading RFLAGS through the stack touches only the stack slot
+    // pushfq/pop use.
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
+    }
+    flags & INTERRUPT_FLAG != 0
+}
+
 /// Enables interrupts again if `state` says they were enabled.
 pub(crate) fn restore(state: InterruptState) {
     if state.enabled {

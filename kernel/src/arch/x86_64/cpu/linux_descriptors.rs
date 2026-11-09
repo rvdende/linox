@@ -414,6 +414,52 @@ pub(super) fn linux_descriptor_tmp_generation(descriptor: u64) -> Option<u32> {
     }
 }
 
+/// A regular file's bytes as one read (or mmap) sees them: fixed for the
+/// boot, or generated for this call and owned by the caller (/proc/meminfo,
+/// /proc/uptime, /proc/self/cgroup), so no reader shares a buffer another
+/// read rewrites.
+pub(super) enum RegularFile {
+    Fixed(&'static [u8]),
+    Generated(Vec<u8>),
+}
+
+impl RegularFile {
+    /// A copy of `bytes`, or None without the memory for it.
+    pub(super) fn generated(bytes: &[u8]) -> Option<Self> {
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(bytes.len()).ok()?;
+        owned.extend_from_slice(bytes);
+        Some(Self::Generated(owned))
+    }
+}
+
+impl core::ops::Deref for RegularFile {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Fixed(bytes) => bytes,
+            Self::Generated(bytes) => bytes,
+        }
+    }
+}
+
+/// The bytes of the regular file `state` names, generated ones included.
+pub(super) fn linux_regular_file_contents(state: u16) -> Option<RegularFile> {
+    if !linux_mount::current_root_is_read_only() || state & LINUX_DEVICE_DIRECTORY != 0 {
+        return None;
+    }
+    match state & !3 {
+        LINUX_FILE_PROC_MEMINFO => linux_proc_meminfo(),
+        LINUX_FILE_PROC_UPTIME => linux_proc_uptime(),
+        LINUX_FILE_PROC_CGROUP => linux_proc_cgroup(),
+        _ => linux_regular_file(state).map(RegularFile::Fixed),
+    }
+}
+
+/// The bytes of the regular file `state` names when they are fixed for the
+/// boot; None for the generated files, which `linux_regular_file_contents`
+/// renders.
 pub(super) fn linux_regular_file(state: u16) -> Option<&'static [u8]> {
     if !linux_mount::current_root_is_read_only() {
         return None;
@@ -456,15 +502,13 @@ pub(super) fn linux_regular_file(state: u16) -> Option<&'static [u8]> {
         LINUX_FILE_PROC_SYSVIPC_MSG => return Some(LINUX_PROC_SYSVIPC_MSG_HEADER),
         LINUX_FILE_PROC_SYSVIPC_SHM => return Some(LINUX_PROC_SYSVIPC_SHM_HEADER),
         LINUX_FILE_PROC_SYSVIPC_SEM => return Some(LINUX_PROC_SYSVIPC_SEM_HEADER),
-        LINUX_FILE_PROC_MEMINFO => return Some(linux_proc_meminfo()),
+        LINUX_FILE_PROC_MEMINFO | LINUX_FILE_PROC_UPTIME | LINUX_FILE_PROC_CGROUP => return None,
         LINUX_FILE_PROC_STAT => return Some(LINUX_PROC_STAT),
-        LINUX_FILE_PROC_UPTIME => return Some(linux_proc_uptime()),
         LINUX_FILE_PROC_LOADAVG => return Some(LINUX_PROC_LOADAVG),
         LINUX_FILE_PROC_FILESYSTEMS => return Some(LINUX_PROC_FILESYSTEMS),
         LINUX_FILE_PROC_MODULES => return Some(b""),
         LINUX_FILE_PROC_CONFIG => return Some(&LINUX_PROC_CONFIG_GZ),
         LINUX_FILE_PROC_CMDLINE => return Some(LINUX_PROC_CMDLINE),
-        LINUX_FILE_PROC_CGROUP => return Some(linux_proc_cgroup()),
         // Linux's default filter: anonymous private and shared memory, ELF
         // headers and private huge pages (only anonymous memory is dumped).
         LINUX_FILE_PROC_COREDUMP_FILTER => return Some(b"00000033\n"),

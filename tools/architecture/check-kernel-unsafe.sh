@@ -9,16 +9,16 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 353 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 353 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 277 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 277 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 115 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 115 to ${undocumented}" >&2
+if (( undocumented > 85 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 85 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -31,11 +31,8 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "address_space.rs 78"
     "arch/x86_64/cpu/boot_verify.rs 1"
     "arch/x86_64/cpu/boot_verify_elf.rs 3"
-    "arch/x86_64/cpu/linux_cgroupfs.rs 1"
-    "arch/x86_64/cpu/linux_procfs.rs 2"
     "arch/x86_64/cpu/linux_user_memory.rs 1"
     "arch/x86_64/cpu/native_services.rs 2"
     "image_store.rs 1"
@@ -54,13 +51,13 @@ per_file_limits=(
     "trusted/page_table.rs 2"
     "trusted/pixels.rs 3"
     "trusted/random.rs 1"
-    "trusted/root.rs 3"
+    "trusted/root.rs 4"
+    "trusted/programs.rs 1"
     "trusted/port.rs 8"
     "trusted/ap_start.rs 1"
-    "trusted/interrupts.rs 7"
+    "trusted/interrupts.rs 8"
     "trusted/lock.rs 3"
     "trusted/owned_state.rs 4"
-    "trusted/scratch.rs 3"
     "trusted/tsc.rs 3"
     "trusted/control.rs 8"
     "trusted/crash.rs 5"
@@ -81,6 +78,10 @@ done
 # Files moved onto the trusted layer's safe APIs that have no unsafe left
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
 forbidding_files=(
+    "address_space.rs"
+    "arch/x86_64/cpu/linux_cgroupfs.rs"
+    "arch/x86_64/cpu/linux_procfs.rs"
+    "arch/x86_64/cpu/linux_process_vm.rs"
     "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
     "arch/x86_64/cpu/architecture.rs"
@@ -141,8 +142,8 @@ if ! rg -q '^#!\[deny\(unsafe_code\)\]$' "${kernel_source}/lib.rs"; then
     exit 1
 fi
 allowed_modules="$(rg -c -U '#\[allow\(unsafe_code\)\]\n(pub(\([^)]*\))? )?mod ' "${kernel_source}/lib.rs" || true)"
-if (( ${allowed_modules:-0} > 7 )); then
-    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 7" >&2
+if (( ${allowed_modules:-0} > 6 )); then
+    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 6" >&2
     exit 1
 fi
 if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${allowed_modules:-0} )); then
@@ -150,14 +151,15 @@ if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${a
     exit 1
 fi
 
-# Only the memory layer makes a Frame or a PageTable from a bare physical
-# address (kernel/src/trusted/frame.rs and page_table.rs say why); every
-# other module starts from a FrameLease.
-constructors="$(rg -g '*.rs' -l '\b(Frame|PageTable)::from_physical\(' "$kernel_source" \
+# Only the memory layer makes a Frame, a PageTable or a loadable Root from
+# a bare physical address (kernel/src/trusted/frame.rs, page_table.rs and
+# root.rs say why); every other module starts from a FrameLease, and loads
+# only the kernel's own root (Root::kernel).
+constructors="$(rg -g '*.rs' -l '\b(Frame|PageTable|Root)::from_physical\(' "$kernel_source" \
     | sed "s|^${kernel_source}/||" \
     | rg -v '^(address_space\.rs|memory\.rs|arch/x86_64/paging\.rs|trusted/.*)$' || true)"
 if [[ -n "$constructors" ]]; then
-    echo "kernel unsafe check: Frame/PageTable::from_physical outside the memory layer:" >&2
+    echo "kernel unsafe check: Frame/PageTable/Root::from_physical outside the memory layer:" >&2
     echo "$constructors" >&2
     exit 1
 fi
@@ -174,16 +176,11 @@ if [[ -n "$boot_memory" ]]; then
     exit 1
 fi
 
-# A virtio DMA page is viewed from a bare physical address and its
-# direct-map address (trusted::dma::DmaView::from_direct_map) only at the
-# entry points pci.rs keeps for address_space.rs, which owns those pages'
-# leases; everything else starts from a FrameLease (DmaView::leased).
-dma_views="$(rg -g '*.rs' -l 'DmaView::from_direct_map\(' "$kernel_source" \
-    | sed "s|^${kernel_source}/||" \
-    | rg -v '^(address_space\.rs|memory\.rs|arch/x86_64/paging\.rs|arch/x86_64/pci\.rs|trusted/.*)$' || true)"
-if [[ -n "$dma_views" ]]; then
-    echo "kernel unsafe check: DmaView::from_direct_map outside pci.rs and the memory layer:" >&2
-    echo "$dma_views" >&2
+# A virtio DMA page is viewed only from its lease (trusted::dma::
+# DmaView::leased); the view from a bare direct-map address is gone and
+# must not come back.
+if rg -q -g '*.rs' 'DmaView::from_direct_map' "$kernel_source"; then
+    echo "kernel unsafe check: DmaView::from_direct_map is gone; views start from a FrameLease" >&2
     exit 1
 fi
 
@@ -211,15 +208,11 @@ if [[ -n "$firmware_pixels" ]]; then
     exit 1
 fi
 
-# A scratch buffer handed out until its next rewrite (trusted::scratch)
-# is for the generated /proc files `linux_regular_file` returns as
-# `&'static [u8]`; anything else owns its bytes.
-scratch_buffers="$(rg -g '*.rs' -l 'ScratchBuffer' "$kernel_source" \
-    | sed "s|^${kernel_source}/||" \
-    | rg -v '^(arch/x86_64/cpu/linux_(procfs|cgroupfs)\.rs|trusted/.*)$' || true)"
-if [[ -n "$scratch_buffers" ]]; then
-    echo "kernel unsafe check: trusted::scratch outside the generated /proc files:" >&2
-    echo "$scratch_buffers" >&2
+# The generated /proc files are owned per read
+# (cpu/linux_descriptors.rs's RegularFile); the static scratch buffer they
+# shared (trusted::scratch) is gone and must not come back.
+if [[ -e "${kernel_source}/trusted/scratch.rs" ]] || rg -q -g '*.rs' 'ScratchBuffer' "$kernel_source"; then
+    echo "kernel unsafe check: trusted::scratch is gone; generated files own their bytes" >&2
     exit 1
 fi
 

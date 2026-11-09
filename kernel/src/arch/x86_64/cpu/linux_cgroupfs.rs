@@ -16,12 +16,12 @@
 //! written since), then kills the process of the cgroup that holds the most
 //! memory, as Linux's memory-cgroup OOM killer does.
 
+#![forbid(unsafe_code)]
+
 use super::*;
 
 use crate::linux_cgroup::{self as cgroup, Event, Limit, Slot, NO_SLOT};
 use linox_cgroup::{Controllers, Output};
-
-use crate::trusted::scratch::ScratchBuffer;
 
 const ROOT: &[u8] = b"sys/fs/cgroup";
 
@@ -274,12 +274,8 @@ pub(super) fn linux_cgroup_rmdir(directory: crate::linux_overlay::Handle) -> Res
 
 /// `/proc/self/cgroup`: the current process's cgroup as cgroup v2's one
 /// line, `0::/` and its path below `/sys/fs/cgroup`.
-pub(super) fn linux_proc_cgroup() -> &'static [u8] {
-    static CGROUP_FILE: ScratchBuffer<[u8; crate::linux_overlay::PATH_CAPACITY + 8]> =
-        ScratchBuffer::new([0; crate::linux_overlay::PATH_CAPACITY + 8]);
-    // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
-    // the bytes before another read can rewrite them.
-    let file = unsafe { CGROUP_FILE.rewrite() };
+pub(super) fn linux_proc_cgroup() -> Option<RegularFile> {
+    let mut file = [0_u8; crate::linux_overlay::PATH_CAPACITY + 8];
     let mut path = [0_u8; crate::linux_overlay::PATH_CAPACITY];
     let length = process_memcg(current_linux_process_pid())
         .and_then(|slot| cgroup_path(slot, &mut path))
@@ -291,10 +287,9 @@ pub(super) fn linux_proc_cgroup() -> &'static [u8] {
         && output.push(b"\n");
     let used = if written { output.len() } else { 0 };
     if used == 0 {
-        return LINUX_PROC_CGROUP;
+        return Some(RegularFile::Fixed(LINUX_PROC_CGROUP));
     }
-    let file: &'static [u8] = file;
-    &file[..used]
+    RegularFile::generated(&file[..used])
 }
 
 /// The memory cgroup of the cgroup of directory generation `generation`

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::*;
 
 pub(super) fn linux_process_vm_iov(
@@ -241,19 +243,22 @@ fn linux_proc_mem_page(
     } else {
         mapping.frame
     };
-    let Some(target) = frame.direct_map_address() else {
+    // The frame is mapped by the target's page tables (or is its private
+    // copy just mapped there) and stays mapped while the kernel-entry lock
+    // is held.
+    let Some(target) = crate::trusted::frame::Frame::leased(frame) else {
         return false;
     };
-    // SAFETY: the frame is mapped by the target's page tables (or is its
-    // private copy just mapped there), stays mapped while the kernel-entry
-    // lock is held, and `start + bytes.len()` stays within the page.
-    unsafe {
-        let page_bytes = (target as *mut u8).add(start);
-        if write {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), page_bytes, bytes.len());
-        } else {
-            core::ptr::copy_nonoverlapping(page_bytes, bytes.as_mut_ptr(), bytes.len());
-        }
+    if start
+        .checked_add(bytes.len())
+        .is_none_or(|end| end > crate::trusted::frame::FRAME_SIZE)
+    {
+        return false;
+    }
+    if write {
+        target.write_bytes(start, bytes);
+    } else {
+        target.read_bytes(start, bytes);
     }
     true
 }

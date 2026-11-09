@@ -855,7 +855,7 @@ fn linux_syscall_dispatch(
             if device & LINUX_DEVICE_CONSOLE != 0 {
                 LINUX_ESPIPE
             } else if linux_rootfs_entry(first_argument).is_some()
-                || linux_regular_file(device).is_some()
+                || linux_regular_file_contents(device).is_some()
                 || linux_tmp_file(device)
                 || device & !3 == LINUX_FILE_PROC_DYNAMIC_PAGEMAP
                 || device & !3 == LINUX_FILE_PROC_DYNAMIC_MEM

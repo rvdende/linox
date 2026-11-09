@@ -158,7 +158,7 @@ pub(super) fn linux_descriptor_read(descriptor: u64, address: u64, count: u64) -
         }
         return result;
     }
-    if let Some(file) = linux_regular_file(device) {
+    if let Some(file) = linux_regular_file_contents(device) {
         if !matches!(device & 3, LINUX_DESCRIPTOR_INPUT | 3) {
             return LINUX_EBADF;
         }
@@ -706,7 +706,7 @@ pub(super) fn linux_regular_file_read_at(
         }
         return (end - start) as u64;
     }
-    let Some(file) = linux_regular_file(state) else {
+    let Some(file) = linux_regular_file_contents(state) else {
         return if linux_descriptor_open(descriptor) {
             LINUX_ESPIPE
         } else {
@@ -2139,7 +2139,7 @@ pub(super) fn linux_descriptor_readv(descriptor: u64, vectors: u64, count: u64) 
         }
         return 1;
     }
-    if let Some(file) = linux_regular_file(device) {
+    if let Some(file) = linux_regular_file_contents(device) {
         let offset = linux_descriptor_offset(descriptor).load(Ordering::SeqCst);
         let Ok(start) = usize::try_from(offset) else {
             return 0;
