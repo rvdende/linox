@@ -19,13 +19,11 @@
 mod log;
 mod trap;
 
-use core::ptr::read_unaligned;
-
 use crate::drivers::net::{self, Nic};
 use crate::drivers::{
     ahci, amd_iommu, clock, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
 };
-use crate::trusted::mmio::Mmio;
+use crate::trusted::{firmware, mmio::Mmio};
 use crate::{BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 
 pub use trap::report_panic;
@@ -174,56 +172,52 @@ fn report_summary(summary: &Summary) {
 fn calibrate_clock(rsdp: u64) -> Option<(&'static str, u64)> {
     let mut references = [None; 2];
     for_each_table(rsdp, |signature, table| {
-        // SAFETY: the firmware identity map covers its ACPI tables; reads
-        // stay inside the length the table records.
-        unsafe {
-            let length = u64::from(read_unaligned((table + 4) as *const u32));
-            match signature {
-                // FADT (ACPI 6.5 section 5.2.9): PM_TMR_BLK at 76, PM_TMR_LEN
-                // at 91, flags at 112 (TMR_VAL_EXT is bit 8, HW_REDUCED_ACPI
-                // bit 20), X_PM_TMR_BLK (a generic address) at 208.
-                b"FACP" if length >= 116 => {
-                    let flags = read_unaligned((table + 112) as *const u32);
-                    let wide = flags & 1 << 8 != 0;
-                    if flags & 1 << 20 != 0 {
-                        return;
-                    }
-                    let extended = if length >= 220 {
-                        let space = read_unaligned((table + 208) as *const u8);
-                        let address = read_unaligned((table + 212) as *const u64);
-                        match (space, address) {
-                            (_, 0) => None,
-                            (0, address) => Some(clock::Reference::PmTimerMemory { address, wide }),
-                            (1, port) if port <= 0xffff => Some(clock::Reference::PmTimerPort {
-                                port: port as u16,
-                                wide,
-                            }),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    let port = read_unaligned((table + 76) as *const u32);
-                    let length = read_unaligned((table + 91) as *const u8);
-                    references[0] = extended.or_else(|| {
-                        (port != 0 && port <= 0xffff && length == 4).then_some(
-                            clock::Reference::PmTimerPort {
-                                port: port as u16,
-                                wide,
-                            },
-                        )
-                    });
+        let length = table.len();
+        match signature {
+            // FADT (ACPI 6.5 section 5.2.9): PM_TMR_BLK at 76, PM_TMR_LEN
+            // at 91, flags at 112 (TMR_VAL_EXT is bit 8, HW_REDUCED_ACPI
+            // bit 20), X_PM_TMR_BLK (a generic address) at 208.
+            b"FACP" if length >= 116 => {
+                let flags = u32_at(table, 112);
+                let wide = flags & 1 << 8 != 0;
+                if flags & 1 << 20 != 0 {
+                    return;
                 }
-                // HPET description table: the block's generic address at 40.
-                b"HPET" if length >= 56 => {
-                    let space = read_unaligned((table + 40) as *const u8);
-                    let address = read_unaligned((table + 44) as *const u64);
-                    if space == 0 && address != 0 {
-                        references[1] = Some(clock::Reference::Hpet { address });
+                let extended = if length >= 220 {
+                    let space = table[208];
+                    let address = u64_at(table, 212);
+                    match (space, address) {
+                        (_, 0) => None,
+                        (0, address) => Some(clock::Reference::PmTimerMemory { address, wide }),
+                        (1, port) if port <= 0xffff => Some(clock::Reference::PmTimerPort {
+                            port: port as u16,
+                            wide,
+                        }),
+                        _ => None,
                     }
-                }
-                _ => {}
+                } else {
+                    None
+                };
+                let port = u32_at(table, 76);
+                let length = table[91];
+                references[0] = extended.or_else(|| {
+                    (port != 0 && port <= 0xffff && length == 4).then_some(
+                        clock::Reference::PmTimerPort {
+                            port: port as u16,
+                            wide,
+                        },
+                    )
+                });
             }
+            // HPET description table: the block's generic address at 40.
+            b"HPET" if length >= 56 => {
+                let space = table[40];
+                let address = u64_at(table, 44);
+                if space == 0 && address != 0 {
+                    references[1] = Some(clock::Reference::Hpet { address });
+                }
+            }
+            _ => {}
         }
     });
     for reference in references.into_iter().flatten() {
@@ -247,38 +241,70 @@ fn calibrate_clock(rsdp: u64) -> Option<(&'static str, u64)> {
     None
 }
 
-/// Calls `visit` with the signature and address of every table the root
-/// table lists.
-fn for_each_table(rsdp: u64, mut visit: impl FnMut(&[u8; 4], u64)) {
-    // SAFETY: the firmware identity map covers its ACPI tables; every read is
-    // bounded by the table lengths the firmware recorded.
-    unsafe {
-        if rsdp == 0 || read_bytes::<8>(rsdp) != *b"RSD PTR " {
-            return;
-        }
-        let revision = read_unaligned((rsdp + 15) as *const u8);
-        let (root, entry_size) = if revision >= 2 {
-            (read_unaligned((rsdp + 24) as *const u64), 8)
-        } else {
-            (u64::from(read_unaligned((rsdp + 16) as *const u32)), 4)
-        };
-        if root == 0 {
-            return;
-        }
-        let length = u64::from(read_unaligned((root + 4) as *const u32));
-        let mut offset = 36;
-        while offset + entry_size <= length {
+/// Calls `visit` with the signature and bytes of every table the root
+/// table lists: the whole table when the firmware maps the length its
+/// header records, else only that 8-byte header.
+fn for_each_table(rsdp: u64, mut visit: impl FnMut(&[u8; 4], &[u8])) {
+    if rsdp == 0 {
+        return;
+    }
+    let Some(revision) = firmware::with_identity_mapped(rsdp, 16, |prefix| {
+        prefix.starts_with(b"RSD PTR ").then(|| prefix[15])
+    })
+    .flatten() else {
+        return;
+    };
+    let root = if revision >= 2 {
+        firmware::with_identity_mapped(rsdp, 32, |rsdp| (u64_at(rsdp, 24), 8))
+    } else {
+        firmware::with_identity_mapped(rsdp, 20, |rsdp| (u64::from(u32_at(rsdp, 16)), 4))
+    };
+    let Some((root, entry_size)) = root.filter(|(root, _)| *root != 0) else {
+        return;
+    };
+    let Some(length) = firmware::with_identity_mapped(root, 8, |header| u32_at(header, 4)) else {
+        return;
+    };
+    firmware::with_identity_mapped(root, length as usize, |root| {
+        let entries = root.get(36..).unwrap_or_default();
+        for entry in entries.chunks_exact(entry_size) {
             let table = if entry_size == 8 {
-                read_unaligned((root + offset) as *const u64)
+                u64_at(entry, 0)
             } else {
-                u64::from(read_unaligned((root + offset) as *const u32))
+                u64::from(u32_at(entry, 0))
             };
-            offset += entry_size;
-            if table != 0 {
-                visit(&read_bytes::<4>(table), table);
+            if table == 0 {
+                continue;
+            }
+            let Some((signature, length)) = firmware::with_identity_mapped(table, 8, |header| {
+                (bytes_at::<4>(header, 0), u32_at(header, 4) as usize)
+            }) else {
+                continue;
+            };
+            if firmware::with_identity_mapped(table, length, |table| visit(&signature, table))
+                .is_none()
+            {
+                let _ =
+                    firmware::with_identity_mapped(table, 8, |header| visit(&signature, header));
             }
         }
-    }
+    });
+}
+
+/// The `N` bytes at `offset` of a table, zeros past its end.
+fn bytes_at<const N: usize>(table: &[u8], offset: usize) -> [u8; N] {
+    table
+        .get(offset..offset.saturating_add(N))
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0; N])
+}
+
+fn u32_at(table: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes_at(table, offset))
+}
+
+fn u64_at(table: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes_at(table, offset))
 }
 
 fn halt() -> ! {
@@ -873,7 +899,7 @@ fn report_memory(boot_info: &BootInfo) {
     for index in 0..count {
         // SAFETY: kernel_main validated the memory-map bounds and descriptor size.
         let descriptor = unsafe {
-            read_unaligned(
+            core::ptr::read_unaligned(
                 boot_info
                     .memory_map
                     .add(index * boot_info.memory_descriptor_size)
@@ -913,22 +939,16 @@ fn report_acpi(rsdp: u64) -> Option<amd_iommu::Ivrs> {
     say!("linox: ACPI tables:");
     for_each_table(rsdp, |signature, table| {
         say!(" {}", core::str::from_utf8(signature).unwrap_or("????"));
-        // SAFETY: the firmware identity map covers its ACPI tables; every
-        // read is bounded by the table lengths the firmware recorded.
-        unsafe {
-            match signature {
-                b"APIC" => report_madt(table),
-                b"IVRS" => {
-                    let length = read_unaligned((table + 4) as *const u32) as usize;
-                    let bytes = core::slice::from_raw_parts(table as *const u8, length);
-                    ivrs = Some(amd_iommu::parse_ivrs(bytes));
-                    say!("[AMD-Vi]");
-                }
-                b"DMAR" => say!("[Intel VT-d]"),
-                b"MCFG" => report_mcfg(table),
-                b"HPET" => say!("[{:#x}]", read_unaligned((table + 44) as *const u64)),
-                _ => {}
+        match signature {
+            b"APIC" => report_madt(table),
+            b"IVRS" => {
+                ivrs = Some(amd_iommu::parse_ivrs(table));
+                say!("[AMD-Vi]");
             }
+            b"DMAR" => say!("[Intel VT-d]"),
+            b"MCFG" => report_mcfg(table),
+            b"HPET" => say!("[{:#x}]", u64_at(table, 44)),
+            _ => {}
         }
     });
     say!("\n");
@@ -1199,19 +1219,19 @@ fn verify_dma_confinement(
     }
 }
 
-unsafe fn report_madt(table: u64) {
-    let length = u64::from(read_unaligned((table + 4) as *const u32));
+fn report_madt(table: &[u8]) {
+    let length = table.len();
     let (mut enabled, mut capable) = (0, 0);
     let mut offset = 44;
     while offset + 2 <= length {
-        let kind = read_unaligned((table + offset) as *const u8);
-        let size = u64::from(read_unaligned((table + offset + 1) as *const u8));
+        let kind = table[offset];
+        let size = usize::from(table[offset + 1]);
         if size < 2 {
             break;
         }
         let flags = match kind {
-            0 => Some(read_unaligned((table + offset + 4) as *const u32)),
-            9 => Some(read_unaligned((table + offset + 8) as *const u32)),
+            0 => Some(u32_at(table, offset + 4)),
+            9 => Some(u32_at(table, offset + 8)),
             _ => None,
         };
         match flags {
@@ -1228,22 +1248,18 @@ unsafe fn report_madt(table: u64) {
     say!("]");
 }
 
-unsafe fn report_mcfg(table: u64) {
-    let length = u64::from(read_unaligned((table + 4) as *const u32));
+fn report_mcfg(table: &[u8]) {
+    let length = table.len();
     let mut offset = 44;
     while offset + 16 <= length {
         say!(
             "[{:#x} buses {}-{}]",
-            read_unaligned((table + offset) as *const u64),
-            read_unaligned((table + offset + 10) as *const u8),
-            read_unaligned((table + offset + 11) as *const u8)
+            u64_at(table, offset),
+            table[offset + 10],
+            table[offset + 11]
         );
         offset += 16;
     }
-}
-
-unsafe fn read_bytes<const N: usize>(address: u64) -> [u8; N] {
-    read_unaligned(address as *const [u8; N])
 }
 
 /// Checks NVMe writes on every Linox volume partition without changing it:

@@ -6,6 +6,7 @@
 //!   through the direct map.
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
+//! - [`firmware`]: firmware (ACPI) tables viewed in place for parsing.
 //! - [`pci_config`]: PCI configuration space.
 //! - [`mmio`]: a window of one device's memory-mapped registers.
 //! - [`msr`]: the model-specific registers the kernel uses outside the CPU
@@ -15,6 +16,7 @@
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
+pub(crate) mod firmware;
 pub(crate) mod frame;
 pub(crate) mod mmio;
 pub(crate) mod msr;

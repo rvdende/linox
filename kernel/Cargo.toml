@@ -25,6 +25,7 @@ linox-tty = { path = "../crates/tty" }
 linox-image-store = { path = "../crates/image-store" }
 linox-memory-areas = { path = "../crates/memory-areas" }
 linox-initial-stack = { path = "../crates/initial-stack" }
+linox-acpi-tables = { path = "../crates/acpi-tables" }
 linox-deadline-heap = { path = "../crates/deadline-heap" }
 linox-slab = { path = "../crates/slab" }
 linox-cgroup = { path = "../crates/cgroup" }

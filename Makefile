@@ -388,6 +388,8 @@ check: manifest architecture-check linux-compat-check
 	@cargo test --package linox-memory-areas
 	@cargo clippy --package linox-initial-stack --all-targets -- -D warnings
 	@cargo test --package linox-initial-stack
+	@cargo clippy --package linox-acpi-tables --all-targets -- -D warnings
+	@cargo test --package linox-acpi-tables
 	@cargo clippy --package linox-deadline-heap --all-targets -- -D warnings
 	@cargo test --package linox-deadline-heap
 	@cargo clippy --package linox-slab --all-targets -- -D warnings

@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 738 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 738 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 695 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 695 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 362 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 362 to ${undocumented}" >&2
+if (( undocumented > 321 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 321 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 43 )); then
@@ -31,6 +31,7 @@ fi
 # sites; a file may not grow.
 per_file_limits=(
     "address_space.rs 80"
+    "bringup/mod.rs 20"
     "arch/x86_64/paging.rs 14"
     "arch/x86_64/iommu.rs 2"
     "arch/x86_64/pci.rs 25"
@@ -40,7 +41,7 @@ per_file_limits=(
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
-    "lib.rs 30"
+    "lib.rs 28"
     "memory.rs 38"
     "drivers/ahci.rs 4"
     "drivers/amd_iommu.rs 13"
@@ -49,6 +50,7 @@ per_file_limits=(
     "drivers/nvme.rs 10"
     "drivers/realtek.rs 8"
     "drivers/xhci.rs 19"
+    "trusted/firmware.rs 2"
     "trusted/frame.rs 9"
     "trusted/mmio.rs 2"
     "trusted/msr.rs 3"
@@ -69,6 +71,7 @@ done
 # Files moved onto the trusted layer's safe APIs that have no unsafe left
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
 forbidding_files=(
+    "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
     "drivers/clock.rs"
     "drivers/pci.rs"
@@ -101,6 +104,17 @@ firmware_registers="$(rg -g '*.rs' -l 'Mmio::firmware\(' "$kernel_source" \
 if [[ -n "$firmware_registers" ]]; then
     echo "kernel unsafe check: Mmio::firmware outside hardware bring-up:" >&2
     echo "$firmware_registers" >&2
+    exit 1
+fi
+
+# Firmware tables are viewed in place (trusted::firmware) only by the
+# code that parses ACPI; any other memory needs a type that copies.
+firmware_views="$(rg -g '*.rs' -l 'firmware::with_(direct|identity)_mapped\(' "$kernel_source" \
+    | sed "s|^${kernel_source}/||" \
+    | rg -v '^(lib\.rs|arch/x86_64/acpi\.rs|bringup/.*|trusted/.*)$' || true)"
+if [[ -n "$firmware_views" ]]; then
+    echo "kernel unsafe check: firmware table views outside the ACPI parsers:" >&2
+    echo "$firmware_views" >&2
     exit 1
 fi
 
