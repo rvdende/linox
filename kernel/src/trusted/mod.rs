@@ -6,6 +6,8 @@
 //!   through the direct map.
 //! - [`frame_tables`]: the frame allocator's per-frame tables, carved out
 //!   of RAM once at boot.
+//! - [`heap`]: the kernel heap's allocator (`GlobalAlloc`), its slabs and
+//!   frame runs.
 //! - [`boot`]: the loader's boot handoff (the firmware memory map).
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
@@ -30,6 +32,7 @@
 //!   interrupt vectors.
 //! - [`ap_start`]: the application processors' start-up trampoline.
 //! - [`tsc`]: the timestamp counter, and the processor id beside it.
+//! - [`random`]: the processor's random number generator (RDRAND).
 //! - [`boot`]: the kernel's entry from the loader and the boot information
 //!   it hands over.
 //! - [`control`]: control registers, the stack pointer, CR0.WP, the task
@@ -39,6 +42,8 @@
 //! - [`crash`]: the bring-up exception table, the live page-table walk and
 //!   the reads crash reports make.
 //! - [`take_once`]: a static handed out as `&'static mut` once.
+//! - [`scratch`]: a static buffer rewritten under the kernel-entry lock and
+//!   viewed until the next rewrite (generated /proc files).
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
 //! - [`owned_state`]: set-once owners for long-lived kernel objects.
@@ -60,6 +65,7 @@ pub(crate) mod entry;
 pub(crate) mod firmware;
 pub(crate) mod frame;
 pub(crate) mod frame_tables;
+pub(crate) mod heap;
 pub(crate) mod image;
 pub(crate) mod interrupts;
 pub(crate) mod lock;
@@ -70,7 +76,9 @@ pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod pixels;
 pub(crate) mod port;
+pub(crate) mod random;
 pub(crate) mod root;
+pub(crate) mod scratch;
 pub(crate) mod take_once;
 pub(crate) mod tsc;
 pub(crate) mod user_copy;

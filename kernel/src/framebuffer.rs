@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Text console on the linear framebuffer left active by UEFI.
 //!
 //! Physical machines rarely expose a serial port, so every byte written to the
@@ -27,6 +28,7 @@ use linox_virtio_gpu::Rect;
 
 use crate::owned_state::OwnedState;
 use crate::trusted::claim::ClaimCell;
+use crate::trusted::crash::FatalReport;
 use crate::trusted::pixels::PixelBuffer;
 use crate::{BootFramebuffer, FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_RGBX};
 
@@ -325,15 +327,11 @@ pub(crate) fn write(bytes: &[u8]) {
 
 /// Releases the console after a fatal exception or panic that may have
 /// struck while it was drawing, so the crash report still reaches the
-/// screen. The text model may be mid-update; a report is worth more.
-///
-/// # Safety
-///
-/// The caller reports a fatal error and halts, on the only CPU running:
-/// whatever it interrupted never resumes.
-pub(crate) unsafe fn recover() {
+/// screen. The text model may be mid-update; a report is worth more. Only
+/// a crash report has a [`FatalReport`] (`trusted::crash::recover_console`).
+pub(crate) fn recover(report: &FatalReport) {
     OWNED.store(false, Ordering::Release);
-    CONSOLE.release_abandoned();
+    CONSOLE.release_abandoned(report);
 }
 
 /// Scrolls a quarter of the screen at a time instead of one line. Each

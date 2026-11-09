@@ -194,14 +194,18 @@ pub(crate) fn stack_word(address: u64) -> Option<u64> {
     Some(unsafe { (address as *const u64).read_volatile() })
 }
 
+/// The standing of a crash report that halts when it is done, on the only
+/// CPU running: what it interrupted never resumes. Only
+/// [`recover_console`] makes one, to take back state that code was using
+/// (`ClaimCell::release_abandoned`).
+pub(crate) struct FatalReport(());
+
 /// Releases the console after a fatal exception or panic that may have
 /// struck while it was drawing, so the crash report reaches the screen.
 /// Only the crash reports call this (`bringup/trap.rs`), and they halt
 /// afterwards, as `stack_word`'s callers do.
 pub(crate) fn recover_console() {
-    // SAFETY: `framebuffer::recover`'s contract: the caller reports a fatal
-    // error and halts, so whatever it interrupted never resumes (see above).
-    unsafe { crate::framebuffer::recover() }
+    crate::framebuffer::recover(&FatalReport(()));
 }
 
 /// A `&'static str` read and written atomically (a sequence lock over its

@@ -1,35 +1,26 @@
+#![forbid(unsafe_code)]
 use super::*;
+use crate::owned_state::OwnedState;
+use crate::trusted::random::Rdrand;
 
 pub(crate) fn linux_startup_random() -> Option<[u8; 16]> {
-    if core::arch::x86_64::__cpuid(1).ecx & (1 << 30) == 0 {
-        return None;
-    }
+    let rdrand = Rdrand::detect()?;
     let mut output = [0_u8; 16];
     for chunk in output.as_chunks_mut::<8>().0 {
-        let mut generated = None;
-        for _ in 0..16 {
-            let mut value: u64;
-            let mut ready: u8;
-            unsafe {
-                asm!(
-                    "rdrand {value}",
-                    "setc {ready}",
-                    value = out(reg) value,
-                    ready = out(reg_byte) ready,
-                    options(nostack, preserves_flags)
-                );
-            }
-            if ready != 0 {
-                generated = Some(value);
-                break;
-            }
-        }
+        let generated = (0..16).find_map(|_| rdrand.read());
         chunk.copy_from_slice(&generated?.to_ne_bytes());
     }
     Some(output)
 }
 
+/// /proc/sys/kernel/random/boot_id, made on first read.
+static LINUX_BOOT_ID: OwnedState<[u8; 37]> = OwnedState::empty();
+
 pub(super) fn linux_boot_id() -> &'static [u8] {
+    // The text cpu.rs's runtime owner kept for this before
+    // (X86_RUNTIME.LINUX_BOOT_ID) is no longer written; it goes with the
+    // next change to that owner.
+    let _retired = &X86_RUNTIME.LINUX_BOOT_ID.0 .0;
     if X86_RUNTIME.LINUX_BOOT_ID_STATE.load(Ordering::Acquire) != 2
         && X86_RUNTIME
             .LINUX_BOOT_ID_STATE
@@ -39,7 +30,7 @@ pub(super) fn linux_boot_id() -> &'static [u8] {
         let mut random = linux_startup_random().unwrap_or([0x47; 16]);
         random[6] = random[6] & 0x0f | 0x40;
         random[8] = random[8] & 0x3f | 0x80;
-        let output = unsafe { &mut *X86_RUNTIME.LINUX_BOOT_ID.0 .0.get() };
+        let mut output = [0_u8; 37];
         let hex = b"0123456789abcdef";
         let mut target = 0;
         for (index, byte) in random.into_iter().enumerate() {
@@ -52,12 +43,17 @@ pub(super) fn linux_boot_id() -> &'static [u8] {
             target += 2;
         }
         output[36] = b'\n';
+        // Only the reader that moved the state from 0 to 1 gets here, so
+        // the slot is still empty.
+        let _ = LINUX_BOOT_ID.try_install(output);
         X86_RUNTIME.LINUX_BOOT_ID_STATE.store(2, Ordering::Release);
     }
-    while X86_RUNTIME.LINUX_BOOT_ID_STATE.load(Ordering::Acquire) != 2 {
+    loop {
+        if let Some(boot_id) = LINUX_BOOT_ID.get() {
+            return boot_id;
+        }
         core::hint::spin_loop();
     }
-    unsafe { &*X86_RUNTIME.LINUX_BOOT_ID.0 .0.get() }
 }
 
 pub(super) fn linux_getrandom(address: u64, length: u64, flags: u64) -> u64 {

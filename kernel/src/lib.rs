@@ -25,12 +25,9 @@ mod control_abi;
 mod cpu_time;
 mod crypto;
 mod domain;
-#[allow(unsafe_code)]
 mod drivers;
 mod executable;
-#[allow(unsafe_code)]
 mod framebuffer;
-#[allow(unsafe_code)]
 mod heap;
 #[allow(unsafe_code)]
 mod image_store;

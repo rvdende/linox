@@ -9,20 +9,20 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 367 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 367 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 363 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 363 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 125 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 125 to ${undocumented}" >&2
+if (( undocumented > 121 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 121 to ${undocumented}" >&2
     exit 1
 fi
-if (( static_mut > 3 )); then
-    echo "kernel unsafe check: top-level static mut declarations grew from 3 to ${static_mut}" >&2
+if (( static_mut > 0 )); then
+    echo "kernel unsafe check: the kernel has ${static_mut} static mut declarations; it has none" >&2
     exit 1
 fi
 
@@ -34,33 +34,37 @@ per_file_limits=(
     "address_space.rs 80"
     "arch/x86_64/cpu/boot_verify.rs 1"
     "arch/x86_64/cpu/boot_verify_elf.rs 3"
+    "arch/x86_64/cpu/linux_cgroupfs.rs 1"
+    "arch/x86_64/cpu/linux_procfs.rs 2"
     "arch/x86_64/cpu/linux_user_memory.rs 1"
     "arch/x86_64/cpu/native_services.rs 2"
-    "framebuffer.rs 1"
     "image_store.rs 1"
     "lib.rs 0"
     "linux_overlay.rs 6"
     "trusted/boot.rs 9"
-    "trusted/claim.rs 4"
+    "trusted/claim.rs 3"
     "trusted/cpu_tables.rs 12"
-    "trusted/dma.rs 3"
+    "trusted/dma.rs 4"
     "trusted/firmware.rs 2"
     "trusted/frame.rs 9"
     "trusted/frame_tables.rs 2"
+    "trusted/heap.rs 7"
     "trusted/image.rs 9"
     "trusted/mmio.rs 2"
     "trusted/msr.rs 3"
     "trusted/page_table.rs 2"
     "trusted/pixels.rs 3"
+    "trusted/random.rs 1"
     "trusted/root.rs 3"
     "trusted/port.rs 8"
     "trusted/ap_start.rs 1"
     "trusted/interrupts.rs 7"
     "trusted/lock.rs 3"
     "trusted/owned_state.rs 4"
+    "trusted/scratch.rs 3"
     "trusted/tsc.rs 3"
     "trusted/control.rs 8"
-    "trusted/crash.rs 6"
+    "trusted/crash.rs 5"
     "trusted/take_once.rs 2"
     "trusted/user_copy.rs 2"
 )
@@ -81,6 +85,7 @@ forbidding_files=(
     "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
     "arch/x86_64/cpu/architecture.rs"
+    "arch/x86_64/cpu/linux_system.rs"
     "arch/x86_64/iommu.rs"
     "arch/x86_64/paging.rs"
     "arch/x86_64/pci.rs"
@@ -94,12 +99,15 @@ forbidding_files=(
     "drivers/clock.rs"
     "drivers/e1000e.rs"
     "drivers/hda.rs"
+    "drivers/mod.rs"
     "drivers/nvme.rs"
     "drivers/pci.rs"
     "drivers/realtek.rs"
     "drivers/usb_input.rs"
     "drivers/virtio_gpu.rs"
     "drivers/xhci.rs"
+    "framebuffer.rs"
+    "heap.rs"
     "initramfs.rs"
     "ipc.rs"
     "linux_aio.rs"
@@ -133,8 +141,8 @@ if ! rg -q '^#!\[deny\(unsafe_code\)\]$' "${kernel_source}/lib.rs"; then
     exit 1
 fi
 allowed_modules="$(rg -c -U '#\[allow\(unsafe_code\)\]\n(pub(\([^)]*\))? )?mod ' "${kernel_source}/lib.rs" || true)"
-if (( ${allowed_modules:-0} > 11 )); then
-    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 11" >&2
+if (( ${allowed_modules:-0} > 8 )); then
+    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 8" >&2
     exit 1
 fi
 if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${allowed_modules:-0} )); then
@@ -200,6 +208,18 @@ firmware_pixels="$(rg -g '*.rs' -l 'PixelBuffer::firmware\(' "$kernel_source" \
 if [[ -n "$firmware_pixels" ]]; then
     echo "kernel unsafe check: PixelBuffer::firmware outside the boot path:" >&2
     echo "$firmware_pixels" >&2
+    exit 1
+fi
+
+# A scratch buffer handed out until its next rewrite (trusted::scratch)
+# is for the generated /proc files `linux_regular_file` returns as
+# `&'static [u8]`; anything else owns its bytes.
+scratch_buffers="$(rg -g '*.rs' -l 'ScratchBuffer' "$kernel_source" \
+    | sed "s|^${kernel_source}/||" \
+    | rg -v '^(arch/x86_64/cpu/linux_(procfs|cgroupfs)\.rs|trusted/.*)$' || true)"
+if [[ -n "$scratch_buffers" ]]; then
+    echo "kernel unsafe check: trusted::scratch outside the generated /proc files:" >&2
+    echo "$scratch_buffers" >&2
     exit 1
 fi
 

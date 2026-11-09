@@ -21,6 +21,8 @@ use super::*;
 use crate::linux_cgroup::{self as cgroup, Event, Limit, Slot, NO_SLOT};
 use linox_cgroup::{Controllers, Output};
 
+use crate::trusted::scratch::ScratchBuffer;
+
 const ROOT: &[u8] = b"sys/fs/cgroup";
 
 /// What a control file holds, as its name says.
@@ -273,17 +275,17 @@ pub(super) fn linux_cgroup_rmdir(directory: crate::linux_overlay::Handle) -> Res
 /// `/proc/self/cgroup`: the current process's cgroup as cgroup v2's one
 /// line, `0::/` and its path below `/sys/fs/cgroup`.
 pub(super) fn linux_proc_cgroup() -> &'static [u8] {
-    static mut CGROUP_FILE: [u8; crate::linux_overlay::PATH_CAPACITY + 8] =
-        [0; crate::linux_overlay::PATH_CAPACITY + 8];
+    static CGROUP_FILE: ScratchBuffer<[u8; crate::linux_overlay::PATH_CAPACITY + 8]> =
+        ScratchBuffer::new([0; crate::linux_overlay::PATH_CAPACITY + 8]);
     // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
     // the bytes before another read can rewrite them.
-    let file = unsafe { &mut *core::ptr::addr_of_mut!(CGROUP_FILE) };
+    let file = unsafe { CGROUP_FILE.rewrite() };
     let mut path = [0_u8; crate::linux_overlay::PATH_CAPACITY];
     let length = process_memcg(current_linux_process_pid())
         .and_then(|slot| cgroup_path(slot, &mut path))
         .unwrap_or(ROOT.len());
     let relative = path.get(ROOT.len()..length).unwrap_or_default();
-    let mut output = Output::new(file);
+    let mut output = Output::new(&mut file[..]);
     let written = output.push(b"0::")
         && output.push(if relative.is_empty() { b"/" } else { relative })
         && output.push(b"\n");
@@ -291,8 +293,8 @@ pub(super) fn linux_proc_cgroup() -> &'static [u8] {
     if used == 0 {
         return LINUX_PROC_CGROUP;
     }
-    // SAFETY: as above.
-    unsafe { &(&*core::ptr::addr_of!(CGROUP_FILE))[..used] }
+    let file: &'static [u8] = file;
+    &file[..used]
 }
 
 /// The memory cgroup of the cgroup of directory generation `generation`

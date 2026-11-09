@@ -216,12 +216,34 @@ impl DmaView {
     }
 
     /// Writes back and invalidates the cache lines over `length` bytes from
-    /// `offset`, for devices that do not snoop the processor caches.
+    /// `offset`, for devices that read and write memory without snooping
+    /// the processor caches: call it after filling a buffer such a device
+    /// will read, and before reading what it wrote.
     pub(crate) fn flush_cache(&self, offset: usize, length: usize) {
         if let Some(address) = span(self.base, self.length, offset, length, 1) {
-            crate::drivers::flush_cache(address, length);
+            flush_lines(address, length);
         }
     }
+}
+
+/// Writes back and invalidates the cache lines covering `length` bytes at
+/// `address`, a range inside one view (checked by its caller).
+fn flush_lines(address: usize, length: usize) {
+    const LINE: usize = 64;
+    let end = address.saturating_add(length);
+    let mut line = address & !(LINE - 1);
+    while line < end {
+        // SAFETY: CLFLUSH only writes back and invalidates the line, which
+        // changes no value the program reads; the line holds bytes of the
+        // view, which is mapped (a line's first bytes may lie just before
+        // it, on the same mapped page).
+        unsafe { core::arch::x86_64::_mm_clflush(line as *const u8) };
+        line += LINE;
+    }
+    // A full fence (MFENCE, or a locked instruction where the compiler
+    // picks one) orders the flushes before later accesses: CLFLUSH is
+    // ordered with both (Intel SDM vol. 2A, CLFLUSH).
+    core::sync::atomic::fence(Ordering::SeqCst);
 }
 
 /// `PAGES` zeroed, contiguous, page-aligned DMA pages in a `static`,

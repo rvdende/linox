@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Device drivers for physical hardware, independent of the QEMU reference
 //! devices that the main boot path is built around.
 //!
@@ -90,25 +91,6 @@ impl From<(u64, u64)> for DmaRegion {
     fn from((start, length): (u64, u64)) -> Self {
         Self { start, length }
     }
-}
-
-/// Writes back and invalidates the cache lines covering `length` bytes at
-/// `address`, for devices that read and write memory without snooping the
-/// processor caches: call it after filling a buffer such a device will
-/// read, and before reading what it wrote.
-pub(crate) fn flush_cache(address: usize, length: usize) {
-    const LINE: usize = 64;
-    let end = address.saturating_add(length);
-    let mut line = address & !(LINE - 1);
-    while line < end {
-        // SAFETY: CLFLUSH only writes back and invalidates the line; the
-        // callers pass memory their driver owns, which is mapped.
-        unsafe { core::arch::x86_64::_mm_clflush(line as *const u8) };
-        line += LINE;
-    }
-    // SAFETY: MFENCE orders the flushes before later accesses and has no
-    // other effect.
-    unsafe { core::arch::x86_64::_mm_mfence() };
 }
 
 /// Waits until `ready` returns true or roughly `seconds` have elapsed.

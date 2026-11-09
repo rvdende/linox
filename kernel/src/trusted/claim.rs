@@ -17,6 +17,8 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use super::crash::FatalReport;
+
 pub(crate) struct ClaimCell<T> {
     held: AtomicBool,
     value: UnsafeCell<T>,
@@ -47,14 +49,10 @@ impl<T> ClaimCell<T> {
 
     /// Releases a claim whose holder was interrupted by a fatal error, so
     /// the error's report can still use the value (which may be
-    /// mid-update).
-    ///
-    /// # Safety
-    ///
-    /// No claim on this cell that exists now may be used again: its holder
-    /// never resumes (the caller reports a fatal error and halts, on the
-    /// only CPU running), and the caller holds none itself.
-    pub(crate) unsafe fn release_abandoned(&self) {
+    /// mid-update). The [`FatalReport`] says no claim on this cell that
+    /// exists now is used again: its holder never resumes (the report halts,
+    /// on the only CPU running), and the report holds none itself.
+    pub(crate) fn release_abandoned(&self, _report: &FatalReport) {
         self.held.store(false, Ordering::Release);
     }
 }

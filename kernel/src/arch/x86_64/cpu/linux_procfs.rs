@@ -1,4 +1,5 @@
 use super::*;
+use crate::trusted::scratch::ScratchBuffer;
 
 /// The text of the /proc/sys value a descriptor state names, as a read
 /// shows it: the domain's name for kernel/domainname, its core pattern for
@@ -1944,7 +1945,7 @@ pub(super) fn linux_user_namespace_file(state: u16) -> Option<&'static [u8]> {
 /// /proc/uptime: seconds since boot, and idle time, which Linox does not
 /// account and reports as zero.
 pub(super) fn linux_proc_uptime() -> &'static [u8] {
-    static mut UPTIME: [u8; 32] = [0; 32];
+    static UPTIME: ScratchBuffer<[u8; 32]> = ScratchBuffer::new([0; 32]);
     // CLOCK_BOOTTIME as the reader's time namespace shows it.
     let centiseconds = linux_elapsed_nanoseconds()
         .unwrap_or(0)
@@ -1961,9 +1962,9 @@ pub(super) fn linux_proc_uptime() -> &'static [u8] {
             break;
         }
     }
-    // SAFETY: the kernel runs Linux syscalls on one CPU, and the bytes are
-    // copied out before the next call can rewrite them.
-    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(UPTIME) };
+    // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
+    // the bytes before another read can rewrite them.
+    let buffer = unsafe { UPTIME.rewrite() };
     let mut length = 0;
     for digit in digits[..count].iter().rev() {
         buffer[length] = *digit;
@@ -2018,10 +2019,10 @@ pub(super) fn linux_proc_meminfo() -> &'static [u8] {
             Ok(())
         }
     }
-    static mut MEMINFO: Buffer = Buffer {
+    static MEMINFO: ScratchBuffer<Buffer> = ScratchBuffer::new(Buffer {
         bytes: [0; 1024],
         length: 0,
-    };
+    });
     let (total, free) = linux_domain_frame_counts();
     let (total, free) = (total * 4, free * 4);
     let used = total - free;
@@ -2030,9 +2031,9 @@ pub(super) fn linux_proc_meminfo() -> &'static [u8] {
     let slab = crate::heap::slab_bytes() / 1024;
     let (swap_total, swap_free) = crate::linux_swap::totals(linux_execution_instance());
     let swap_cached = crate::linux_swap::cached_pages(linux_execution_instance()) * 4;
-    // SAFETY: the kernel is single-processor and readers copy the bytes
-    // before another /proc/meminfo read can rewrite them.
-    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(MEMINFO) };
+    // SAFETY: the kernel-entry lock serializes /proc reads, and readers copy
+    // the bytes before another read can rewrite them.
+    let buffer = unsafe { MEMINFO.rewrite() };
     buffer.length = 0;
     let _ = core::fmt::Write::write_fmt(
         buffer,
