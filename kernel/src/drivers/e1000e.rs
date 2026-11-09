@@ -9,6 +9,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use super::net::{Nic, FRAME_LIMIT};
 use super::pci::{Function, Identity};
 use super::{delay_ms, wait_until_ms, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const VENDOR_INTEL: u16 = 0x8086;
 const DEVICE_82574: u16 = 0x10d3;
@@ -49,6 +50,8 @@ const RECEIVE_DESCRIPTORS: usize = 32;
 const TRANSMIT_DESCRIPTORS: usize = 8;
 const BUFFER_SIZE: usize = 2048;
 const TRANSMIT_TIMEOUT_MS: u64 = 100;
+/// The 82574's memory BAR (datasheet section 9.3.11): 128 KiB.
+const REGISTER_BYTES: usize = 0x2_0000;
 
 static mut RECEIVE_RING: DmaPage = DmaPage::ZERO;
 static mut TRANSMIT_RING: DmaPage = DmaPage::ZERO;
@@ -74,7 +77,7 @@ pub(crate) fn dma_regions() -> [DmaRegion; 4] {
 
 /// A running controller.
 pub(crate) struct Controller {
-    base: usize,
+    registers: Mmio,
     mac: [u8; 6],
     next_receive: usize,
     next_transmit: usize,
@@ -89,20 +92,23 @@ impl Controller {
     /// registers and this driver's DMA pages identity mapped. Only one
     /// controller may be open at a time.
     pub(crate) unsafe fn open(function: Function) -> Option<Self> {
-        let base = function.memory_bar(0)? as usize;
+        let registers = Mmio::firmware(function.memory_bar(0)?, REGISTER_BYTES)?;
         function.enable_memory_and_bus_master();
-        write32(base, INTERRUPT_MASK_CLEAR, u32::MAX);
-        write32(base, CONTROL, read32(base, CONTROL) | CONTROL_RESET);
+        registers.write::<u32>(INTERRUPT_MASK_CLEAR, u32::MAX);
+        registers.write::<u32>(CONTROL, registers.read::<u32>(CONTROL) | CONTROL_RESET);
         delay_ms(1);
-        if !wait_until_ms(100, || read32(base, CONTROL) & CONTROL_RESET == 0) {
+        if !wait_until_ms(100, || registers.read::<u32>(CONTROL) & CONTROL_RESET == 0) {
             return None;
         }
-        write32(base, INTERRUPT_MASK_CLEAR, u32::MAX);
-        write32(base, CONTROL, read32(base, CONTROL) | CONTROL_SET_LINK_UP);
+        registers.write::<u32>(INTERRUPT_MASK_CLEAR, u32::MAX);
+        registers.write::<u32>(
+            CONTROL,
+            registers.read::<u32>(CONTROL) | CONTROL_SET_LINK_UP,
+        );
 
         // The controller loads its address from the EEPROM at reset.
-        let low = read32(base, RECEIVE_ADDRESS_LOW).to_le_bytes();
-        let high = read32(base, RECEIVE_ADDRESS_HIGH);
+        let low = registers.read::<u32>(RECEIVE_ADDRESS_LOW).to_le_bytes();
+        let high = registers.read::<u32>(RECEIVE_ADDRESS_HIGH);
         let mac = [
             low[0],
             low[1],
@@ -111,9 +117,9 @@ impl Controller {
             high as u8,
             (high >> 8) as u8,
         ];
-        write32(base, RECEIVE_ADDRESS_HIGH, high | ADDRESS_VALID);
+        registers.write::<u32>(RECEIVE_ADDRESS_HIGH, high | ADDRESS_VALID);
         for index in 0..128 {
-            write32(base, MULTICAST_TABLE + index * 4, 0);
+            registers.write::<u32>(MULTICAST_TABLE + index * 4, 0);
         }
 
         let receive_ring = addr_of_mut!(RECEIVE_RING).cast::<u64>();
@@ -128,31 +134,29 @@ impl Controller {
             transmit_ring.add(index).write_volatile(0);
         }
         write64(
-            base,
+            &registers,
             RECEIVE_BASE_LOW,
             RECEIVE_BASE_HIGH,
             receive_ring as u64,
         );
-        write32(base, RECEIVE_LENGTH, (RECEIVE_DESCRIPTORS * 16) as u32);
-        write32(base, RECEIVE_HEAD, 0);
-        write32(base, RECEIVE_TAIL, (RECEIVE_DESCRIPTORS - 1) as u32);
+        registers.write::<u32>(RECEIVE_LENGTH, (RECEIVE_DESCRIPTORS * 16) as u32);
+        registers.write::<u32>(RECEIVE_HEAD, 0);
+        registers.write::<u32>(RECEIVE_TAIL, (RECEIVE_DESCRIPTORS - 1) as u32);
         write64(
-            base,
+            &registers,
             TRANSMIT_BASE_LOW,
             TRANSMIT_BASE_HIGH,
             transmit_ring as u64,
         );
-        write32(base, TRANSMIT_LENGTH, (TRANSMIT_DESCRIPTORS * 16) as u32);
-        write32(base, TRANSMIT_HEAD, 0);
-        write32(base, TRANSMIT_TAIL, 0);
+        registers.write::<u32>(TRANSMIT_LENGTH, (TRANSMIT_DESCRIPTORS * 16) as u32);
+        registers.write::<u32>(TRANSMIT_HEAD, 0);
+        registers.write::<u32>(TRANSMIT_TAIL, 0);
         // A 2048-byte buffer size is the default encoding (BSIZE 0).
-        write32(
-            base,
+        registers.write::<u32>(
             RECEIVE_CONTROL,
             RECEIVE_ENABLE | RECEIVE_BROADCAST | RECEIVE_STRIP_CRC,
         );
-        write32(
-            base,
+        registers.write::<u32>(
             TRANSMIT_CONTROL,
             TRANSMIT_ENABLE
                 | TRANSMIT_PAD_SHORT
@@ -160,7 +164,7 @@ impl Controller {
                 | TRANSMIT_COLLISION_DISTANCE,
         );
         Some(Self {
-            base,
+            registers,
             mac,
             next_receive: 0,
             next_transmit: 0,
@@ -169,7 +173,7 @@ impl Controller {
 
     /// Whether the link is up.
     pub(crate) fn link_up(&self) -> bool {
-        read32(self.base, STATUS) & STATUS_LINK_UP != 0
+        self.registers.read::<u32>(STATUS) & STATUS_LINK_UP != 0
     }
 }
 
@@ -197,7 +201,8 @@ impl Nic for Controller {
         }
         self.next_transmit = (index + 1) % TRANSMIT_DESCRIPTORS;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write32(self.base, TRANSMIT_TAIL, self.next_transmit as u32);
+        self.registers
+            .write::<u32>(TRANSMIT_TAIL, self.next_transmit as u32);
         wait_until_ms(TRANSMIT_TIMEOUT_MS, || {
             // SAFETY: the status byte is written back by the controller.
             let status = unsafe {
@@ -226,7 +231,7 @@ impl Nic for Controller {
             descriptor.add(12).write_volatile(0);
             self.next_receive = (index + 1) % RECEIVE_DESCRIPTORS;
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            write32(self.base, RECEIVE_TAIL, index as u32);
+            self.registers.write::<u32>(RECEIVE_TAIL, index as u32);
             Some(copied)
         }
     }
@@ -251,17 +256,7 @@ fn transmit_buffer(index: usize) -> *mut u8 {
     }
 }
 
-fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers pass identity-mapped controller registers.
-    unsafe { ((base + offset) as *const u32).read_volatile() }
-}
-
-fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: as for read32.
-    unsafe { ((base + offset) as *mut u32).write_volatile(value) }
-}
-
-fn write64(base: usize, low: usize, high: usize, value: u64) {
-    write32(base, low, value as u32);
-    write32(base, high, (value >> 32) as u32);
+fn write64(registers: &Mmio, low: usize, high: usize, value: u64) {
+    registers.write::<u32>(low, value as u32);
+    registers.write::<u32>(high, (value >> 32) as u32);
 }

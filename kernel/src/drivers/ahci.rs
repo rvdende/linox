@@ -8,6 +8,7 @@ use core::ptr::{addr_of, addr_of_mut};
 
 use super::pci::Function;
 use super::{wait_until_ms, BlockDevice, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const HBA_GLOBAL_CONTROL: usize = 0x04;
 const HBA_PORTS_IMPLEMENTED: usize = 0x0c;
@@ -44,6 +45,9 @@ const FIS_HOST_TO_DEVICE: u8 = 0x27;
 const ATA_IDENTIFY_DEVICE: u8 = 0xec;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const COMMAND_TIMEOUT_MS: u64 = 5000;
+/// The HBA's registers: the generic block and 32 ports (AHCI 1.3.1
+/// section 3).
+const REGISTER_BYTES: usize = PORT_BASE + 32 * PORT_STRIDE;
 /// Ports the driver can drive at once; each needs three DMA pages.
 pub(crate) const MAX_PORTS: usize = 8;
 
@@ -75,7 +79,7 @@ pub(crate) enum Error {
 /// An ATA disk on one AHCI port.
 pub(crate) struct Disk {
     port: usize,
-    registers: usize,
+    registers: Mmio,
     slot: usize,
     pub(crate) sectors: u64,
     pub(crate) sector_size: u32,
@@ -84,64 +88,66 @@ pub(crate) struct Disk {
 }
 
 /// Takes the controller from firmware, enables AHCI mode, and returns its
-/// register base and the bitmap of implemented ports.
+/// registers, the bitmap of implemented ports and its version.
 ///
 /// # Safety
 ///
-/// `function` must be an AHCI controller that no other code drives, with its
-/// registers identity mapped.
-pub(crate) unsafe fn open_controller(function: Function) -> Result<(usize, u32, u32), Error> {
-    let base = function.memory_bar(5).ok_or(Error::NoMemoryBar)? as usize;
+/// `function` must be an AHCI controller that no other code drives.
+pub(crate) unsafe fn open_controller(function: Function) -> Result<(Mmio, u32, u32), Error> {
+    let base = function
+        .memory_bar(5)
+        .and_then(|bar| Mmio::firmware(bar, REGISTER_BYTES))
+        .ok_or(Error::NoMemoryBar)?;
     function.enable_memory_and_bus_master();
-    if read32(base, HBA_CAPABILITIES_2) & HANDOFF_SUPPORTED != 0 {
-        write32(
-            base,
+    if base.read::<u32>(HBA_CAPABILITIES_2) & HANDOFF_SUPPORTED != 0 {
+        base.write::<u32>(
             HBA_HANDOFF,
-            read32(base, HBA_HANDOFF) | HANDOFF_OS_OWNED,
+            base.read::<u32>(HBA_HANDOFF) | HANDOFF_OS_OWNED,
         );
-        let _ = wait_until_ms(2000, || read32(base, HBA_HANDOFF) & HANDOFF_BIOS_OWNED == 0);
+        let _ = wait_until_ms(2000, || {
+            base.read::<u32>(HBA_HANDOFF) & HANDOFF_BIOS_OWNED == 0
+        });
     }
-    write32(
-        base,
+    base.write::<u32>(
         HBA_GLOBAL_CONTROL,
-        read32(base, HBA_GLOBAL_CONTROL) | GLOBAL_AHCI_ENABLE,
+        base.read::<u32>(HBA_GLOBAL_CONTROL) | GLOBAL_AHCI_ENABLE,
     );
-    Ok((
-        base,
-        read32(base, HBA_PORTS_IMPLEMENTED),
-        read32(base, HBA_VERSION),
-    ))
+    let ports = base.read::<u32>(HBA_PORTS_IMPLEMENTED);
+    let version = base.read::<u32>(HBA_VERSION);
+    Ok((base, ports, version))
 }
 
 impl Disk {
-    /// Brings up `port` of the controller at `base` and identifies its disk.
+    /// Brings up `port` of the controller whose registers are `base` and
+    /// identifies its disk.
     /// `slot` selects which of the driver's DMA page sets the port uses.
     ///
     /// # Safety
     ///
     /// The controller must have been opened with [`open_controller`], and no
     /// other code may use `port` or DMA set `slot`.
-    pub(crate) unsafe fn open(base: usize, port: usize, slot: usize) -> Result<Self, Error> {
+    pub(crate) unsafe fn open(base: &Mmio, port: usize, slot: usize) -> Result<Self, Error> {
         if slot >= MAX_PORTS {
             return Err(Error::NoDevice);
         }
-        let registers = base + PORT_BASE + port * PORT_STRIDE;
-        if read32(registers, PORT_STATUS) & 0xf != STATUS_DEVICE_PRESENT {
+        let registers = base
+            .window(PORT_BASE + port * PORT_STRIDE, PORT_STRIDE)
+            .ok_or(Error::NoDevice)?;
+        if registers.read::<u32>(PORT_STATUS) & 0xf != STATUS_DEVICE_PRESENT {
             return Err(Error::NoDevice);
         }
-        let signature = read32(registers, PORT_SIGNATURE);
+        let signature = registers.read::<u32>(PORT_SIGNATURE);
         if signature != SIGNATURE_ATA {
             return Err(Error::NotAta(signature));
         }
         // Stop the command engine before moving its structures.
-        let command = read32(registers, PORT_COMMAND);
-        write32(
-            registers,
+        let command = registers.read::<u32>(PORT_COMMAND);
+        registers.write::<u32>(
             PORT_COMMAND,
             command & !(COMMAND_START | COMMAND_FIS_RECEIVE),
         );
         if !wait_until_ms(500, || {
-            read32(registers, PORT_COMMAND) & (COMMAND_LIST_RUNNING | COMMAND_FIS_RUNNING) == 0
+            registers.read::<u32>(PORT_COMMAND) & (COMMAND_LIST_RUNNING | COMMAND_FIS_RUNNING) == 0
         }) {
             return Err(Error::StopTimedOut);
         }
@@ -150,22 +156,20 @@ impl Disk {
         // The command list uses the first 1 KiB; received FISes the next 256 bytes.
         let list = command_list as u64;
         let fis = list + 1024;
-        write32(registers, PORT_COMMAND_LIST, list as u32);
-        write32(registers, PORT_COMMAND_LIST + 4, (list >> 32) as u32);
-        write32(registers, PORT_FIS_BASE, fis as u32);
-        write32(registers, PORT_FIS_BASE + 4, (fis >> 32) as u32);
-        write32(registers, PORT_ERROR, u32::MAX);
-        write32(registers, PORT_INTERRUPT_STATUS, u32::MAX);
-        write32(registers, PORT_INTERRUPT_ENABLE, 0);
-        write32(
-            registers,
+        registers.write::<u32>(PORT_COMMAND_LIST, list as u32);
+        registers.write::<u32>(PORT_COMMAND_LIST + 4, (list >> 32) as u32);
+        registers.write::<u32>(PORT_FIS_BASE, fis as u32);
+        registers.write::<u32>(PORT_FIS_BASE + 4, (fis >> 32) as u32);
+        registers.write::<u32>(PORT_ERROR, u32::MAX);
+        registers.write::<u32>(PORT_INTERRUPT_STATUS, u32::MAX);
+        registers.write::<u32>(PORT_INTERRUPT_ENABLE, 0);
+        registers.write::<u32>(
             PORT_COMMAND,
-            read32(registers, PORT_COMMAND) | COMMAND_FIS_RECEIVE,
+            registers.read::<u32>(PORT_COMMAND) | COMMAND_FIS_RECEIVE,
         );
-        write32(
-            registers,
+        registers.write::<u32>(
             PORT_COMMAND,
-            read32(registers, PORT_COMMAND) | COMMAND_START,
+            registers.read::<u32>(PORT_COMMAND) | COMMAND_START,
         );
 
         let mut disk = Self {
@@ -237,27 +241,27 @@ impl Disk {
             prd.add(1).write_volatile((buffer as u64 >> 32) as u32);
             prd.add(3).write_volatile(bytes - 1);
         }
-        let registers = self.registers;
+        let registers = &self.registers;
         if !wait_until_ms(COMMAND_TIMEOUT_MS, || {
-            read32(registers, PORT_TASK_FILE) & (TASK_FILE_BUSY | TASK_FILE_DATA_REQUEST) == 0
+            registers.read::<u32>(PORT_TASK_FILE) & (TASK_FILE_BUSY | TASK_FILE_DATA_REQUEST) == 0
         }) {
             return Err(Error::CommandTimedOut(command));
         }
-        write32(registers, PORT_INTERRUPT_STATUS, u32::MAX);
+        registers.write::<u32>(PORT_INTERRUPT_STATUS, u32::MAX);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write32(registers, PORT_COMMAND_ISSUE, 1);
+        registers.write::<u32>(PORT_COMMAND_ISSUE, 1);
         let mut failed = false;
         let finished = wait_until_ms(COMMAND_TIMEOUT_MS, || {
-            if read32(registers, PORT_INTERRUPT_STATUS) & INTERRUPT_TASK_FILE_ERROR != 0 {
+            if registers.read::<u32>(PORT_INTERRUPT_STATUS) & INTERRUPT_TASK_FILE_ERROR != 0 {
                 failed = true;
                 return true;
             }
-            read32(registers, PORT_COMMAND_ISSUE) & 1 == 0
+            registers.read::<u32>(PORT_COMMAND_ISSUE) & 1 == 0
         });
-        if failed || read32(registers, PORT_TASK_FILE) & TASK_FILE_ERROR != 0 {
+        if failed || registers.read::<u32>(PORT_TASK_FILE) & TASK_FILE_ERROR != 0 {
             return Err(Error::CommandFailed(
                 command,
-                read32(registers, PORT_TASK_FILE),
+                registers.read::<u32>(PORT_TASK_FILE),
             ));
         }
         if !finished {
@@ -288,14 +292,4 @@ impl BlockDevice for Disk {
         let page = unsafe { &*addr_of!(BUFFERS).cast::<DmaPage>().add(self.slot) };
         Some(&page.0[..bytes as usize])
     }
-}
-
-fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers pass identity-mapped controller registers.
-    unsafe { ((base + offset) as *const u32).read_volatile() }
-}
-
-fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: as for read32.
-    unsafe { ((base + offset) as *mut u32).write_volatile(value) }
 }

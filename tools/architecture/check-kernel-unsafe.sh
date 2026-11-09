@@ -8,12 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 801 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 801 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 758 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 758 to ${unsafe_blocks}" >&2
     exit 1
 fi
-if (( safety_comments < 390 )); then
-    echo "kernel unsafe check: SAFETY comments fell from 390 to ${safety_comments}" >&2
+# Unsafe blocks without a SAFETY comment may only go down. (This replaced a
+# floor on the number of SAFETY comments, which removing a documented
+# unsafe block would trip.)
+undocumented=$(( unsafe_blocks - safety_comments ))
+if (( undocumented > 367 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 367 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 43 )); then
@@ -27,8 +31,10 @@ fi
 # sites; a file may not grow.
 per_file_limits=(
     "address_space.rs 80"
+    "arch/x86_64/apic.rs 12"
     "arch/x86_64/paging.rs 15"
-    "arch/x86_64/pci.rs 37"
+    "arch/x86_64/iommu.rs 2"
+    "arch/x86_64/pci.rs 26"
     "arch/x86_64/timer.rs 24"
     "image_store.rs 16"
     "linux_aio.rs 4"
@@ -36,7 +42,15 @@ per_file_limits=(
     "linux_sysv_ipc.rs 12"
     "lib.rs 32"
     "memory.rs 38"
+    "drivers/ahci.rs 4"
+    "drivers/amd_iommu.rs 13"
+    "drivers/e1000e.rs 6"
+    "drivers/hda.rs 6"
+    "drivers/nvme.rs 10"
+    "drivers/realtek.rs 8"
+    "drivers/xhci.rs 19"
     "trusted/frame.rs 9"
+    "trusted/mmio.rs 2"
     "trusted/page_table.rs 2"
     "trusted/port.rs 8"
 )
@@ -54,6 +68,7 @@ done
 # Files moved onto the trusted layer's safe APIs that have no unsafe left
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
 forbidding_files=(
+    "drivers/clock.rs"
     "drivers/pci.rs"
 )
 for file in "${forbidding_files[@]}"; do
@@ -72,6 +87,18 @@ constructors="$(rg -g '*.rs' -l '\b(Frame|PageTable)::from_physical\(' "$kernel_
 if [[ -n "$constructors" ]]; then
     echo "kernel unsafe check: Frame/PageTable::from_physical outside the memory layer:" >&2
     echo "$constructors" >&2
+    exit 1
+fi
+
+# Device registers reached through the firmware's identity map
+# (trusted::mmio::Mmio::firmware) are for hardware bring-up and the drivers
+# it runs; the main kernel maps registers itself (Mmio::mapped).
+firmware_registers="$(rg -g '*.rs' -l 'Mmio::firmware\(' "$kernel_source" \
+    | sed "s|^${kernel_source}/||" \
+    | rg -v '^(bringup/.*|drivers/(ahci|amd_iommu|clock|e1000e|hda|nvme|realtek)\.rs|trusted/.*)$' || true)"
+if [[ -n "$firmware_registers" ]]; then
+    echo "kernel unsafe check: Mmio::firmware outside hardware bring-up:" >&2
+    echo "$firmware_registers" >&2
     exit 1
 fi
 

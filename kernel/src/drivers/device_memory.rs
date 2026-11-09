@@ -1,123 +1,26 @@
-//! The unsafe floor under the virtio drivers: device registers and DMA
-//! memory, each behind a bounds-checked handle.
+//! The unsafe floor under the virtio drivers' DMA memory.
 //!
-//! Everything above this module is safe Rust. It hands out two kinds of
-//! memory:
+//! [`DmaBuffer`] is physically contiguous kernel frames that a device reads
+//! and writes by DMA at their physical addresses (the I/O MMU, when it
+//! translates, maps them one to one). The frames come from the frame
+//! allocator, owned by the kernel, and are scrubbed and returned when the
+//! buffer drops. Device registers are `trusted::mmio::Mmio`.
 //!
-//! - [`Mmio`], a range of one device's registers that the kernel mapped
-//!   uncached. Creating one is the only unsafe step: the caller vouches for
-//!   the mapping.
-//! - [`DmaBuffer`], physically contiguous kernel frames that a device reads
-//!   and writes by DMA at their physical addresses (the I/O MMU, when it
-//!   translates, maps them one to one). The frames come from the frame
-//!   allocator, owned by the kernel, and are scrubbed and returned when the
-//!   buffer drops.
-//!
-//! Every access is volatile, since the device changes registers and DMA
-//! memory behind the compiler's back, and no Rust reference to either is
-//! ever formed: a `&[u8]` over memory that a device writes would be
-//! undefined behaviour. An access outside a handle's range, or misaligned
-//! for its width, reads as all ones and writes nothing, the way an
-//! unclaimed bus cycle behaves, instead of reaching memory the handle does
-//! not own. Neither handle is `Sync`: a driver that shares one between
-//! contexts has to serialize access itself.
+//! Every access is volatile, since the device changes DMA memory behind
+//! the compiler's back, and no Rust reference to it is ever formed: a
+//! `&[u8]` over memory that a device writes would be undefined behaviour.
+//! An access outside the buffer, or misaligned for its width, reads as all
+//! ones and writes nothing, as `Mmio` does. The buffer is not `Sync`: a
+//! driver that shares one between contexts has to serialize access itself.
 
 use core::cell::Cell;
 use core::marker::PhantomData;
 
 use crate::arch::x86_64::paging;
 use crate::memory::{self, FrameLease, FrameOwner};
+use crate::trusted::mmio::{span, Word};
 
 const PAGE_SIZE: usize = 4096;
-
-mod sealed {
-    pub trait Sealed {}
-    impl Sealed for u8 {}
-    impl Sealed for u16 {}
-    impl Sealed for u32 {}
-    impl Sealed for u64 {}
-}
-
-/// An integer that devices read and write in one access.
-pub(crate) trait Word: sealed::Sealed + Copy {
-    /// What a read outside the handle returns.
-    const ONES: Self;
-}
-
-impl Word for u8 {
-    const ONES: Self = u8::MAX;
-}
-
-impl Word for u16 {
-    const ONES: Self = u16::MAX;
-}
-
-impl Word for u32 {
-    const ONES: Self = u32::MAX;
-}
-
-impl Word for u64 {
-    const ONES: Self = u64::MAX;
-}
-
-/// The address of `size` bytes at `offset` in `base..base + length`, if
-/// they lie inside it and `offset` is a multiple of `align`.
-fn span(base: usize, length: usize, offset: usize, size: usize, align: usize) -> Option<usize> {
-    let end = offset.checked_add(size)?;
-    (end <= length && offset.is_multiple_of(align)).then(|| base + offset)
-}
-
-/// A range of device registers mapped uncached.
-pub(crate) struct Mmio {
-    base: usize,
-    length: usize,
-    _not_sync: PhantomData<Cell<u8>>,
-}
-
-impl Mmio {
-    /// Wraps `length` bytes of registers at virtual address `base`.
-    ///
-    /// # Safety
-    ///
-    /// `base..base + length` must map registers of one device uncached for
-    /// as long as this value and any [`Mmio::window`] of it are used, and
-    /// only the driver holding them may access those registers.
-    pub(crate) unsafe fn new(base: usize, length: usize) -> Self {
-        Self {
-            base,
-            length,
-            _not_sync: PhantomData,
-        }
-    }
-
-    /// The `length` bytes at `offset`, if they lie inside this range.
-    pub(crate) fn window(&self, offset: usize, length: usize) -> Option<Self> {
-        let base = span(self.base, self.length, offset, length, 1)?;
-        Some(Self {
-            base,
-            length,
-            _not_sync: PhantomData,
-        })
-    }
-
-    pub(crate) fn read<T: Word>(&self, offset: usize) -> T {
-        let size = core::mem::size_of::<T>();
-        match span(self.base, self.length, offset, size, size) {
-            // SAFETY: new's contract maps the whole range, and span keeps
-            // the aligned access inside it.
-            Some(address) => unsafe { (address as *const T).read_volatile() },
-            None => T::ONES,
-        }
-    }
-
-    pub(crate) fn write<T: Word>(&self, offset: usize, value: T) {
-        let size = core::mem::size_of::<T>();
-        if let Some(address) = span(self.base, self.length, offset, size, size) {
-            // SAFETY: as for read.
-            unsafe { (address as *mut T).write_volatile(value) };
-        }
-    }
-}
 
 /// Physically contiguous, zeroed kernel memory that a device reaches by
 /// DMA.

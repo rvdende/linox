@@ -20,6 +20,7 @@
 use core::ptr::{addr_of, addr_of_mut};
 
 use super::{wait_until_ms, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const DEVICE_TABLE_BASE: usize = 0x00;
 const COMMAND_BUFFER_BASE: usize = 0x08;
@@ -32,6 +33,9 @@ const COMMAND_TAIL: usize = 0x2008;
 const EVENT_HEAD: usize = 0x2010;
 const EVENT_TAIL: usize = 0x2018;
 const STATUS: usize = 0x2020;
+/// The unit's MMIO block (AMD I/O Virtualization Technology specification,
+/// section 3.4): 16 KiB.
+const REGISTER_BYTES: usize = 0x4000;
 // Control register bits (IOMMU spec section 3.4.1, MMIO offset 0018h).
 const CONTROL_ENABLE: u64 = 1 << 0;
 const CONTROL_HT_TUNNEL: u64 = 1 << 1;
@@ -372,18 +376,21 @@ impl Report {
     }
 }
 
-/// Reads the registers of the unit at physical address `base`.
-///
-/// # Safety
-///
-/// `base` must be an AMD-Vi MMIO block from IVRS that is identity mapped.
-/// Reading these registers has no side effects.
-pub(crate) unsafe fn probe(base: u64) -> Report {
+/// Reads the registers of the unit at physical address `base`, an AMD-Vi
+/// MMIO block from IVRS. Reading these registers has no side effects; a
+/// block the firmware does not map reads as all ones.
+pub(crate) fn probe(base: u64) -> Report {
+    let registers = Mmio::firmware(base, REGISTER_BYTES);
+    let read = |offset| {
+        registers
+            .as_ref()
+            .map_or(u64::MAX, |registers| registers.read::<u64>(offset))
+    };
     Report {
-        control: read64(base as usize, CONTROL),
-        features: read64(base as usize, EXTENDED_FEATURES),
-        status: read64(base as usize, STATUS),
-        exclusion: read64(base as usize, EXCLUSION_BASE),
+        control: read(CONTROL),
+        features: read(EXTENDED_FEATURES),
+        status: read(STATUS),
+        exclusion: read(EXCLUSION_BASE),
     }
 }
 
@@ -409,6 +416,8 @@ pub(crate) enum Error {
     CommandTimedOut,
     /// The unit did not stop its command buffer or logs when told to.
     StillRunning(u64),
+    /// The firmware's page tables do not map the unit's registers.
+    NotMapped,
 }
 
 /// A fault the unit logged for a DMA it refused.
@@ -568,7 +577,8 @@ impl<'a> DeviceTableBuilder<'a> {
 
 /// One unit with remapping turned on.
 pub(crate) struct Remapping {
-    base: usize,
+    base: u64,
+    registers: Mmio,
 }
 
 impl Remapping {
@@ -591,43 +601,39 @@ impl Remapping {
     ///
     /// # Safety
     ///
-    /// `unit.base` must be an identity-mapped AMD-Vi unit from IVRS that
-    /// nothing else drives, and the device table must not change while it
-    /// is on.
+    /// `unit.base` must be an AMD-Vi unit from IVRS that nothing else
+    /// drives, and the device table must not change while it is on.
     pub(crate) unsafe fn enable(
         unit: &Unit,
         table: &DeviceTableBuilder<'_>,
     ) -> Result<Self, Error> {
-        let base = unit.base as usize;
-        let control = read64(base, CONTROL) & !CONTROL_FIRMWARE_FEATURES;
-        write64(base, CONTROL, control);
+        let base = Mmio::firmware(unit.base, REGISTER_BYTES).ok_or(Error::NotMapped)?;
+        let control = base.read::<u64>(CONTROL) & !CONTROL_FIRMWARE_FEATURES;
+        base.write::<u64>(CONTROL, control);
         let running = STATUS_EVENT_LOG_RUNNING
             | STATUS_COMMAND_BUFFER_RUNNING
             | STATUS_PPR_LOG_RUNNING
             | STATUS_GA_LOG_RUNNING;
-        if !wait_until_ms(STOP_TIMEOUT_MS, || read64(base, STATUS) & running == 0) {
-            return Err(Error::StillRunning(read64(base, STATUS)));
+        if !wait_until_ms(STOP_TIMEOUT_MS, || base.read::<u64>(STATUS) & running == 0) {
+            return Err(Error::StillRunning(base.read::<u64>(STATUS)));
         }
-        write64(base, STATUS, STATUS_CLEARABLE);
+        base.write::<u64>(STATUS, STATUS_CLEARABLE);
         (*addr_of_mut!(COMMANDS)).0.fill(0);
         (*addr_of_mut!(EVENTS)).0.fill(0);
-        write64(
-            base,
+        base.write::<u64>(
             DEVICE_TABLE_BASE,
             addr_of!(DEVICE_TABLE) as u64 | (DEVICE_TABLE_PAGES - 1),
         );
-        write64(
-            base,
+        base.write::<u64>(
             COMMAND_BUFFER_BASE,
             addr_of!(COMMANDS) as u64 | RING_LENGTH_LOG2 << 56,
         );
-        write64(
-            base,
+        base.write::<u64>(
             EVENT_LOG_BASE,
             addr_of!(EVENTS) as u64 | RING_LENGTH_LOG2 << 56,
         );
         for register in [COMMAND_HEAD, COMMAND_TAIL, EVENT_HEAD, EVENT_TAIL] {
-            write64(base, register, 0);
+            base.write::<u64>(register, 0);
         }
         let flag = |ivhd: u8, control: u64| if unit.flags & ivhd != 0 { control } else { 0 };
         let control = control
@@ -645,17 +651,19 @@ impl Remapping {
             | flag(IVHD_ISOCHRONOUS, CONTROL_ISOCHRONOUS)
             | CONTROL_COHERENT
             | CONTROL_INVALIDATION_TIMEOUT_1S;
-        write64(base, CONTROL, control);
-        write64(
-            base,
+        base.write::<u64>(CONTROL, control);
+        base.write::<u64>(
             CONTROL,
             control | CONTROL_COMMAND_BUFFER | CONTROL_EVENT_LOG | CONTROL_ENABLE,
         );
-        let mut unit = Self { base };
+        let mut unit = Self {
+            base: unit.base,
+            registers: base,
+        };
         // Invalidate each assigned entry even when the unit can invalidate
         // everything at once: emulated units such as QEMU's re-read device
         // policies on these.
-        if read64(base, EXTENDED_FEATURES) & FEATURE_INVALIDATE_ALL != 0 {
+        if unit.registers.read::<u64>(EXTENDED_FEATURES) & FEATURE_INVALIDATE_ALL != 0 {
             unit.command([0, OPCODE_INVALIDATE_ALL << 28, 0, 0])?;
         }
         for device in table.assigned() {
@@ -681,18 +689,18 @@ impl Remapping {
 
     /// The unit's register base.
     pub(crate) fn base(&self) -> u64 {
-        self.base as u64
+        self.base
     }
 
     /// Whether the event log overflowed (and stopped recording).
     pub(crate) fn overflowed(&self) -> bool {
-        read64(self.base, STATUS) & STATUS_EVENT_OVERFLOW != 0
+        self.registers.read::<u64>(STATUS) & STATUS_EVENT_OVERFLOW != 0
     }
 
     /// Returns the next fault in the event log, if any.
     pub(crate) fn next_fault(&mut self) -> Option<Fault> {
-        let head = read64(self.base, EVENT_HEAD) as usize & (RING_BYTES - 1);
-        let tail = read64(self.base, EVENT_TAIL) as usize & (RING_BYTES - 1);
+        let head = self.registers.read::<u64>(EVENT_HEAD) as usize & (RING_BYTES - 1);
+        let tail = self.registers.read::<u64>(EVENT_TAIL) as usize & (RING_BYTES - 1);
         if head == tail {
             return None;
         }
@@ -706,7 +714,8 @@ impl Remapping {
                 events.add(3).read_volatile(),
             ]
         };
-        write64(self.base, EVENT_HEAD, ((head + 16) % RING_BYTES) as u64);
+        self.registers
+            .write::<u64>(EVENT_HEAD, ((head + 16) % RING_BYTES) as u64);
         Some(Fault {
             device: entry[0] as u16,
             address: u64::from(entry[2]) | u64::from(entry[3]) << 32,
@@ -716,10 +725,10 @@ impl Remapping {
 
     /// Queues one command, waiting for room in the buffer.
     fn command(&mut self, words: [u32; 4]) -> Result<(), Error> {
-        let tail = read64(self.base, COMMAND_TAIL) as usize & (RING_BYTES - 1);
+        let tail = self.registers.read::<u64>(COMMAND_TAIL) as usize & (RING_BYTES - 1);
         let next = (tail + 16) % RING_BYTES;
         if !wait_until_ms(COMMAND_TIMEOUT_MS, || {
-            read64(self.base, COMMAND_HEAD) as usize & (RING_BYTES - 1) != next
+            self.registers.read::<u64>(COMMAND_HEAD) as usize & (RING_BYTES - 1) != next
         }) {
             return Err(Error::CommandTimedOut);
         }
@@ -732,7 +741,7 @@ impl Remapping {
             }
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write64(self.base, COMMAND_TAIL, next as u64);
+        self.registers.write::<u64>(COMMAND_TAIL, next as u64);
         Ok(())
     }
 
@@ -827,14 +836,4 @@ fn map_identity(root: u64, page: u64) -> Result<(), Error> {
         };
     }
     Ok(())
-}
-
-fn read64(base: usize, offset: usize) -> u64 {
-    // SAFETY: callers pass identity-mapped unit registers.
-    unsafe { ((base + offset) as *const u64).read_volatile() }
-}
-
-fn write64(base: usize, offset: usize, value: u64) {
-    // SAFETY: as for read64.
-    unsafe { ((base + offset) as *mut u64).write_volatile(value) }
 }

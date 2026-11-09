@@ -7,12 +7,14 @@
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
 //! - [`pci_config`]: PCI configuration space.
+//! - [`mmio`]: a window of one device's memory-mapped registers.
 //!
 //! Each module says who may construct its types; the constructors from a
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
 pub(crate) mod frame;
+pub(crate) mod mmio;
 pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod port;

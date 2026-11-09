@@ -1,9 +1,7 @@
-use core::{
-    ptr::{read_volatile, write_volatile},
-    sync::atomic::{fence, Ordering},
-};
+use core::sync::atomic::{fence, Ordering};
 
 use crate::memory::{self, FrameLease, FrameOwner};
+use crate::trusted::{frame::Frame, mmio::Mmio};
 
 use super::paging::MmioMapping;
 
@@ -862,26 +860,23 @@ fn page_fits_48_bits(address: u64) -> bool {
 }
 
 fn write_word(frame: FrameLease, index: usize, value: u64) -> bool {
-    let Some(address) = frame.direct_map_address() else {
+    let Some(frame) = Frame::leased(frame) else {
         return false;
     };
     if index >= TABLE_ENTRIES {
         return false;
     }
-    unsafe {
-        (address as *mut u64).add(index).write(value.to_le());
-    }
+    frame.write_u64(index, value.to_le());
     true
 }
 
 fn read_word(frame: FrameLease, index: usize) -> Option<u64> {
-    let address = frame.direct_map_address()?;
-    (index < TABLE_ENTRIES)
-        .then(|| u64::from_le(unsafe { (address as *const u64).add(index).read() }))
+    let frame = Frame::leased(frame)?;
+    (index < TABLE_ENTRIES).then(|| u64::from_le(frame.read_u64(index)))
 }
 
 fn frame_words_are_exact(frame: FrameLease, expected: &[(usize, u64)]) -> bool {
-    let Some(address) = frame.direct_map_address() else {
+    let Some(frame) = Frame::leased(frame) else {
         return false;
     };
     if expected.iter().enumerate().any(|(index, (word, _))| {
@@ -893,7 +888,7 @@ fn frame_words_are_exact(frame: FrameLease, expected: &[(usize, u64)]) -> bool {
         return false;
     }
     (0..TABLE_ENTRIES).all(|index| {
-        let actual = u64::from_le(unsafe { (address as *const u64).add(index).read() });
+        let actual = u64::from_le(frame.read_u64(index));
         let wanted = expected
             .iter()
             .find_map(|(word, value)| (*word == index).then_some(*value))
@@ -903,36 +898,28 @@ fn frame_words_are_exact(frame: FrameLease, expected: &[(usize, u64)]) -> bool {
 }
 
 fn read_u32(mapping: MmioMapping, physical: u64) -> Option<u32> {
-    let address = mapping.address(physical, size_of::<u32>())?;
-    Some(u32::from_le(unsafe {
-        read_volatile(address as *const u32)
-    }))
+    let register = Mmio::mapped(mapping, physical, size_of::<u32>())?;
+    Some(u32::from_le(register.read::<u32>(0)))
 }
 
 fn read_u64(mapping: MmioMapping, physical: u64) -> Option<u64> {
-    let address = mapping.address(physical, size_of::<u64>())?;
-    Some(u64::from_le(unsafe {
-        read_volatile(address as *const u64)
-    }))
+    let register = Mmio::mapped(mapping, physical, size_of::<u64>())?;
+    Some(u64::from_le(register.read::<u64>(0)))
 }
 
 fn write_u32(mapping: MmioMapping, physical: u64, value: u32) -> bool {
-    let Some(address) = mapping.address(physical, size_of::<u32>()) else {
+    let Some(register) = Mmio::mapped(mapping, physical, size_of::<u32>()) else {
         return false;
     };
-    unsafe {
-        write_volatile(address as *mut u32, value.to_le());
-    }
+    register.write::<u32>(0, value.to_le());
     true
 }
 
 fn write_u64(mapping: MmioMapping, physical: u64, value: u64) -> bool {
-    let Some(address) = mapping.address(physical, size_of::<u64>()) else {
+    let Some(register) = Mmio::mapped(mapping, physical, size_of::<u64>()) else {
         return false;
     };
-    unsafe {
-        write_volatile(address as *mut u64, value.to_le());
-    }
+    register.write::<u64>(0, value.to_le());
     true
 }
 

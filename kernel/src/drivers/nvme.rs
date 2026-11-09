@@ -13,6 +13,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use super::gpt::{self, WritableExtent};
 use super::pci::Function;
 use super::{wait_until, BlockDevice, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const REGISTER_CAPABILITIES: usize = 0x00;
 const REGISTER_VERSION: usize = 0x08;
@@ -88,13 +89,14 @@ struct Queue {
     tail: u16,
     head: u16,
     phase: bool,
+    /// The doorbells' offsets in the controller's registers.
     submission_doorbell: usize,
     completion_doorbell: usize,
 }
 
 /// An enabled controller with one active namespace.
 pub(crate) struct Controller {
-    registers: usize,
+    registers: Mmio,
     admin: Queue,
     io: Queue,
     next_command: u16,
@@ -123,9 +125,12 @@ impl Controller {
     /// `function` must be an NVMe controller that no other code drives, and
     /// its registers and the static DMA pages must be identity mapped.
     pub(crate) unsafe fn open(function: Function) -> Result<(Self, ControllerIdentity), Error> {
-        let registers = function.memory_bar(0).ok_or(Error::NoMemoryBar)? as usize;
+        let bar = function.memory_bar(0).ok_or(Error::NoMemoryBar)?;
+        // The controller properties; the doorbells follow once CAP says
+        // how far apart they are.
+        let properties = Mmio::firmware(bar, DOORBELL_BASE).ok_or(Error::NoMemoryBar)?;
         function.enable_memory_and_bus_master();
-        let capabilities = read64(registers, REGISTER_CAPABILITIES);
+        let capabilities = read64(&properties, REGISTER_CAPABILITIES);
         if capabilities == u64::MAX {
             return Err(Error::NotResponding);
         }
@@ -140,10 +145,13 @@ impl Controller {
             return Err(Error::UnsupportedPageSize);
         }
         let ready_timeout = (((capabilities >> 24) & 0xff) / 2).max(1) + 1;
+        // The admin and I/O queue pairs' four doorbells.
+        let registers =
+            Mmio::firmware(bar, DOORBELL_BASE + 4 * doorbell_stride).ok_or(Error::NoMemoryBar)?;
 
-        write32(registers, REGISTER_CONFIGURATION, 0);
+        registers.write::<u32>(REGISTER_CONFIGURATION, 0);
         if !wait_until(ready_timeout, || {
-            read32(registers, REGISTER_STATUS) & STATUS_READY == 0
+            registers.read::<u32>(REGISTER_STATUS) & STATUS_READY == 0
         }) {
             return Err(Error::DisableTimedOut);
         }
@@ -151,51 +159,42 @@ impl Controller {
         let admin = Queue::new(
             addr_of_mut!(ADMIN_SUBMISSION.0).cast(),
             addr_of_mut!(ADMIN_COMPLETION.0).cast(),
-            registers + DOORBELL_BASE,
-            registers + DOORBELL_BASE + doorbell_stride,
+            DOORBELL_BASE,
+            DOORBELL_BASE + doorbell_stride,
         );
         let io = Queue::new(
             addr_of_mut!(IO_SUBMISSION.0).cast(),
             addr_of_mut!(IO_COMPLETION.0).cast(),
-            registers + DOORBELL_BASE + 2 * doorbell_stride,
-            registers + DOORBELL_BASE + 3 * doorbell_stride,
+            DOORBELL_BASE + 2 * doorbell_stride,
+            DOORBELL_BASE + 3 * doorbell_stride,
         );
         let entries = u32::from(QUEUE_ENTRIES - 1);
-        write32(
-            registers,
-            REGISTER_ADMIN_QUEUE_ATTRIBUTES,
-            (entries << 16) | entries,
-        );
+        registers.write::<u32>(REGISTER_ADMIN_QUEUE_ATTRIBUTES, (entries << 16) | entries);
         write64(
-            registers,
+            &registers,
             REGISTER_ADMIN_SUBMISSION_QUEUE,
             admin.entries as u64,
         );
         write64(
-            registers,
+            &registers,
             REGISTER_ADMIN_COMPLETION_QUEUE,
             admin.completions as u64,
         );
         // Section 3.5.1: configure CC, then enable in a second write. CAP
         // may change after the first CC write, so the timeout is read again.
-        write32(
-            registers,
-            REGISTER_CONFIGURATION,
-            CONFIGURATION_QUEUE_ENTRY_SIZES,
-        );
-        let capabilities = read64(registers, REGISTER_CAPABILITIES);
+        registers.write::<u32>(REGISTER_CONFIGURATION, CONFIGURATION_QUEUE_ENTRY_SIZES);
+        let capabilities = read64(&registers, REGISTER_CAPABILITIES);
         let ready_timeout = (((capabilities >> 24) & 0xff) / 2).max(1) + 1;
-        write32(
-            registers,
+        registers.write::<u32>(
             REGISTER_CONFIGURATION,
             CONFIGURATION_QUEUE_ENTRY_SIZES | CONFIGURATION_ENABLE,
         );
         if !wait_until(ready_timeout, || {
-            read32(registers, REGISTER_STATUS) & (STATUS_READY | STATUS_FATAL) != 0
+            registers.read::<u32>(REGISTER_STATUS) & (STATUS_READY | STATUS_FATAL) != 0
         }) {
             return Err(Error::EnableTimedOut);
         }
-        if read32(registers, REGISTER_STATUS) & STATUS_FATAL != 0 {
+        if registers.read::<u32>(REGISTER_STATUS) & STATUS_FATAL != 0 {
             return Err(Error::ControllerFatal);
         }
 
@@ -311,7 +310,7 @@ impl Controller {
             serial: [0; 20],
             model: [0; 40],
             firmware: [0; 8],
-            version: read32(self.registers, REGISTER_VERSION),
+            version: self.registers.read::<u32>(REGISTER_VERSION),
         };
         identity.serial.copy_from_slice(&data[4..24]);
         identity.model.copy_from_slice(&data[24..64]);
@@ -396,24 +395,26 @@ impl Controller {
         }
         queue.tail = (queue.tail + 1) % QUEUE_ENTRIES;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write32(queue.submission_doorbell, 0, u32::from(queue.tail));
+        self.registers
+            .write::<u32>(queue.submission_doorbell, u32::from(queue.tail));
 
         let completion = queue.completions as usize + usize::from(queue.head) * 16;
         let phase = queue.phase;
         if !wait_until(COMMAND_TIMEOUT_SECONDS, || {
-            (read32(completion, 12) >> 16 & 1 != 0) == phase
+            (read_dma32(completion, 12) >> 16 & 1 != 0) == phase
         }) {
             self.broken = true;
             return Err(Error::CommandTimedOut(opcode));
         }
-        let status = (read32(completion, 12) >> 17) as u16;
-        let completed = read32(completion, 12) as u16;
+        let status = (read_dma32(completion, 12) >> 17) as u16;
+        let completed = read_dma32(completion, 12) as u16;
         queue.head += 1;
         if queue.head == QUEUE_ENTRIES {
             queue.head = 0;
             queue.phase = !queue.phase;
         }
-        write32(queue.completion_doorbell, 0, u32::from(queue.head));
+        self.registers
+            .write::<u32>(queue.completion_doorbell, u32::from(queue.head));
         // Completion dword 3 carries the command identifier (section 4.6).
         if completed != identifier {
             self.broken = true;
@@ -458,29 +459,30 @@ impl Queue {
 ///
 /// # Safety
 ///
-/// `function` must be an NVMe controller that no other code drives, with
-/// its registers identity mapped.
+/// `function` must be an NVMe controller that no other code drives.
 pub(crate) unsafe fn shutdown(function: Function) -> bool {
-    match function.memory_bar(0) {
-        Some(registers) => shutdown_registers(registers as usize),
+    match function
+        .memory_bar(0)
+        .and_then(|bar| Mmio::firmware(bar, DOORBELL_BASE))
+    {
+        Some(registers) => shutdown_registers(&registers),
         None => false,
     }
 }
 
-fn shutdown_registers(registers: usize) -> bool {
-    let configuration = read32(registers, REGISTER_CONFIGURATION);
+fn shutdown_registers(registers: &Mmio) -> bool {
+    let configuration = registers.read::<u32>(REGISTER_CONFIGURATION);
     if configuration == u32::MAX || configuration & CONFIGURATION_ENABLE == 0 {
         return false;
     }
     // RTD3E (Identify Controller) bounds the time; without reading it, use
     // the generous default.
-    write32(
-        registers,
+    registers.write::<u32>(
         REGISTER_CONFIGURATION,
         configuration & !(3 << 14) | CONFIGURATION_SHUTDOWN_NORMAL,
     );
     wait_until(SHUTDOWN_TIMEOUT_SECONDS, || {
-        read32(registers, REGISTER_STATUS) & STATUS_SHUTDOWN_MASK == STATUS_SHUTDOWN_COMPLETE
+        registers.read::<u32>(REGISTER_STATUS) & STATUS_SHUTDOWN_MASK == STATUS_SHUTDOWN_COMPLETE
     })
 }
 
@@ -499,23 +501,20 @@ fn data_address() -> u64 {
     addr_of!(DATA) as u64
 }
 
-fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers pass identity-mapped controller registers or DMA memory.
+fn read_dma32(base: usize, offset: usize) -> u32 {
+    // SAFETY: callers pass the driver's identity-mapped DMA memory.
     unsafe { ((base + offset) as *const u32).read_volatile() }
 }
 
-fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: as for read32.
-    unsafe { ((base + offset) as *mut u32).write_volatile(value) }
+/// Reads a 64-bit register as two 32-bit reads, low half first.
+fn read64(registers: &Mmio, offset: usize) -> u64 {
+    u64::from(registers.read::<u32>(offset)) | u64::from(registers.read::<u32>(offset + 4)) << 32
 }
 
-fn read64(base: usize, offset: usize) -> u64 {
-    u64::from(read32(base, offset)) | u64::from(read32(base, offset + 4)) << 32
-}
-
-fn write64(base: usize, offset: usize, value: u64) {
-    write32(base, offset, value as u32);
-    write32(base, offset + 4, (value >> 32) as u32);
+/// Writes a 64-bit register as two 32-bit writes, low half first.
+fn write64(registers: &Mmio, offset: usize, value: u64) {
+    registers.write::<u32>(offset, value as u32);
+    registers.write::<u32>(offset + 4, (value >> 32) as u32);
 }
 
 impl BlockDevice for Controller {

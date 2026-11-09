@@ -8,6 +8,7 @@ use super::{
     paging::MmioMapping,
     timer,
 };
+use crate::trusted::mmio::Mmio;
 use crate::{
     control_abi,
     scheduler::{self, UserInterruptFrame},
@@ -507,8 +508,8 @@ impl UnmappedDmaAttempt {
 
 pub(crate) struct VirtioBlockBackend {
     device: VirtioBlockDevice,
-    common: usize,
-    notification: usize,
+    common: Mmio,
+    notification: Mmio,
     dma_physical: u64,
     dma_virtual: usize,
     capacity_sectors: u64,
@@ -756,23 +757,23 @@ fn program_masked_msix_vector_raw(
     {
         return false;
     }
-    let Some(entry) = mapping.address(entry_physical, MSIX_TABLE_ENTRY_SIZE as usize) else {
+    let Some(entry) = Mmio::mapped(mapping, entry_physical, MSIX_TABLE_ENTRY_SIZE as usize) else {
         return false;
     };
     let message_address = MSI_ADDRESS_BASE | u32::from(apic_id) << MSI_DESTINATION_SHIFT;
-    write_mmio_u32(entry + 12, MSIX_VECTOR_MASK);
+    write_mmio_u32(&entry, 12, MSIX_VECTOR_MASK);
     compiler_fence(Ordering::SeqCst);
-    if read_mmio_u32(entry + 12) & MSIX_VECTOR_MASK == 0 {
+    if read_mmio_u32(&entry, 12) & MSIX_VECTOR_MASK == 0 {
         return false;
     }
-    write_mmio_u32(entry, message_address);
-    write_mmio_u32(entry + 4, 0);
-    write_mmio_u32(entry + 8, u32::from(vector));
+    write_mmio_u32(&entry, 0, message_address);
+    write_mmio_u32(&entry, 4, 0);
+    write_mmio_u32(&entry, 8, u32::from(vector));
     compiler_fence(Ordering::SeqCst);
-    read_mmio_u32(entry) == message_address
-        && read_mmio_u32(entry + 4) == 0
-        && read_mmio_u32(entry + 8) == u32::from(vector)
-        && read_mmio_u32(entry + 12) == MSIX_VECTOR_MASK
+    read_mmio_u32(&entry, 0) == message_address
+        && read_mmio_u32(&entry, 4) == 0
+        && read_mmio_u32(&entry, 8) == u32::from(vector)
+        && read_mmio_u32(&entry, 12) == MSIX_VECTOR_MASK
         && pci_config::read_u16(target.bus, target.device, target.function, control_offset)
             & MSIX_ENABLE
             == 0
@@ -785,14 +786,14 @@ pub(crate) fn verify_msix_programming_rejections(
     let Some((table_physical, _)) = device.msix_table_region() else {
         return false;
     };
-    let Some(entry) = mapping.address(table_physical, MSIX_TABLE_ENTRY_SIZE as usize) else {
+    let Some(entry) = Mmio::mapped(mapping, table_physical, MSIX_TABLE_ENTRY_SIZE as usize) else {
         return false;
     };
     let before = [
-        read_mmio_u32(entry),
-        read_mmio_u32(entry + 4),
-        read_mmio_u32(entry + 8),
-        read_mmio_u32(entry + 12),
+        read_mmio_u32(&entry, 0),
+        read_mmio_u32(&entry, 4),
+        read_mmio_u32(&entry, 8),
+        read_mmio_u32(&entry, 12),
     ];
     !program_masked_msix_vector(
         device,
@@ -804,10 +805,10 @@ pub(crate) fn verify_msix_programming_rejections(
         && !program_masked_msix_vector(device, mapping, 0, 0, SYSCALL_VECTOR)
         && before
             == [
-                read_mmio_u32(entry),
-                read_mmio_u32(entry + 4),
-                read_mmio_u32(entry + 8),
-                read_mmio_u32(entry + 12),
+                read_mmio_u32(&entry, 0),
+                read_mmio_u32(&entry, 4),
+                read_mmio_u32(&entry, 8),
+                read_mmio_u32(&entry, 12),
             ]
 }
 
@@ -821,10 +822,11 @@ pub(crate) fn verify_network_msix_programming_rejections(
     if table_length < 2 * MSIX_TABLE_ENTRY_SIZE as usize {
         return false;
     }
-    let Some(table) = mapping.address(table_physical, 2 * MSIX_TABLE_ENTRY_SIZE as usize) else {
+    let Some(table) = Mmio::mapped(mapping, table_physical, 2 * MSIX_TABLE_ENTRY_SIZE as usize)
+    else {
         return false;
     };
-    let before: [u32; 8] = core::array::from_fn(|word| read_mmio_u32(table + word * 4));
+    let before: [u32; 8] = core::array::from_fn(|word| read_mmio_u32(&table, word * 4));
     !program_masked_msix_vector_raw(
         device.msix_target(),
         mapping,
@@ -833,7 +835,7 @@ pub(crate) fn verify_network_msix_programming_rejections(
         VIRTIO_NETWORK_RX_VECTOR,
     ) && !program_masked_msix_vector_raw(device.msix_target(), mapping, 0, 0, 31)
         && !program_masked_msix_vector_raw(device.msix_target(), mapping, 1, 0, SYSCALL_VECTOR)
-        && before == core::array::from_fn(|word| read_mmio_u32(table + word * 4))
+        && before == core::array::from_fn(|word| read_mmio_u32(&table, word * 4))
 }
 
 pub(crate) fn program_masked_network_msix_vectors(
@@ -909,14 +911,16 @@ fn network_msix_vectors_match(
         .all(|(index, vector)| {
             let Some(entry) = table_physical
                 .checked_add((index as u64) * u64::from(MSIX_TABLE_ENTRY_SIZE))
-                .and_then(|physical| mapping.address(physical, MSIX_TABLE_ENTRY_SIZE as usize))
+                .and_then(|physical| {
+                    Mmio::mapped(mapping, physical, MSIX_TABLE_ENTRY_SIZE as usize)
+                })
             else {
                 return false;
             };
-            read_mmio_u32(entry) == message_address
-                && read_mmio_u32(entry + 4) == 0
-                && read_mmio_u32(entry + 8) == u32::from(vector)
-                && read_mmio_u32(entry + 12) == MSIX_VECTOR_MASK
+            read_mmio_u32(&entry, 0) == message_address
+                && read_mmio_u32(&entry, 4) == 0
+                && read_mmio_u32(&entry, 8) == u32::from(vector)
+                && read_mmio_u32(&entry, 12) == MSIX_VECTOR_MASK
         })
 }
 
@@ -975,12 +979,12 @@ fn set_msix_entry_mask_raw(
     }
     let Some(entry) = table
         .checked_add(offset as u64)
-        .and_then(|physical| mapping.address(physical, MSIX_TABLE_ENTRY_SIZE as usize))
+        .and_then(|physical| Mmio::mapped(mapping, physical, MSIX_TABLE_ENTRY_SIZE as usize))
     else {
         return false;
     };
-    write_mmio_u32(entry + 12, if masked { MSIX_VECTOR_MASK } else { 0 });
-    read_mmio_u32(entry + 12) == if masked { MSIX_VECTOR_MASK } else { 0 }
+    write_mmio_u32(&entry, 12, if masked { MSIX_VECTOR_MASK } else { 0 });
+    read_mmio_u32(&entry, 12) == if masked { MSIX_VECTOR_MASK } else { 0 }
 }
 
 /// Whether MSI-X entry `index` of `target` has a message pending (its Pending
@@ -997,13 +1001,14 @@ fn msix_entry_pending(target: MsixTarget, mapping: MmioMapping, index: u16) -> O
     if offset + MSIX_PBA_ENTRY_SIZE as usize > pba_length {
         return None;
     }
-    let address = mapping.address(
+    let address = Mmio::mapped(
+        mapping,
         pba.checked_add(offset as u64)?,
         MSIX_PBA_ENTRY_SIZE as usize,
     )?;
     let bit = u32::from(index) % MSIX_PBA_BITS_PER_ENTRY;
     let half = if bit < 32 { 0 } else { 4 };
-    Some(read_mmio_u32(address + half) & (1 << (bit % 32)) != 0)
+    Some(read_mmio_u32(&address, half) & (1 << (bit % 32)) != 0)
 }
 
 /// Takes the message MSI-X entry `index` holds pending from an earlier
@@ -1158,8 +1163,8 @@ pub(crate) fn initialize_without_dma(
     mapping: MmioMapping,
 ) -> Option<VirtioBlockInitialization> {
     let (common_physical, common_length) = device.common_region()?;
-    let common = mapping.address(common_physical, common_length)?;
-    if common % align_of::<u32>() != 0 {
+    let common = Mmio::mapped(mapping, common_physical, common_length)?;
+    if !common.is_aligned(align_of::<u32>()) {
         return None;
     }
 
@@ -1179,9 +1184,9 @@ pub(crate) fn initialize_without_dma(
         return None;
     }
 
-    let result = negotiate(common);
+    let result = negotiate(&common);
 
-    if reset(common).is_none()
+    if reset(&common).is_none()
         || pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
             & COMMAND_BUS_MASTER
             != 0
@@ -1197,13 +1202,13 @@ pub(crate) fn initialize_network_without_dma(
     device_mapping: MmioMapping,
 ) -> Option<VirtioNetworkInitialization> {
     let (common_physical, common_length) = device.common_region()?;
-    let common = common_mapping.address(common_physical, common_length)?;
+    let common = Mmio::mapped(common_mapping, common_physical, common_length)?;
     let (device_physical, device_length) = device.device_region()?;
     if device_length < 6 {
         return None;
     }
-    let device_configuration = device_mapping.address(device_physical, device_length)?;
-    if common % align_of::<u32>() != 0 || !network_function_is_disabled(device) {
+    let device_configuration = Mmio::mapped(device_mapping, device_physical, device_length)?;
+    if !common.is_aligned(align_of::<u32>()) || !network_function_is_disabled(device) {
         return None;
     }
 
@@ -1220,9 +1225,9 @@ pub(crate) fn initialize_network_without_dma(
         == COMMAND_MEMORY_SPACE;
     let result = memory_enabled
         .then(|| {
-            let mut initialization = negotiate_network(common)?;
-            initialization.mac = read_network_mac(common, device_configuration)?;
-            let (receive, transmit) = network_queue_geometry(common, device)?;
+            let mut initialization = negotiate_network(&common)?;
+            initialization.mac = read_network_mac(&common, &device_configuration)?;
+            let (receive, transmit) = network_queue_geometry(&common, device)?;
             initialization.receive_queue_size = receive.0;
             initialization.receive_notification = receive.1;
             initialization.transmit_queue_size = transmit.0;
@@ -1230,7 +1235,7 @@ pub(crate) fn initialize_network_without_dma(
             Some(initialization)
         })
         .flatten();
-    let reset_complete = reset(common).is_some();
+    let reset_complete = reset(&common).is_some();
     let revoked = revoke_network_function(device);
     if !reset_complete || !revoked {
         return None;
@@ -1261,7 +1266,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = common_mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
@@ -1274,7 +1279,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
         (command | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
     );
     let activated = (|| {
-        let initialization = negotiate_network(common)?;
+        let initialization = negotiate_network(&common)?;
         if initialization.queue_count < 2 {
             return None;
         }
@@ -1292,31 +1297,35 @@ pub(crate) unsafe fn activate_network_queues_without_io(
                 NET_TX_USED_OFFSET,
             ),
         ] {
-            write_common_u16(common, COMMON_QUEUE_SELECT, queue);
-            validate_network_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE))?;
-            if read_common_u16(common, COMMON_QUEUE_ENABLE) != 0 {
+            write_common_u16(&common, COMMON_QUEUE_SELECT, queue);
+            validate_network_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE))?;
+            if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 0 {
                 return None;
             }
-            write_common_u16(common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
-            write_common_u64(common, COMMON_QUEUE_DESC, dma_physical + descriptor as u64);
-            write_common_u64(common, COMMON_QUEUE_DRIVER, dma_physical + available as u64);
-            write_common_u64(common, COMMON_QUEUE_DEVICE, dma_physical + used as u64);
-            write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-            if read_common_u16(common, COMMON_QUEUE_SIZE) != QUEUE_SIZE
-                || read_common_u16(common, COMMON_QUEUE_ENABLE) != 1
-                || read_common_u64(common, COMMON_QUEUE_DESC) != dma_physical + descriptor as u64
-                || read_common_u64(common, COMMON_QUEUE_DRIVER) != dma_physical + available as u64
-                || read_common_u64(common, COMMON_QUEUE_DEVICE) != dma_physical + used as u64
+            write_common_u16(&common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
+            write_common_u64(&common, COMMON_QUEUE_DESC, dma_physical + descriptor as u64);
+            write_common_u64(
+                &common,
+                COMMON_QUEUE_DRIVER,
+                dma_physical + available as u64,
+            );
+            write_common_u64(&common, COMMON_QUEUE_DEVICE, dma_physical + used as u64);
+            write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+            if read_common_u16(&common, COMMON_QUEUE_SIZE) != QUEUE_SIZE
+                || read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
+                || read_common_u64(&common, COMMON_QUEUE_DESC) != dma_physical + descriptor as u64
+                || read_common_u64(&common, COMMON_QUEUE_DRIVER) != dma_physical + available as u64
+                || read_common_u64(&common, COMMON_QUEUE_DEVICE) != dma_physical + used as u64
             {
                 return None;
             }
         }
         write_common_u8(
-            common,
+            &common,
             COMMON_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        if read_common_u8(common, COMMON_DEVICE_STATUS)
+        if read_common_u8(&common, COMMON_DEVICE_STATUS)
             != STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
         {
             return None;
@@ -1344,7 +1353,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
         (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
     );
     let bus_master_revoked = network_function_command(device) & COMMAND_BUS_MASTER == 0;
-    let reset_complete = reset(common).is_some();
+    let reset_complete = reset(&common).is_some();
     activated
         && bus_master_revoked
         && reset_complete
@@ -1376,7 +1385,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = common_mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
@@ -1387,7 +1396,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
         PCI_COMMAND,
         COMMAND_MEMORY_SPACE,
     );
-    let Some(initialization) = negotiate_network(common) else {
+    let Some(initialization) = negotiate_network(&common) else {
         return false;
     };
     if initialization.queue_count < 2 {
@@ -1407,20 +1416,24 @@ pub(crate) unsafe fn activate_kernel_network_queues(
             NET_TX_USED_OFFSET,
         ),
     ] {
-        write_common_u16(common, COMMON_QUEUE_SELECT, queue);
-        if validate_network_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE)).is_none()
-            || read_common_u16(common, COMMON_QUEUE_ENABLE) != 0
+        write_common_u16(&common, COMMON_QUEUE_SELECT, queue);
+        if validate_network_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE)).is_none()
+            || read_common_u16(&common, COMMON_QUEUE_ENABLE) != 0
         {
             return false;
         }
-        write_common_u16(common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
-        write_common_u64(common, COMMON_QUEUE_DESC, dma_physical + descriptor as u64);
-        write_common_u64(common, COMMON_QUEUE_DRIVER, dma_physical + available as u64);
-        write_common_u64(common, COMMON_QUEUE_DEVICE, dma_physical + used as u64);
-        write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
+        write_common_u16(&common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
+        write_common_u64(&common, COMMON_QUEUE_DESC, dma_physical + descriptor as u64);
+        write_common_u64(
+            &common,
+            COMMON_QUEUE_DRIVER,
+            dma_physical + available as u64,
+        );
+        write_common_u64(&common, COMMON_QUEUE_DEVICE, dma_physical + used as u64);
+        write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
     }
     write_common_u8(
-        common,
+        &common,
         COMMON_DEVICE_STATUS,
         STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
     );
@@ -1431,7 +1444,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
         PCI_COMMAND,
         COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
     );
-    read_common_u8(common, COMMON_DEVICE_STATUS)
+    read_common_u8(&common, COMMON_DEVICE_STATUS)
         == STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
         && network_function_command(device)
             & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
@@ -1446,12 +1459,12 @@ pub(crate) fn prepare_network_for_isolated_service(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = common_mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
     if !network_function_is_disabled(device)
         || !network_msix_is_disabled(device)
-        || read_common_u8(common, COMMON_DEVICE_STATUS) != 0
+        || read_common_u8(&common, COMMON_DEVICE_STATUS) != 0
     {
         return false;
     }
@@ -1660,7 +1673,7 @@ fn network_queues_are_bound(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = common_mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
     let expected_command = COMMAND_MEMORY_SPACE
@@ -1672,7 +1685,7 @@ fn network_queues_are_bound(
     if network_function_command(device)
         & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         != expected_command
-        || read_common_u8(common, COMMON_DEVICE_STATUS)
+        || read_common_u8(&common, COMMON_DEVICE_STATUS)
             != STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
     {
         return false;
@@ -1693,13 +1706,13 @@ fn network_queues_are_bound(
             transmit_vector,
         ),
     ] {
-        write_common_u16(common, COMMON_QUEUE_SELECT, queue);
-        if read_common_u16(common, COMMON_QUEUE_SIZE) != QUEUE_SIZE
-            || read_common_u16(common, COMMON_QUEUE_ENABLE) != 1
-            || read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) != vector
-            || read_common_u64(common, COMMON_QUEUE_DESC) != dma_physical + descriptor as u64
-            || read_common_u64(common, COMMON_QUEUE_DRIVER) != dma_physical + available as u64
-            || read_common_u64(common, COMMON_QUEUE_DEVICE) != dma_physical + used as u64
+        write_common_u16(&common, COMMON_QUEUE_SELECT, queue);
+        if read_common_u16(&common, COMMON_QUEUE_SIZE) != QUEUE_SIZE
+            || read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
+            || read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) != vector
+            || read_common_u64(&common, COMMON_QUEUE_DESC) != dma_physical + descriptor as u64
+            || read_common_u64(&common, COMMON_QUEUE_DRIVER) != dma_physical + available as u64
+            || read_common_u64(&common, COMMON_QUEUE_DEVICE) != dma_physical + used as u64
         {
             return false;
         }
@@ -2225,7 +2238,7 @@ pub(crate) fn quiesce_isolated_network(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = common_mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
     let current = network_function_command(device);
@@ -2237,7 +2250,7 @@ pub(crate) fn quiesce_isolated_network(
         (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
     );
     network_function_command(device) & COMMAND_BUS_MASTER == 0
-        && reset(common).is_some()
+        && reset(&common).is_some()
         && revoke_network_function(device)
         && network_function_is_disabled(device)
         && network_msix_is_disabled(device)
@@ -2272,7 +2285,7 @@ pub(crate) unsafe fn transmit_network_probe(
         return None;
     }
     let (common_physical, common_length) = device.common_region()?;
-    let common = common_mapping.address(common_physical, common_length)?;
+    let common = Mmio::mapped(common_mapping, common_physical, common_length)?;
     let (notify_physical, notify_length) = device.notify_region()?;
     if !install_virtio_interrupt_at(apic, VIRTIO_NETWORK_TX_VECTOR) {
         return None;
@@ -2297,36 +2310,37 @@ pub(crate) unsafe fn transmit_network_probe(
         {
             return None;
         }
-        let initialization = negotiate_network(common)?;
+        let initialization = negotiate_network(&common)?;
         if initialization.queue_count < 2 || !set_msix_control_raw(device.msix_target(), true, true)
         {
             return None;
         }
-        write_common_u16(common, COMMON_QUEUE_SELECT, 1);
-        validate_network_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE))?;
-        write_common_u16(common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
-        write_common_u16(common, COMMON_QUEUE_MSIX_VECTOR, 1);
+        write_common_u16(&common, COMMON_QUEUE_SELECT, 1);
+        validate_network_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE))?;
+        write_common_u16(&common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
+        write_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR, 1);
         let notify_offset = notification_byte_offset(
-            read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+            read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
             device.notify_multiplier,
             notify_length,
         )?;
-        let notification = notification_mapping.address(
+        let notification = Mmio::mapped(
+            notification_mapping,
             notify_physical.checked_add(notify_offset as u64)?,
             size_of::<u16>(),
         )?;
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DESC,
             dma_physical + NET_TX_DESC_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DRIVER,
             dma_physical + NET_TX_AVAIL_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DEVICE,
             dma_physical + NET_TX_USED_OFFSET as u64,
         );
@@ -2353,18 +2367,18 @@ pub(crate) unsafe fn transmit_network_probe(
         write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2, 1);
         write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4, 0);
         compiler_fence(Ordering::SeqCst);
-        write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-        if read_common_u16(common, COMMON_QUEUE_ENABLE) != 1
-            || read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) != 1
+        write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+        if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
+            || read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) != 1
         {
             return None;
         }
         write_common_u8(
-            common,
+            &common,
             COMMON_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        let device_status = read_common_u8(common, COMMON_DEVICE_STATUS);
+        let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         if device_status & STATUS_DRIVER_OK == 0
             || device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) != 0
         {
@@ -2389,14 +2403,14 @@ pub(crate) unsafe fn transmit_network_probe(
             return None;
         }
         compiler_fence(Ordering::SeqCst);
-        write_mmio_u16(notification, 1);
+        write_mmio_u16(&notification, 0, 1);
         let interrupted = wait_for_one_virtio_interrupt();
         let header_unchanged = (0..HEADER_LENGTH)
             .all(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) == 0);
         let frame_unchanged = ETHERNET_FRAME.iter().enumerate().all(|(offset, expected)| {
             read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) == *expected
         });
-        let device_status = read_common_u8(common, COMMON_DEVICE_STATUS);
+        let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         (interrupted
             && read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) == 1
             && read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) == 0
@@ -2424,7 +2438,7 @@ pub(crate) unsafe fn transmit_network_probe(
         (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
     );
     let bus_master_revoked = network_function_command(device) & COMMAND_BUS_MASTER == 0;
-    let reset_complete = reset(common).is_some();
+    let reset_complete = reset(&common).is_some();
     let revoked = revoke_network_function(device);
     let interrupt_retired = retire_virtio_interrupt_at(apic, VIRTIO_NETWORK_TX_VECTOR);
     (function_masked
@@ -2550,7 +2564,7 @@ unsafe fn network_arp_exchange(
         return None;
     }
     let (common_physical, common_length) = device.common_region()?;
-    let common = common_mapping.address(common_physical, common_length)?;
+    let common = Mmio::mapped(common_mapping, common_physical, common_length)?;
     let (notify_physical, notify_length) = device.notify_region()?;
     if !install_virtio_interrupt_at(apic, VIRTIO_NETWORK_RX_VECTOR) {
         return None;
@@ -2587,78 +2601,80 @@ unsafe fn network_arp_exchange(
         {
             return None;
         }
-        let initialization = negotiate_network(common)?;
+        let initialization = negotiate_network(&common)?;
         if initialization.queue_count < 2 || !set_msix_control_raw(device.msix_target(), true, true)
         {
             return None;
         }
 
-        write_common_u16(common, COMMON_QUEUE_SELECT, 0);
-        validate_network_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE))?;
-        write_common_u16(common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
-        write_common_u16(common, COMMON_QUEUE_MSIX_VECTOR, 0);
+        write_common_u16(&common, COMMON_QUEUE_SELECT, 0);
+        validate_network_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE))?;
+        write_common_u16(&common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
+        write_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR, 0);
         let receive_notify_offset = notification_byte_offset(
-            read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+            read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
             device.notify_multiplier,
             notify_length,
         )?;
-        let receive_notification = notification_mapping.address(
+        let receive_notification = Mmio::mapped(
+            notification_mapping,
             notify_physical.checked_add(receive_notify_offset as u64)?,
             size_of::<u16>(),
         )?;
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DESC,
             dma_physical + NET_RX_DESC_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DRIVER,
             dma_physical + NET_RX_AVAIL_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DEVICE,
             dma_physical + NET_RX_USED_OFFSET as u64,
         );
-        write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-        if read_common_u16(common, COMMON_QUEUE_ENABLE) != 1
-            || read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) != 0
+        write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+        if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
+            || read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) != 0
         {
             return None;
         }
 
-        write_common_u16(common, COMMON_QUEUE_SELECT, 1);
-        validate_network_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE))?;
-        write_common_u16(common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
-        write_common_u16(common, COMMON_QUEUE_MSIX_VECTOR, 1);
+        write_common_u16(&common, COMMON_QUEUE_SELECT, 1);
+        validate_network_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE))?;
+        write_common_u16(&common, COMMON_QUEUE_SIZE, QUEUE_SIZE);
+        write_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR, 1);
         let transmit_notify_offset = notification_byte_offset(
-            read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+            read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
             device.notify_multiplier,
             notify_length,
         )?;
-        let transmit_notification = notification_mapping.address(
+        let transmit_notification = Mmio::mapped(
+            notification_mapping,
             notify_physical.checked_add(transmit_notify_offset as u64)?,
             size_of::<u16>(),
         )?;
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DESC,
             dma_physical + NET_TX_DESC_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DRIVER,
             dma_physical + NET_TX_AVAIL_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DEVICE,
             dma_physical + NET_TX_USED_OFFSET as u64,
         );
-        write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-        if read_common_u16(common, COMMON_QUEUE_ENABLE) != 1
-            || read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) != 1
+        write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+        if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
+            || read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) != 1
         {
             return None;
         }
@@ -2704,11 +2720,11 @@ unsafe fn network_arp_exchange(
 
         compiler_fence(Ordering::SeqCst);
         write_common_u8(
-            common,
+            &common,
             COMMON_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        let device_status = read_common_u8(common, COMMON_DEVICE_STATUS);
+        let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         if device_status & STATUS_DRIVER_OK == 0
             || device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) != 0
         {
@@ -2734,8 +2750,8 @@ unsafe fn network_arp_exchange(
             return None;
         }
         compiler_fence(Ordering::SeqCst);
-        write_mmio_u16(receive_notification, 0);
-        write_mmio_u16(transmit_notification, 1);
+        write_mmio_u16(&receive_notification, 0, 0);
+        write_mmio_u16(&transmit_notification, 0, 1);
         let transmit_interrupted = wait_for_one_virtio_interrupt();
         let transmit_completed = transmit_interrupted
             && read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) == 1
@@ -2762,7 +2778,7 @@ unsafe fn network_arp_exchange(
         let receive_index = read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2);
         let receive_id = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 4);
         let receive_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 8);
-        let device_status = read_common_u8(common, COMMON_DEVICE_STATUS);
+        let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         let device_healthy = device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) == 0;
         if expect_reply {
             let guards_valid = read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1) == 0x3c
@@ -2819,7 +2835,7 @@ unsafe fn network_arp_exchange(
         (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
     );
     let bus_master_revoked = network_function_command(device) & COMMAND_BUS_MASTER == 0;
-    let reset_complete = reset(common).is_some();
+    let reset_complete = reset(&common).is_some();
     let revoked = revoke_network_function(device);
     let receive_interrupt_retired = retire_virtio_interrupt_at(apic, VIRTIO_NETWORK_RX_VECTOR);
     let transmit_interrupt_retired = retire_virtio_interrupt_at(apic, VIRTIO_NETWORK_TX_VECTOR);
@@ -2900,14 +2916,15 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
     if common_length < COMMON_QUEUE_DEVICE + size_of::<u64>() {
         return None;
     }
-    let common = mapping.address(common_physical, common_length)?;
+    let common = Mmio::mapped(mapping, common_physical, common_length)?;
     let (notify_physical, notify_length) = device.notify_region()?;
     let (device_physical, device_length) = device.device_region()?;
     if device_length < size_of::<u64>() {
         return None;
     }
-    let device_configuration = mapping.address(device_physical, device_length)?;
-    if common % align_of::<u64>() != 0 || device_configuration % align_of::<u64>() != 0 {
+    let device_configuration = Mmio::mapped(mapping, device_physical, device_length)?;
+    if !common.is_aligned(align_of::<u64>()) || !device_configuration.is_aligned(align_of::<u64>())
+    {
         return None;
     }
 
@@ -2920,67 +2937,72 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
         if !set_pci_command(device, false) {
             return None;
         }
-        let initialization = negotiate(common)?;
+        let initialization = negotiate(&common)?;
         if initialization.queue_count == 0 {
             return None;
         }
         if !set_msix_control(device, true, true) {
             return None;
         }
-        let capacity_sectors = read_capacity(common, device_configuration)?;
+        let capacity_sectors = read_capacity(&common, &device_configuration)?;
         if capacity_sectors == 0 || sector >= capacity_sectors {
             return None;
         }
 
-        write_common_u16(common, COMMON_QUEUE_SELECT, 0);
-        let maximum_size = read_common_u16(common, COMMON_QUEUE_SIZE);
+        write_common_u16(&common, COMMON_QUEUE_SELECT, 0);
+        let maximum_size = read_common_u16(&common, COMMON_QUEUE_SIZE);
         if maximum_size < 3 {
             return None;
         }
         let queue_size = select_queue_size(maximum_size)?;
-        write_common_u16(common, COMMON_QUEUE_SIZE, queue_size);
-        if read_common_u16(common, COMMON_QUEUE_SIZE) != queue_size {
+        write_common_u16(&common, COMMON_QUEUE_SIZE, queue_size);
+        if read_common_u16(&common, COMMON_QUEUE_SIZE) != queue_size {
             return None;
         }
-        write_common_u16(common, COMMON_QUEUE_MSIX_VECTOR, 0);
-        if read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) != 0 {
+        write_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR, 0);
+        if read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) != 0 {
             return None;
         }
         let notify_offset = notification_byte_offset(
-            read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+            read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
             device.notify_multiplier,
             notify_length,
         )?;
-        let notification = mapping.address(
+        let notification = Mmio::mapped(
+            mapping,
             notify_physical.checked_add(notify_offset as u64)?,
             size_of::<u16>(),
         )?;
-        if notification % align_of::<u16>() != 0 {
+        if !notification.is_aligned(align_of::<u16>()) {
             return None;
         }
 
         prepare_read_request(dma_physical, dma_virtual, sector);
-        write_common_u64(common, COMMON_QUEUE_DESC, dma_physical + DESC_OFFSET as u64);
         write_common_u64(
-            common,
+            &common,
+            COMMON_QUEUE_DESC,
+            dma_physical + DESC_OFFSET as u64,
+        );
+        write_common_u64(
+            &common,
             COMMON_QUEUE_DRIVER,
             dma_physical + AVAIL_OFFSET as u64,
         );
         write_common_u64(
-            common,
+            &common,
             COMMON_QUEUE_DEVICE,
             dma_physical + USED_OFFSET as u64,
         );
-        write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-        if read_common_u16(common, COMMON_QUEUE_ENABLE) != 1 {
+        write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+        if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1 {
             return None;
         }
         write_common_u8(
-            common,
+            &common,
             COMMON_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        if read_common_u8(common, COMMON_DEVICE_STATUS) & STATUS_DRIVER_OK == 0
+        if read_common_u8(&common, COMMON_DEVICE_STATUS) & STATUS_DRIVER_OK == 0
             || !set_pci_command(device, true)
         {
             return None;
@@ -2995,7 +3017,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
         }
 
         compiler_fence(Ordering::SeqCst);
-        write_mmio_u16(notification, 0);
+        write_mmio_u16(&notification, 0, 0);
         asm!("sti", options(nomem, nostack));
         let mut interrupted = false;
         for _ in 0..QUEUE_POLL_LIMIT {
@@ -3007,7 +3029,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
         }
         asm!("cli", options(nomem, nostack));
         compiler_fence(Ordering::SeqCst);
-        let device_status = read_common_u8(common, COMMON_DEVICE_STATUS);
+        let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         if !interrupted
             || device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) != 0
             || read_dma_u16(dma_virtual + USED_OFFSET + 2) != 1
@@ -3031,7 +3053,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
     let entry_masked = set_msix_entry_mask(device, msix_mapping, 0, true);
     let msix_disabled = set_msix_control(device, false, true);
     let bus_master_disabled = set_pci_command(device, false);
-    let reset_complete = reset(common).is_some();
+    let reset_complete = reset(&common).is_some();
     PCI_INTERRUPTS.virtio_active.store(false, Ordering::SeqCst);
     let interrupt_retired = retire_virtio_interrupt(apic);
     if !function_masked
@@ -3073,14 +3095,16 @@ impl VirtioBlockBackend {
         if common_length < COMMON_QUEUE_DEVICE + size_of::<u64>() {
             return None;
         }
-        let common = mapping.address(common_physical, common_length)?;
+        let common = Mmio::mapped(mapping, common_physical, common_length)?;
         let (notify_physical, notify_length) = device.notify_region()?;
         let (device_physical, device_length) = device.device_region()?;
         if device_length < size_of::<u64>() {
             return None;
         }
-        let device_configuration = mapping.address(device_physical, device_length)?;
-        if common % align_of::<u64>() != 0 || device_configuration % align_of::<u64>() != 0 {
+        let device_configuration = Mmio::mapped(mapping, device_physical, device_length)?;
+        if !common.is_aligned(align_of::<u64>())
+            || !device_configuration.is_aligned(align_of::<u64>())
+        {
             return None;
         }
         if !set_pci_command(device, false) {
@@ -3088,59 +3112,66 @@ impl VirtioBlockBackend {
         }
 
         let started = (|| {
-            negotiate(common)?;
-            let capacity_sectors = read_capacity(common, device_configuration)?;
+            negotiate(&common)?;
+            let capacity_sectors = read_capacity(&common, &device_configuration)?;
             if capacity_sectors == 0 {
                 return None;
             }
-            write_common_u16(common, COMMON_QUEUE_SELECT, 0);
-            let queue_size = select_queue_size(read_common_u16(common, COMMON_QUEUE_SIZE))?;
-            write_common_u16(common, COMMON_QUEUE_SIZE, queue_size);
-            if read_common_u16(common, COMMON_QUEUE_SIZE) != queue_size {
+            write_common_u16(&common, COMMON_QUEUE_SELECT, 0);
+            let queue_size = select_queue_size(read_common_u16(&common, COMMON_QUEUE_SIZE))?;
+            write_common_u16(&common, COMMON_QUEUE_SIZE, queue_size);
+            if read_common_u16(&common, COMMON_QUEUE_SIZE) != queue_size {
                 return None;
             }
             let notify_offset = notification_byte_offset(
-                read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+                read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
                 device.notify_multiplier,
                 notify_length,
             )?;
-            let notification = mapping.address(
+            let notification = Mmio::mapped(
+                mapping,
                 notify_physical.checked_add(notify_offset as u64)?,
                 size_of::<u16>(),
             )?;
-            if notification % align_of::<u16>() != 0 {
+            if !notification.is_aligned(align_of::<u16>()) {
                 return None;
             }
 
             unsafe { core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE) };
-            write_common_u64(common, COMMON_QUEUE_DESC, dma_physical + DESC_OFFSET as u64);
             write_common_u64(
-                common,
+                &common,
+                COMMON_QUEUE_DESC,
+                dma_physical + DESC_OFFSET as u64,
+            );
+            write_common_u64(
+                &common,
                 COMMON_QUEUE_DRIVER,
                 dma_physical + AVAIL_OFFSET as u64,
             );
             write_common_u64(
-                common,
+                &common,
                 COMMON_QUEUE_DEVICE,
                 dma_physical + USED_OFFSET as u64,
             );
-            write_common_u16(common, COMMON_QUEUE_ENABLE, 1);
-            if read_common_u16(common, COMMON_QUEUE_ENABLE) != 1 {
+            write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
+            if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1 {
                 return None;
             }
             write_common_u8(
-                common,
+                &common,
                 COMMON_DEVICE_STATUS,
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
             );
-            if read_common_u8(common, COMMON_DEVICE_STATUS) & STATUS_DRIVER_OK == 0
+            if read_common_u8(&common, COMMON_DEVICE_STATUS) & STATUS_DRIVER_OK == 0
                 || !set_pci_command(device, true)
             {
                 return None;
             }
             Some(Self {
                 device,
-                common,
+                // The same registers again: `common` stays here to reset
+                // the device if starting fails.
+                common: Mmio::mapped(mapping, common_physical, common_length)?,
                 notification,
                 dma_physical,
                 dma_virtual,
@@ -3154,7 +3185,7 @@ impl VirtioBlockBackend {
 
         if started.is_none() {
             let _ = set_pci_command(device, false);
-            let _ = reset(common);
+            let _ = reset(&common);
         }
         started
     }
@@ -3168,7 +3199,7 @@ impl VirtioBlockBackend {
             return false;
         }
         let disabled = set_pci_command(self.device, false);
-        let reset_complete = reset(self.common).is_some();
+        let reset_complete = reset(&self.common).is_some();
         let safe = disabled && reset_complete && bus_master_is_disabled(self.device);
         if safe {
             self.active = false;
@@ -3231,7 +3262,7 @@ impl VirtioBlockBackend {
         let expected_available = self.available_index.wrapping_add(1);
         write_dma_u16(self.dma_virtual + AVAIL_OFFSET + 2, expected_available);
         self.available_index = expected_available;
-        write_mmio_u16(self.notification, 0);
+        write_mmio_u16(&self.notification, 0, 0);
 
         let mut completed = false;
         for _ in 0..QUEUE_POLL_LIMIT {
@@ -3240,7 +3271,7 @@ impl VirtioBlockBackend {
                 completed = true;
                 break;
             }
-            if read_common_u8(self.common, COMMON_DEVICE_STATUS)
+            if read_common_u8(&self.common, COMMON_DEVICE_STATUS)
                 & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED)
                 != 0
             {
@@ -3256,7 +3287,7 @@ impl VirtioBlockBackend {
             used_id: read_dma_u32(used_element),
             used_length: read_dma_u32(used_element + 4),
             request_status: read_dma_u8(self.dma_virtual + STATUS_OFFSET),
-            device_status: read_common_u8(self.common, COMMON_DEVICE_STATUS),
+            device_status: read_common_u8(&self.common, COMMON_DEVICE_STATUS),
             mapped_payload_unchanged: read_dma_u8(self.dma_virtual + DATA_OFFSET - 1) == 0x3c
                 && read_dma_u8(self.dma_virtual + DATA_OFFSET + DATA_LENGTH) == 0xc3
                 && (0..DATA_LENGTH)
@@ -3311,13 +3342,13 @@ impl VirtioBlockBackend {
         let expected_available = self.available_index.wrapping_add(1);
         write_dma_u16(self.dma_virtual + AVAIL_OFFSET + 2, expected_available);
         self.available_index = expected_available;
-        write_mmio_u16(self.notification, 0);
+        write_mmio_u16(&self.notification, 0, 0);
 
         let expected_used_index = self.used_index.wrapping_add(1);
         let mut completed = false;
         for _ in 0..QUEUE_POLL_LIMIT {
             compiler_fence(Ordering::SeqCst);
-            if read_common_u8(self.common, COMMON_DEVICE_STATUS)
+            if read_common_u8(&self.common, COMMON_DEVICE_STATUS)
                 & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED)
                 != 0
             {
@@ -3371,7 +3402,7 @@ impl volume::BlockDevice for VirtioBlockBackend {
     }
 }
 
-fn negotiate(common: usize) -> Option<VirtioBlockInitialization> {
+fn negotiate(common: &Mmio) -> Option<VirtioBlockInitialization> {
     reset(common)?;
     write_common_u8(common, COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
     write_common_u8(
@@ -3411,7 +3442,7 @@ fn negotiate(common: usize) -> Option<VirtioBlockInitialization> {
     })
 }
 
-fn negotiate_network(common: usize) -> Option<VirtioNetworkInitialization> {
+fn negotiate_network(common: &Mmio) -> Option<VirtioNetworkInitialization> {
     reset(common)?;
     write_common_u8(common, COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
     write_common_u8(
@@ -3457,7 +3488,7 @@ fn negotiate_network(common: usize) -> Option<VirtioNetworkInitialization> {
 }
 
 fn network_queue_geometry(
-    common: usize,
+    common: &Mmio,
     device: VirtioNetworkDevice,
 ) -> Option<((u16, u64), (u16, u64))> {
     let (notification_physical, notification_length) = device.notify_region()?;
@@ -3563,7 +3594,7 @@ fn network_dma_layout_is_valid(regions: &[(usize, usize, usize); 8]) -> bool {
     true
 }
 
-fn read_network_mac(common: usize, device_configuration: usize) -> Option<[u8; 6]> {
+fn read_network_mac(common: &Mmio, device_configuration: &Mmio) -> Option<[u8; 6]> {
     for _ in 0..8 {
         let before = read_common_u8(common, COMMON_CONFIG_GENERATION);
         let mac = core::array::from_fn(|offset| read_common_u8(device_configuration, offset));
@@ -3673,20 +3704,20 @@ pub(crate) fn device_is_reset(device: VirtioBlockDevice, mapping: MmioMapping) -
     let Some((physical, length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(physical, length) else {
+    let Some(common) = Mmio::mapped(mapping, physical, length) else {
         return false;
     };
-    read_common_u8(common, COMMON_DEVICE_STATUS) == 0
+    read_common_u8(&common, COMMON_DEVICE_STATUS) == 0
 }
 
 pub(crate) fn network_device_is_reset(device: VirtioNetworkDevice, mapping: MmioMapping) -> bool {
     let Some((physical, length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(physical, length) else {
+    let Some(common) = Mmio::mapped(mapping, physical, length) else {
         return false;
     };
-    read_common_u8(common, COMMON_DEVICE_STATUS) == 0
+    read_common_u8(&common, COMMON_DEVICE_STATUS) == 0
 }
 
 pub(crate) fn device_features_are_selected(
@@ -3696,20 +3727,20 @@ pub(crate) fn device_features_are_selected(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(mapping, common_physical, common_length) else {
         return false;
     };
-    let status = read_common_u8(common, COMMON_DEVICE_STATUS);
+    let status = read_common_u8(&common, COMMON_DEVICE_STATUS);
     if status & (STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK)
         != STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
         || status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) != 0
     {
         return false;
     }
-    write_common_u32(common, COMMON_DRIVER_FEATURE_SELECT, 0);
-    let low = read_common_u32(common, COMMON_DRIVER_FEATURE);
-    write_common_u32(common, COMMON_DRIVER_FEATURE_SELECT, 1);
-    let high = read_common_u32(common, COMMON_DRIVER_FEATURE);
+    write_common_u32(&common, COMMON_DRIVER_FEATURE_SELECT, 0);
+    let low = read_common_u32(&common, COMMON_DRIVER_FEATURE);
+    write_common_u32(&common, COMMON_DRIVER_FEATURE_SELECT, 1);
+    let high = read_common_u32(&common, COMMON_DRIVER_FEATURE);
     u64::from(low) | (u64::from(high) << 32)
         == FEATURE_VERSION_1 | FEATURE_ACCESS_PLATFORM | FEATURE_FLUSH
 }
@@ -3722,19 +3753,19 @@ pub(crate) fn device_active_queue_is_bound(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(mapping, common_physical, common_length) else {
         return false;
     };
     device_features_are_selected(device, mapping)
-        && read_common_u8(common, COMMON_DEVICE_STATUS)
+        && read_common_u8(&common, COMMON_DEVICE_STATUS)
             == STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
         && bus_master_is_enabled(device)
-        && read_common_u16(common, COMMON_QUEUE_SELECT) == 0
-        && read_common_u16(common, COMMON_QUEUE_SIZE) == QUEUE_SIZE
-        && read_common_u16(common, COMMON_QUEUE_ENABLE) == 1
-        && read_common_u64(common, COMMON_QUEUE_DESC) == dma_physical
-        && read_common_u64(common, COMMON_QUEUE_DRIVER) == dma_physical + AVAIL_OFFSET as u64
-        && read_common_u64(common, COMMON_QUEUE_DEVICE) == dma_physical + USED_OFFSET as u64
+        && read_common_u16(&common, COMMON_QUEUE_SELECT) == 0
+        && read_common_u16(&common, COMMON_QUEUE_SIZE) == QUEUE_SIZE
+        && read_common_u16(&common, COMMON_QUEUE_ENABLE) == 1
+        && read_common_u64(&common, COMMON_QUEUE_DESC) == dma_physical
+        && read_common_u64(&common, COMMON_QUEUE_DRIVER) == dma_physical + AVAIL_OFFSET as u64
+        && read_common_u64(&common, COMMON_QUEUE_DEVICE) == dma_physical + USED_OFFSET as u64
 }
 
 pub(crate) fn arm_isolated_device_interrupt(
@@ -3787,7 +3818,7 @@ pub(crate) fn isolated_interrupt_wait_ready(
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(mapping, common_physical, common_length) else {
         return false;
     };
     domain != 0
@@ -3798,7 +3829,7 @@ pub(crate) fn isolated_interrupt_wait_ready(
         && !PCI_INTERRUPTS.virtio_active.load(Ordering::SeqCst)
         && !PCI_INTERRUPTS.virtio_fired.load(Ordering::SeqCst)
         && PCI_INTERRUPTS.virtio_count.load(Ordering::SeqCst) == 0
-        && read_common_u16(common, COMMON_QUEUE_MSIX_VECTOR) == 0
+        && read_common_u16(&common, COMMON_QUEUE_MSIX_VECTOR) == 0
         && device_active_queue_is_bound(device, mapping, dma_physical)
 }
 
@@ -3996,17 +4027,17 @@ pub(crate) fn queue_zero_notification_register(
     mapping: MmioMapping,
 ) -> Option<u64> {
     let (common_physical, common_length) = device.common_region()?;
-    let common = mapping.address(common_physical, common_length)?;
+    let common = Mmio::mapped(mapping, common_physical, common_length)?;
     let (notify_physical, notify_length) = device.notify_region()?;
-    write_common_u16(common, COMMON_QUEUE_SELECT, 0);
+    write_common_u16(&common, COMMON_QUEUE_SELECT, 0);
     let offset = notification_byte_offset(
-        read_common_u16(common, COMMON_QUEUE_NOTIFY_OFF),
+        read_common_u16(&common, COMMON_QUEUE_NOTIFY_OFF),
         device.notify_multiplier,
         notify_length,
     )?;
     let register = notify_physical.checked_add(offset as u64)?;
     (register.is_multiple_of(size_of::<u16>() as u64)
-        && mapping.address(register, size_of::<u16>()).is_some())
+        && Mmio::mapped(mapping, register, size_of::<u16>()).is_some())
     .then_some(register)
 }
 
@@ -4014,19 +4045,19 @@ pub(crate) fn quiesce(device: VirtioBlockDevice, mapping: MmioMapping) -> bool {
     let Some((common_physical, common_length)) = device.common_region() else {
         return false;
     };
-    let Some(common) = mapping.address(common_physical, common_length) else {
+    let Some(common) = Mmio::mapped(mapping, common_physical, common_length) else {
         return false;
     };
     set_pci_command(device, false)
-        && reset(common).is_some()
+        && reset(&common).is_some()
         && bus_master_is_disabled(device)
         && device_is_reset(device, mapping)
 }
 
-fn read_capacity(common: usize, device_configuration: usize) -> Option<u64> {
+fn read_capacity(common: &Mmio, device_configuration: &Mmio) -> Option<u64> {
     for _ in 0..8 {
         let before = read_common_u8(common, COMMON_CONFIG_GENERATION);
-        let capacity = read_mmio_u64(device_configuration);
+        let capacity = read_mmio_u64(device_configuration, 0);
         let after = read_common_u8(common, COMMON_CONFIG_GENERATION);
         if before == after {
             return Some(capacity);
@@ -4141,7 +4172,7 @@ fn prepare_operation(
     compiler_fence(Ordering::SeqCst);
 }
 
-fn reset(common: usize) -> Option<()> {
+fn reset(common: &Mmio) -> Option<()> {
     write_common_u8(common, COMMON_DEVICE_STATUS, 0);
     for _ in 0..RESET_POLL_LIMIT {
         if read_common_u8(common, COMMON_DEVICE_STATUS) == 0 {
@@ -4152,80 +4183,80 @@ fn reset(common: usize) -> Option<()> {
     None
 }
 
-fn read_common_u8(common: usize, offset: usize) -> u8 {
+fn read_common_u8(common: &Mmio, offset: usize) -> u8 {
     compiler_fence(Ordering::SeqCst);
-    let value = unsafe { read_volatile((common + offset) as *const u8) };
+    let value = common.read::<u8>(offset);
     compiler_fence(Ordering::SeqCst);
     value
 }
 
-fn read_common_u16(common: usize, offset: usize) -> u16 {
+fn read_common_u16(common: &Mmio, offset: usize) -> u16 {
     compiler_fence(Ordering::SeqCst);
-    let value = unsafe { read_volatile((common + offset) as *const u16) };
+    let value = common.read::<u16>(offset);
     compiler_fence(Ordering::SeqCst);
     u16::from_le(value)
 }
 
-fn read_common_u32(common: usize, offset: usize) -> u32 {
+fn read_common_u32(common: &Mmio, offset: usize) -> u32 {
     compiler_fence(Ordering::SeqCst);
-    let value = unsafe { read_volatile((common + offset) as *const u32) };
+    let value = common.read::<u32>(offset);
     compiler_fence(Ordering::SeqCst);
     u32::from_le(value)
 }
 
-fn read_common_u64(common: usize, offset: usize) -> u64 {
+fn read_common_u64(common: &Mmio, offset: usize) -> u64 {
     let low = read_common_u32(common, offset);
     let high = read_common_u32(common, offset + size_of::<u32>());
     u64::from(low) | (u64::from(high) << 32)
 }
 
-fn write_common_u8(common: usize, offset: usize, value: u8) {
+fn write_common_u8(common: &Mmio, offset: usize, value: u8) {
     compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile((common + offset) as *mut u8, value) };
-    compiler_fence(Ordering::SeqCst);
-}
-
-fn write_common_u32(common: usize, offset: usize, value: u32) {
-    compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile((common + offset) as *mut u32, value.to_le()) };
+    common.write::<u8>(offset, value);
     compiler_fence(Ordering::SeqCst);
 }
 
-fn write_common_u16(common: usize, offset: usize, value: u16) {
+fn write_common_u32(common: &Mmio, offset: usize, value: u32) {
     compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile((common + offset) as *mut u16, value.to_le()) };
-    compiler_fence(Ordering::SeqCst);
-}
-
-fn write_common_u64(common: usize, offset: usize, value: u64) {
-    compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile((common + offset) as *mut u64, value.to_le()) };
+    common.write::<u32>(offset, value.to_le());
     compiler_fence(Ordering::SeqCst);
 }
 
-fn read_mmio_u64(address: usize) -> u64 {
+fn write_common_u16(common: &Mmio, offset: usize, value: u16) {
     compiler_fence(Ordering::SeqCst);
-    let value = unsafe { read_volatile(address as *const u64) };
+    common.write::<u16>(offset, value.to_le());
+    compiler_fence(Ordering::SeqCst);
+}
+
+fn write_common_u64(common: &Mmio, offset: usize, value: u64) {
+    compiler_fence(Ordering::SeqCst);
+    common.write::<u64>(offset, value.to_le());
+    compiler_fence(Ordering::SeqCst);
+}
+
+fn read_mmio_u64(registers: &Mmio, offset: usize) -> u64 {
+    compiler_fence(Ordering::SeqCst);
+    let value = registers.read::<u64>(offset);
     compiler_fence(Ordering::SeqCst);
     u64::from_le(value)
 }
 
-fn read_mmio_u32(address: usize) -> u32 {
+fn read_mmio_u32(registers: &Mmio, offset: usize) -> u32 {
     compiler_fence(Ordering::SeqCst);
-    let value = unsafe { read_volatile(address as *const u32) };
+    let value = registers.read::<u32>(offset);
     compiler_fence(Ordering::SeqCst);
     u32::from_le(value)
 }
 
-fn write_mmio_u32(address: usize, value: u32) {
+fn write_mmio_u32(registers: &Mmio, offset: usize, value: u32) {
     compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile(address as *mut u32, value.to_le()) };
+    registers.write::<u32>(offset, value.to_le());
     compiler_fence(Ordering::SeqCst);
 }
 
-fn write_mmio_u16(address: usize, value: u16) {
+fn write_mmio_u16(registers: &Mmio, offset: usize, value: u16) {
     compiler_fence(Ordering::SeqCst);
-    unsafe { write_volatile(address as *mut u16, value.to_le()) };
+    registers.write::<u16>(offset, value.to_le());
     compiler_fence(Ordering::SeqCst);
 }
 

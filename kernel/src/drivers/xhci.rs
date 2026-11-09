@@ -15,6 +15,7 @@ use linox_usb_audio as usb_audio;
 
 use super::pci::Function;
 use super::{delay_ms, say, wait_until_ms, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const CAP_LENGTH: usize = 0x00;
 const CAP_STRUCTURAL_1: usize = 0x04;
@@ -478,9 +479,9 @@ pub(crate) struct Speaker {
 
 /// A running controller with at least one configured input or speaker.
 pub(crate) struct Controller {
-    operational: usize,
-    runtime: usize,
-    doorbells: usize,
+    operational: Mmio,
+    runtime: Mmio,
+    doorbells: Mmio,
     context_size: usize,
     device_contexts: *mut u64,
     commands: Ring,
@@ -499,7 +500,7 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
-    /// Takes over `function`, whose registers (BAR 0) are mapped uncached at
+    /// Takes over `function`, whose registers (all of BAR 0) are
     /// `registers`, resets it, and configures every input interface and
     /// audio output on its ports, reporting each device when `verbose`. On
     /// failure the controller is halted and its DMA pages are returned to
@@ -507,23 +508,21 @@ impl Controller {
     ///
     /// # Safety
     ///
-    /// `function` must be an xHCI controller that no other code drives,
-    /// `registers` must map all of its BAR 0 (or be 0 when it has none), and
+    /// `function` must be an xHCI controller that no other code drives, and
     /// the DMA pool must be identity mapped.
     pub(crate) unsafe fn open(
         function: Function,
-        registers: usize,
+        registers: Mmio,
         verbose: bool,
     ) -> Result<Self, Error> {
         let mark = pool_mark();
-        let result = Self::open_inner(function, registers, verbose);
+        let result = Self::open_inner(function, &registers, verbose);
         if result.is_err() {
             // The controller may still point at pool pages (contexts, rings,
             // scratchpads): reset it and cut its bus mastering before the
             // next controller is given them.
-            if registers != 0 {
-                let operational = registers + usize::from(read32(registers, CAP_LENGTH) as u8);
-                halt_and_reset(operational);
+            if let Some(operational) = operational_registers(&registers) {
+                halt_and_reset(&operational);
             }
             function.disable_bus_master();
             pool_release_to(mark);
@@ -531,17 +530,12 @@ impl Controller {
         result
     }
 
-    unsafe fn open_inner(function: Function, base: usize, verbose: bool) -> Result<Self, Error> {
-        if base == 0 {
-            return Err(Error::NoMemoryBar);
-        }
-        // Bound the capability walk by the register window; config space
-        // tells its size.
-        let window = function
-            .memory_bar_size(0)
-            .map_or(0x1_0000, |size| size.min(0x10_0000) as usize);
+    unsafe fn open_inner(function: Function, base: &Mmio, verbose: bool) -> Result<Self, Error> {
+        // Bound the capability walk by the register window, which is BAR
+        // 0 as config space sizes it.
+        let window = base.len().min(0x10_0000);
         function.enable_memory_and_bus_master();
-        if read32(base, CAP_LENGTH) == u32::MAX {
+        if base.read::<u32>(CAP_LENGTH) == u32::MAX {
             // Registers that read all ones: the function is not decoding.
             return Err(Error::NoMemoryBar);
         }
@@ -552,10 +546,10 @@ impl Controller {
             );
         }
 
-        let operational = base + usize::from(read32(base, CAP_LENGTH) as u8);
-        let structural_1 = read32(base, CAP_STRUCTURAL_1);
-        let structural_2 = read32(base, CAP_STRUCTURAL_2);
-        let capability_1 = read32(base, CAP_CAPABILITY_1);
+        let operational = operational_registers(base).ok_or(Error::NoMemoryBar)?;
+        let structural_1 = base.read::<u32>(CAP_STRUCTURAL_1);
+        let structural_2 = base.read::<u32>(CAP_STRUCTURAL_2);
+        let capability_1 = base.read::<u32>(CAP_CAPABILITY_1);
         let ports = structural_1 >> 24;
         let scratchpads =
             ((((structural_2 >> 21) & 0x1f) << 5) | ((structural_2 >> 27) & 0x1f)) as usize;
@@ -564,23 +558,24 @@ impl Controller {
         // Section 4.2: wait for Controller Not Ready to clear before
         // touching the operational registers, then halt and reset.
         if !wait_until_ms(RESET_TIMEOUT_MS, || {
-            read32(operational, OP_STATUS) & STATUS_NOT_READY == 0
+            operational.read::<u32>(OP_STATUS) & STATUS_NOT_READY == 0
         }) {
             return Err(Error::ResetTimedOut);
         }
-        write32(
-            operational,
+        operational.write::<u32>(
             OP_COMMAND,
-            read32(operational, OP_COMMAND) & !COMMAND_RUN,
+            operational.read::<u32>(OP_COMMAND) & !COMMAND_RUN,
         );
         // Section 5.4.2: the controller halts within 16 ms of R/S clearing.
-        if !wait_until_ms(100, || read32(operational, OP_STATUS) & STATUS_HALTED != 0) {
+        if !wait_until_ms(100, || {
+            operational.read::<u32>(OP_STATUS) & STATUS_HALTED != 0
+        }) {
             return Err(Error::HaltTimedOut);
         }
-        write32(operational, OP_COMMAND, COMMAND_RESET);
+        operational.write::<u32>(OP_COMMAND, COMMAND_RESET);
         if !wait_until_ms(RESET_TIMEOUT_MS, || {
-            read32(operational, OP_COMMAND) & COMMAND_RESET == 0
-                && read32(operational, OP_STATUS) & STATUS_NOT_READY == 0
+            operational.read::<u32>(OP_COMMAND) & COMMAND_RESET == 0
+                && operational.read::<u32>(OP_STATUS) & STATUS_NOT_READY == 0
         }) {
             return Err(Error::ResetTimedOut);
         }
@@ -598,32 +593,42 @@ impl Controller {
             device_contexts.write(array as u64);
         }
         let slots = (structural_1 & 0xff).min(MAX_SLOTS);
-        write32(operational, OP_CONFIGURE, slots);
-        write64(operational, OP_DEVICE_CONTEXTS, device_contexts as u64);
+        operational.write::<u32>(OP_CONFIGURE, slots);
+        write64(&operational, OP_DEVICE_CONTEXTS, device_contexts as u64);
 
         let commands = Ring::new(pool_pages(1).ok_or(Error::OutOfDmaMemory)?);
-        write64(operational, OP_COMMAND_RING, commands.address() | 1);
+        write64(&operational, OP_COMMAND_RING, commands.address() | 1);
 
         let events = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u32>();
         let segments = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u32>();
         segments.write(events as u32);
         segments.add(1).write((events as u64 >> 32) as u32);
         segments.add(2).write(RING_TRBS as u32);
-        let runtime = base + (read32(base, CAP_RUNTIME_OFFSET) & !0x1f) as usize;
-        let interrupter = runtime + 0x20;
-        write32(interrupter, 0x08, 1);
-        write64(interrupter, 0x18, events as u64);
-        write64(interrupter, 0x10, segments as u64);
+        let runtime = offset_registers(
+            base,
+            (base.read::<u32>(CAP_RUNTIME_OFFSET) & !0x1f) as usize,
+        )
+        .ok_or(Error::NoMemoryBar)?;
+        let interrupter = 0x20;
+        runtime.write::<u32>(interrupter + 0x08, 1);
+        write64(&runtime, interrupter + 0x18, events as u64);
+        write64(&runtime, interrupter + 0x10, segments as u64);
 
-        write32(operational, OP_COMMAND, COMMAND_RUN);
-        if !wait_until_ms(100, || read32(operational, OP_STATUS) & STATUS_HALTED == 0) {
+        operational.write::<u32>(OP_COMMAND, COMMAND_RUN);
+        if !wait_until_ms(100, || {
+            operational.read::<u32>(OP_STATUS) & STATUS_HALTED == 0
+        }) {
             return Err(Error::HaltTimedOut);
         }
 
         let mut controller = Self {
             operational,
             runtime,
-            doorbells: base + (read32(base, CAP_DOORBELL_OFFSET) & !0x3) as usize,
+            doorbells: offset_registers(
+                base,
+                (base.read::<u32>(CAP_DOORBELL_OFFSET) & !0x3) as usize,
+            )
+            .ok_or(Error::NoMemoryBar)?,
             context_size,
             device_contexts,
             commands,
@@ -639,10 +644,9 @@ impl Controller {
         if capability_1 & (1 << 3) != 0 {
             for port in 1..=ports {
                 let register = controller.port_register(port);
-                write32(
+                controller.operational.write::<u32>(
                     register,
-                    0,
-                    read32(register, 0) & PORT_PRESERVE | PORT_POWER,
+                    controller.operational.read::<u32>(register) & PORT_PRESERVE | PORT_POWER,
                 );
             }
             // Section 4.19.4: software waits 20 ms after setting Port Power.
@@ -874,18 +878,19 @@ impl Controller {
 
     /// Halts the controller.
     pub(crate) fn stop(&mut self) {
-        write32(
-            self.operational,
+        self.operational.write::<u32>(
             OP_COMMAND,
-            read32(self.operational, OP_COMMAND) & !COMMAND_RUN,
+            self.operational.read::<u32>(OP_COMMAND) & !COMMAND_RUN,
         );
         let _ = wait_until_ms(100, || {
-            read32(self.operational, OP_STATUS) & STATUS_HALTED != 0
+            self.operational.read::<u32>(OP_STATUS) & STATUS_HALTED != 0
         });
     }
 
+    /// The offset of `port`'s status and control register in the
+    /// operational registers.
     fn port_register(&self, port: u32) -> usize {
-        self.operational + OP_PORTS + 0x10 * (port as usize - 1)
+        OP_PORTS + 0x10 * (port as usize - 1)
     }
 
     fn is_usb3(&self, port: u32) -> bool {
@@ -913,7 +918,7 @@ impl Controller {
                 if done[index] {
                     continue;
                 }
-                if read32(self.port_register(port), 0) & PORT_CONNECTED == 0 {
+                if self.operational.read::<u32>(self.port_register(port)) & PORT_CONNECTED == 0 {
                     seen[index] = UNSEEN;
                     continue;
                 }
@@ -970,7 +975,7 @@ impl Controller {
             } else {
                 return Err(last);
             }
-            if read32(register, 0) & PORT_CONNECTED == 0 {
+            if self.operational.read::<u32>(register) & PORT_CONNECTED == 0 {
                 return Err(last);
             }
             if self.verbose {
@@ -990,7 +995,7 @@ impl Controller {
     /// takes a warm reset (section 4.19.5.1). `again` forces a reset.
     fn reset_root_port(&mut self, port: u32, again: bool) -> Result<u32, Error> {
         let register = self.port_register(port);
-        let status = read32(register, 0);
+        let status = self.operational.read::<u32>(register);
         if status & PORT_CONNECTED == 0 {
             return Err(Error::NotConnected);
         }
@@ -1002,9 +1007,11 @@ impl Controller {
             && !matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
         {
             // Still training: give it time to reach U0.
-            let _ = wait_until_ms(500, || read32(register, 0) & PORT_ENABLED != 0);
+            let _ = wait_until_ms(500, || {
+                self.operational.read::<u32>(register) & PORT_ENABLED != 0
+            });
         }
-        let status = read32(register, 0);
+        let status = self.operational.read::<u32>(register);
         if again || status & PORT_ENABLED == 0 {
             let (reset, change) =
                 if usb3 && (again || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)) {
@@ -1012,17 +1019,17 @@ impl Controller {
                 } else {
                     (PORT_RESET, PORT_RESET_CHANGE)
                 };
-            write32(register, 0, status & PORT_PRESERVE | reset);
-            if !wait_until_ms(500, || read32(register, 0) & change != 0) {
+            self.operational
+                .write::<u32>(register, status & PORT_PRESERVE | reset);
+            if !wait_until_ms(500, || self.operational.read::<u32>(register) & change != 0) {
                 return Err(Error::PortResetFailed);
             }
             // USB 2.0 section 7.1.7.5: 10 ms of reset recovery (TRSTRCY).
             delay_ms(20);
         }
-        let status = read32(register, 0);
-        write32(
+        let status = self.operational.read::<u32>(register);
+        self.operational.write::<u32>(
             register,
-            0,
             status & PORT_PRESERVE | (status & PORT_CHANGE_BITS),
         );
         if status & PORT_ENABLED == 0 {
@@ -1209,10 +1216,10 @@ impl Controller {
     /// queued after it can run (section 4.6.1.2): set CRCR.CA, wait for the
     /// ring to stop, and drop the Command Ring Stopped event.
     fn abort_command(&mut self) {
-        write32(self.operational, OP_COMMAND_RING, CRCR_ABORT);
-        write32(self.operational, OP_COMMAND_RING + 4, 0);
+        self.operational.write::<u32>(OP_COMMAND_RING, CRCR_ABORT);
+        self.operational.write::<u32>(OP_COMMAND_RING + 4, 0);
         let _ = wait_until_ms(COMMAND_TIMEOUT_MS * 5, || {
-            read32(self.operational, OP_COMMAND_RING) & CRCR_RUNNING == 0
+            self.operational.read::<u32>(OP_COMMAND_RING) & CRCR_RUNNING == 0
         });
         while let Some(event) = self.next_event() {
             self.requeue_input(&event);
@@ -1221,7 +1228,7 @@ impl Controller {
 
     fn ring(&self, slot: u32, target: u32) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write32(self.doorbells, slot as usize * 4, target);
+        self.doorbells.write::<u32>(slot as usize * 4, target);
     }
 
     fn next_event(&mut self) -> Option<Event> {
@@ -1246,7 +1253,7 @@ impl Controller {
         }
         let dequeue = self.events as u64 + (self.event_index * 16) as u64;
         // Bit 3 (EHB) is write-one-to-clear and acknowledges the event.
-        write64(self.runtime + 0x20, 0x18, dequeue | 1 << 3);
+        write64(&self.runtime, 0x20 + 0x18, dequeue | 1 << 3);
         Some(event)
     }
 }
@@ -2107,38 +2114,37 @@ struct Handoff {
 /// root ports speak USB 3 from the Supported Protocol capabilities
 /// (section 7.2). A walk that leaves the window, reads all ones (a function
 /// not decoding), or runs on too long ends.
-fn take_from_firmware(base: usize, window: usize) -> Handoff {
+fn take_from_firmware(base: &Mmio, window: usize) -> Handoff {
     let mut handoff = Handoff {
         firmware_kept: false,
         usb3_ports: [0; 4],
     };
-    let mut offset = ((read32(base, CAP_CAPABILITY_1) >> 16) as usize) * 4;
+    let mut offset = ((base.read::<u32>(CAP_CAPABILITY_1) >> 16) as usize) * 4;
     for _ in 0..64 {
         if offset == 0 || offset + 16 > window {
             break;
         }
-        let capability = read32(base, offset);
+        let capability = base.read::<u32>(offset);
         if capability == u32::MAX {
             break;
         }
         match capability & 0xff {
             LEGACY_SUPPORT => {
-                write32(base, offset, capability | LEGACY_OS_OWNED);
-                if !wait_until_ms(1000, || read32(base, offset) & LEGACY_BIOS_OWNED == 0) {
+                base.write::<u32>(offset, capability | LEGACY_OS_OWNED);
+                if !wait_until_ms(1000, || base.read::<u32>(offset) & LEGACY_BIOS_OWNED == 0) {
                     // Firmware did not let go; take the controller anyway,
                     // as section 4.22.1 permits after a timeout.
                     handoff.firmware_kept = true;
-                    write32(base, offset, read32(base, offset) & !LEGACY_BIOS_OWNED);
+                    base.write::<u32>(offset, base.read::<u32>(offset) & !LEGACY_BIOS_OWNED);
                 }
-                let control = read32(base, offset + 4);
-                write32(
-                    base,
+                let control = base.read::<u32>(offset + 4);
+                base.write::<u32>(
                     offset + 4,
                     (control & LEGACY_DISABLE_SMI) | LEGACY_SMI_EVENTS,
                 );
             }
             SUPPORTED_PROTOCOL if capability >> 24 == 3 => {
-                let ports = read32(base, offset + 8);
+                let ports = base.read::<u32>(offset + 8);
                 let first = ports & 0xff;
                 let count = (ports >> 8) & 0xff;
                 for port in first..first.saturating_add(count).min(256) {
@@ -2159,33 +2165,35 @@ fn take_from_firmware(base: usize, window: usize) -> Handoff {
     handoff
 }
 
-/// Halts the controller whose operational registers are at `operational`
+/// Halts the controller whose operational registers are `operational`
 /// and resets it, so it forgets every pointer into memory.
-fn halt_and_reset(operational: usize) {
-    write32(
-        operational,
+fn halt_and_reset(operational: &Mmio) {
+    operational.write::<u32>(
         OP_COMMAND,
-        read32(operational, OP_COMMAND) & !COMMAND_RUN,
+        operational.read::<u32>(OP_COMMAND) & !COMMAND_RUN,
     );
-    if wait_until_ms(100, || read32(operational, OP_STATUS) & STATUS_HALTED != 0) {
-        write32(operational, OP_COMMAND, COMMAND_RESET);
+    if wait_until_ms(100, || {
+        operational.read::<u32>(OP_STATUS) & STATUS_HALTED != 0
+    }) {
+        operational.write::<u32>(OP_COMMAND, COMMAND_RESET);
         let _ = wait_until_ms(RESET_TIMEOUT_MS, || {
-            read32(operational, OP_COMMAND) & COMMAND_RESET == 0
+            operational.read::<u32>(OP_COMMAND) & COMMAND_RESET == 0
         });
     }
 }
 
-fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers pass identity-mapped controller registers.
-    unsafe { ((base + offset) as *const u32).read_volatile() }
+/// The operational registers, which start CAPLENGTH bytes into BAR 0.
+fn operational_registers(base: &Mmio) -> Option<Mmio> {
+    offset_registers(base, usize::from(base.read::<u32>(CAP_LENGTH) as u8))
 }
 
-fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: as for read32.
-    unsafe { ((base + offset) as *mut u32).write_volatile(value) }
+/// The registers from `offset` to the end of BAR 0.
+fn offset_registers(base: &Mmio, offset: usize) -> Option<Mmio> {
+    base.window(offset, base.len().checked_sub(offset)?)
 }
 
-fn write64(base: usize, offset: usize, value: u64) {
-    write32(base, offset, value as u32);
-    write32(base, offset + 4, (value >> 32) as u32);
+/// Writes a 64-bit register as two 32-bit writes, low half first.
+fn write64(registers: &Mmio, offset: usize, value: u64) {
+    registers.write::<u32>(offset, value as u32);
+    registers.write::<u32>(offset + 4, (value >> 32) as u32);
 }

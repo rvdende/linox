@@ -48,10 +48,11 @@ use linox_drm::{Blob, Cache, Errno, Features, Mapping};
 
 use linox_virtio_gpu::{self as protocol, Command, Damage, DisplayInfo, Mode, Rect};
 
-use super::device_memory::{DmaBuffer, Mmio};
+use super::device_memory::DmaBuffer;
 use super::virtio::{self, Probe, Segment, SplitQueue, Transport};
 use super::{pci, say, wait_until_ms};
 use crate::framebuffer::{self, Display, Scanout};
+use crate::trusted::mmio::Mmio;
 
 /// The one resource the driver creates: the display surface.
 const RESOURCE: u32 = 1;
@@ -1088,15 +1089,9 @@ pub(crate) struct Prepared {
 /// Opens the virtio-gpu found by [`discover`] and creates its display
 /// resource in the mode the host prefers. DMA translation must be off.
 /// Returns `None`, leaving the device reset, if any step fails.
-///
-/// # Safety
-///
-/// `registers` must map `probe.registers` uncached for the rest of the
-/// kernel's life, and nothing else may drive the device.
-pub(crate) unsafe fn prepare(probe: &Probe, registers: usize) -> Option<Prepared> {
+/// `registers` maps `probe.registers`.
+pub(crate) fn prepare(probe: &Probe, registers: Mmio) -> Option<Prepared> {
     let function = probe.function;
-    // SAFETY: the caller's contract.
-    let registers = unsafe { Mmio::new(registers, probe.registers.1) };
     match Gpu::open(probe, registers) {
         Ok((gpu, offered)) => Some(Prepared {
             gpu,

@@ -25,6 +25,7 @@ use crate::drivers::net::{self, Nic};
 use crate::drivers::{
     ahci, amd_iommu, clock, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
 };
+use crate::trusted::mmio::Mmio;
 use crate::{BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 
 pub use trap::report_panic;
@@ -226,8 +227,7 @@ fn calibrate_clock(rsdp: u64) -> Option<(&'static str, u64)> {
         }
     });
     for reference in references.into_iter().flatten() {
-        // SAFETY: the reference comes from the firmware's FADT or HPET table.
-        match unsafe { clock::calibrate(reference) } {
+        match clock::calibrate(reference) {
             Some(hz) => {
                 say!(
                     "linox: TSC runs at {}.{:03} MHz (measured against the {})\n",
@@ -558,7 +558,7 @@ fn report_disks(remapping: &mut Remapping) -> (usize, usize) {
             }
             // SAFETY: the controller was opened above and each port uses its
             // own DMA set.
-            match unsafe { ahci::Disk::open(base, port, slot) } {
+            match unsafe { ahci::Disk::open(&base, port, slot) } {
                 Ok(mut disk) => {
                     slot += 1;
                     let bytes = disk.sectors.saturating_mul(u64::from(disk.sector_size));
@@ -597,10 +597,20 @@ fn open_keyboards() -> UsbKeyboards {
             function.device,
             function.function
         );
-        let registers = function.memory_bar(0).unwrap_or(0) as usize;
-        // SAFETY: bring-up mode is the only driver of these controllers, and
-        // the firmware identity map covers their registers and the DMA pool.
-        match unsafe { xhci::Controller::open(*function, registers, true) } {
+        // The whole of BAR 0, as config space sizes it.
+        let registers = function.memory_bar(0).and_then(|bar| {
+            let length = function
+                .memory_bar_size(0)
+                .map_or(0x1_0000, |size| size as usize);
+            Mmio::firmware(bar, length)
+        });
+        let result = registers.map_or(Err(xhci::Error::NoMemoryBar), |registers| {
+            // SAFETY: bring-up mode is the only driver of these
+            // controllers, and the firmware identity map covers the DMA
+            // pool.
+            unsafe { xhci::Controller::open(*function, registers, true) }
+        });
+        match result {
             Ok(controller) => {
                 for speaker in controller.speakers() {
                     say!(
@@ -939,9 +949,7 @@ fn report_ivrs(ivrs: &amd_iommu::Ivrs) {
         }
     );
     for unit in ivrs.units.iter().flatten() {
-        // SAFETY: the base comes from IVRS and the firmware identity map
-        // covers it; the registers read have no side effects.
-        let report = unsafe { amd_iommu::probe(unit.base) };
+        let report = amd_iommu::probe(unit.base);
         say!(
             "linox: AMD-Vi {:#x} (PCI {:02x}:{:02x}.{}, IVHD flags {:#04x}): {} by firmware, \
              control {:#x}, status {:#x}, features ",

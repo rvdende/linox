@@ -18,9 +18,12 @@
 //!   left the counter halted it is started (ENABLE_CNF), with no timer
 //!   interrupts routed.
 
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::timer::timestamp_counter;
+use crate::trusted::mmio::Mmio;
 use crate::trusted::port::PmTimer;
 
 /// Ticks per millisecond assumed before calibration: a 5 GHz counter.
@@ -35,6 +38,8 @@ const HPET_CAPABILITIES: usize = 0x00;
 const HPET_CONFIGURATION: usize = 0x10;
 const HPET_MAIN_COUNTER: usize = 0xf0;
 const HPET_ENABLE: u64 = 1 << 0;
+/// An HPET block's registers (IA-PC HPET 1.0a section 2.3.1): 1 KiB.
+const HPET_BYTES: usize = 0x400;
 
 /// Timestamp-counter ticks per millisecond.
 static TICKS_PER_MS: AtomicU64 = AtomicU64::new(ASSUMED_TICKS_PER_MS);
@@ -62,35 +67,47 @@ impl Reference {
 /// A reference counter readied for reading: its tick rate, width mask, and
 /// how to read it.
 struct Counter {
-    reference: Reference,
+    source: Source,
     hz: u64,
     mask: u64,
 }
 
+/// Where a counter is read.
+enum Source {
+    PmTimerPort(PmTimer),
+    /// The PM timer's 32-bit register in memory space.
+    PmTimerMemory(Mmio),
+    /// An HPET block's registers.
+    Hpet(Mmio),
+}
+
 impl Counter {
-    /// # Safety
-    ///
-    /// The reference must name a timer the firmware described in ACPI,
-    /// identity mapped when it is in memory space.
-    unsafe fn open(reference: Reference) -> Option<Self> {
-        let (hz, mask) = match reference {
-            Reference::PmTimerPort { wide, .. } | Reference::PmTimerMemory { wide, .. } => (
+    /// Readies the timer the firmware described in ACPI. A memory-space
+    /// timer must be mapped by the firmware's page tables.
+    fn open(reference: Reference) -> Option<Self> {
+        let (source, hz, mask) = match reference {
+            Reference::PmTimerPort { port, wide } => (
+                Source::PmTimerPort(PmTimer::new(port)),
+                PM_TIMER_HZ,
+                if wide { u64::from(u32::MAX) } else { 0xff_ffff },
+            ),
+            Reference::PmTimerMemory { address, wide } => (
+                Source::PmTimerMemory(Mmio::firmware(address, size_of::<u32>())?),
                 PM_TIMER_HZ,
                 if wide { u64::from(u32::MAX) } else { 0xff_ffff },
             ),
             Reference::Hpet { address } => {
-                let registers = address as *mut u64;
-                let capabilities = registers.byte_add(HPET_CAPABILITIES).read_volatile();
+                let registers = Mmio::firmware(address, HPET_BYTES)?;
+                let capabilities = registers.read::<u64>(HPET_CAPABILITIES);
                 // The period is in femtoseconds; the specification caps it at
                 // 100 ns (10 MHz is the slowest counter allowed).
                 let period = capabilities >> 32;
                 if period == 0 || period > 100_000_000 {
                     return None;
                 }
-                let configuration = registers.byte_add(HPET_CONFIGURATION);
-                let value = configuration.read_volatile();
+                let value = registers.read::<u64>(HPET_CONFIGURATION);
                 if value & HPET_ENABLE == 0 {
-                    configuration.write_volatile(value | HPET_ENABLE);
+                    registers.write::<u64>(HPET_CONFIGURATION, value | HPET_ENABLE);
                 }
                 // COUNT_SIZE_CAP (bit 13) says whether the counter has 64 bits.
                 let mask = if capabilities & (1 << 13) != 0 {
@@ -98,29 +115,22 @@ impl Counter {
                 } else {
                     u64::from(u32::MAX)
                 };
-                (1_000_000_000_000_000 / period, mask)
+                (
+                    Source::Hpet(registers),
+                    1_000_000_000_000_000 / period,
+                    mask,
+                )
             }
         };
-        Some(Self {
-            reference,
-            hz,
-            mask,
-        })
+        Some(Self { source, hz, mask })
     }
 
+    /// Reads the counter, which has no side effects.
     fn read(&self) -> u64 {
-        // SAFETY: open's contract: the timer exists where ACPI says, and
-        // reading its counter has no side effects.
-        let value = unsafe {
-            match self.reference {
-                Reference::PmTimerPort { port, .. } => u64::from(PmTimer::new(port).read()),
-                Reference::PmTimerMemory { address, .. } => {
-                    u64::from((address as *const u32).read_volatile())
-                }
-                Reference::Hpet { address } => (address as *const u64)
-                    .byte_add(HPET_MAIN_COUNTER)
-                    .read_volatile(),
-            }
+        let value = match &self.source {
+            Source::PmTimerPort(timer) => u64::from(timer.read()),
+            Source::PmTimerMemory(register) => u64::from(register.read::<u32>(0)),
+            Source::Hpet(registers) => registers.read::<u64>(HPET_MAIN_COUNTER),
         };
         value & self.mask
     }
@@ -129,13 +139,10 @@ impl Counter {
 /// Measures the timestamp counter against `reference` and uses the result
 /// for every later wait. Returns the counter's frequency in Hz, or `None`
 /// when the reference does not count or the result is implausible (the
-/// assumed rate stays in force).
-///
-/// # Safety
-///
-/// `reference` must come from the firmware's ACPI tables (FADT or HPET),
-/// and a memory-space timer must be identity mapped.
-pub(crate) unsafe fn calibrate(reference: Reference) -> Option<u64> {
+/// assumed rate stays in force). `reference` comes from the firmware's
+/// ACPI tables (FADT or HPET); a memory-space timer must be mapped by the
+/// firmware's page tables.
+pub(crate) fn calibrate(reference: Reference) -> Option<u64> {
     let counter = Counter::open(reference)?;
     let wanted = counter.hz * CALIBRATION_MS / 1000;
     // Bound the measurement itself: if the reference never moves, give up

@@ -15,6 +15,7 @@ use core::ptr::{addr_of, addr_of_mut};
 
 use super::pci::{Function, Identity};
 use super::{delay_ms, flush_cache, wait_until_ms, DmaPage, DmaRegion};
+use crate::trusted::mmio::Mmio;
 
 const CAPABILITIES: usize = 0x00;
 const GLOBAL_CONTROL: usize = 0x08;
@@ -42,6 +43,8 @@ const RIRB_STATUS_CLEAR: u8 = 0x05;
 const RING_256: u8 = 2;
 const RING_ENTRIES: usize = 256;
 /// The first stream descriptor; input streams come before output streams.
+/// The controller's memory BAR (HD Audio 1.0a section 3.3): 16 KiB.
+const REGISTER_BYTES: usize = 0x4000;
 const STREAMS: usize = 0x80;
 const STREAM_STRIDE: usize = 0x20;
 const STREAM_CONTROL: usize = 0x00;
@@ -179,7 +182,7 @@ pub(crate) struct Codec {
 
 /// A reset controller with its command rings running.
 pub(crate) struct Controller {
-    base: usize,
+    registers: Mmio,
     corb_write: u16,
     rirb_read: u16,
     codecs: u16,
@@ -194,7 +197,10 @@ impl Controller {
     /// with its registers and this driver's DMA pages identity mapped. Only
     /// one controller may be open at a time.
     pub(crate) unsafe fn open(function: Function) -> Result<Self, Error> {
-        let base = function.memory_bar(0).ok_or(Error::NoMemoryBar)? as usize;
+        let base = function
+            .memory_bar(0)
+            .and_then(|bar| Mmio::firmware(bar, REGISTER_BYTES))
+            .ok_or(Error::NoMemoryBar)?;
         function.enable_memory_and_bus_master();
         let vendor = function.read_u32(0) as u16;
         if vendor == VENDOR_AMD {
@@ -206,28 +212,26 @@ impl Controller {
                 value & !(7 << AMD_MISC_CONTROL_SHIFT) | AMD_ENABLE_SNOOP << AMD_MISC_CONTROL_SHIFT;
             function.write_u32(AMD_MISC_CONTROL, value);
         }
-        write8(base, CORB_CONTROL, 0);
-        write8(base, RIRB_CONTROL, 0);
-        write32(
-            base,
+        base.write::<u8>(CORB_CONTROL, 0);
+        base.write::<u8>(RIRB_CONTROL, 0);
+        base.write::<u32>(
             GLOBAL_CONTROL,
-            read32(base, GLOBAL_CONTROL) & !CONTROL_RUN,
+            base.read::<u32>(GLOBAL_CONTROL) & !CONTROL_RUN,
         );
-        if !wait_until_ms(100, || read32(base, GLOBAL_CONTROL) & CONTROL_RUN == 0) {
+        if !wait_until_ms(100, || base.read::<u32>(GLOBAL_CONTROL) & CONTROL_RUN == 0) {
             return Err(Error::ResetTimedOut);
         }
         delay_ms(1);
-        write32(
-            base,
+        base.write::<u32>(
             GLOBAL_CONTROL,
-            read32(base, GLOBAL_CONTROL) | CONTROL_RUN,
+            base.read::<u32>(GLOBAL_CONTROL) | CONTROL_RUN,
         );
-        if !wait_until_ms(100, || read32(base, GLOBAL_CONTROL) & CONTROL_RUN != 0) {
+        if !wait_until_ms(100, || base.read::<u32>(GLOBAL_CONTROL) & CONTROL_RUN != 0) {
             return Err(Error::ResetTimedOut);
         }
         // Codecs need 521 us after reset to request an address.
         delay_ms(2);
-        let codecs = read16(base, STATE_CHANGE) & 0x7fff;
+        let codecs = base.read::<u16>(STATE_CHANGE) & 0x7fff;
         if codecs == 0 {
             return Err(Error::NoCodecs);
         }
@@ -238,26 +242,26 @@ impl Controller {
         flush_cache(addr_of!(RIRB) as usize, 4096);
         let corb = addr_of!(CORB) as u64;
         let rirb = addr_of!(RIRB) as u64;
-        write32(base, CORB_LOW, corb as u32);
-        write32(base, CORB_HIGH, (corb >> 32) as u32);
-        write8(base, CORB_SIZE, RING_256);
-        write16(base, CORB_WRITE, 0);
-        write16(base, CORB_READ, CORB_READ_RESET);
-        let _ = wait_until_ms(10, || read16(base, CORB_READ) & CORB_READ_RESET != 0);
-        write16(base, CORB_READ, 0);
-        let _ = wait_until_ms(10, || read16(base, CORB_READ) & CORB_READ_RESET == 0);
-        write32(base, RIRB_LOW, rirb as u32);
-        write32(base, RIRB_HIGH, (rirb >> 32) as u32);
-        write8(base, RIRB_SIZE, RING_256);
-        write16(base, RIRB_WRITE, RIRB_WRITE_RESET);
+        base.write::<u32>(CORB_LOW, corb as u32);
+        base.write::<u32>(CORB_HIGH, (corb >> 32) as u32);
+        base.write::<u8>(CORB_SIZE, RING_256);
+        base.write::<u16>(CORB_WRITE, 0);
+        base.write::<u16>(CORB_READ, CORB_READ_RESET);
+        let _ = wait_until_ms(10, || base.read::<u16>(CORB_READ) & CORB_READ_RESET != 0);
+        base.write::<u16>(CORB_READ, 0);
+        let _ = wait_until_ms(10, || base.read::<u16>(CORB_READ) & CORB_READ_RESET == 0);
+        base.write::<u32>(RIRB_LOW, rirb as u32);
+        base.write::<u32>(RIRB_HIGH, (rirb >> 32) as u32);
+        base.write::<u8>(RIRB_SIZE, RING_256);
+        base.write::<u16>(RIRB_WRITE, RIRB_WRITE_RESET);
         // Controllers may stop writing responses once this many are
         // unacknowledged, so allow the most and acknowledge each one.
-        write16(base, RESPONSE_COUNT, 0xff);
-        write8(base, RIRB_STATUS, RIRB_STATUS_CLEAR);
-        write8(base, CORB_CONTROL, RING_RUN);
-        write8(base, RIRB_CONTROL, RING_RUN);
+        base.write::<u16>(RESPONSE_COUNT, 0xff);
+        base.write::<u8>(RIRB_STATUS, RIRB_STATUS_CLEAR);
+        base.write::<u8>(CORB_CONTROL, RING_RUN);
+        base.write::<u8>(RIRB_CONTROL, RING_RUN);
         Ok(Self {
-            base,
+            registers: base,
             corb_write: 0,
             rirb_read: 0,
             codecs,
@@ -320,12 +324,15 @@ impl Controller {
             .flatten()
             .find(|pin| pin.is_output() && pin.connected())
             .ok_or(Error::NoOutputPath)?;
-        let capabilities = read16(self.base, CAPABILITIES);
+        let capabilities = self.registers.read::<u16>(CAPABILITIES);
         let inputs = usize::from(capabilities >> 8 & 0xf);
         if capabilities >> 12 & 0xf == 0 {
             return Err(Error::NoOutputStream);
         }
-        let stream = self.base + STREAMS + inputs * STREAM_STRIDE;
+        let stream = self
+            .registers
+            .window(STREAMS + inputs * STREAM_STRIDE, STREAM_STRIDE)
+            .ok_or(Error::NoOutputStream)?;
 
         let bytes = fill_tone();
         let half = (bytes / 2) as u32;
@@ -345,21 +352,25 @@ impl Controller {
         flush_cache(addr_of!(BUFFER_LIST) as usize, 4096);
         flush_cache(samples as usize, bytes);
 
-        write32(stream, STREAM_CONTROL, STREAM_RESET);
-        if !wait_until_ms(100, || read32(stream, STREAM_CONTROL) & STREAM_RESET != 0) {
+        stream.write::<u32>(STREAM_CONTROL, STREAM_RESET);
+        if !wait_until_ms(100, || {
+            stream.read::<u32>(STREAM_CONTROL) & STREAM_RESET != 0
+        }) {
             return Err(Error::StreamResetTimedOut);
         }
-        write32(stream, STREAM_CONTROL, 0);
-        if !wait_until_ms(100, || read32(stream, STREAM_CONTROL) & STREAM_RESET == 0) {
+        stream.write::<u32>(STREAM_CONTROL, 0);
+        if !wait_until_ms(100, || {
+            stream.read::<u32>(STREAM_CONTROL) & STREAM_RESET == 0
+        }) {
             return Err(Error::StreamResetTimedOut);
         }
         let list = addr_of!(BUFFER_LIST) as u64;
-        write32(stream, STREAM_BDL_LOW, list as u32);
-        write32(stream, STREAM_BDL_HIGH, (list >> 32) as u32);
-        write32(stream, STREAM_LENGTH, bytes as u32);
-        write16(stream, STREAM_LAST_INDEX, 1);
-        write16(stream, STREAM_FORMAT, FORMAT_48K_16_STEREO);
-        write32(stream, STREAM_CONTROL, STREAM_TAG << 20);
+        stream.write::<u32>(STREAM_BDL_LOW, list as u32);
+        stream.write::<u32>(STREAM_BDL_HIGH, (list >> 32) as u32);
+        stream.write::<u32>(STREAM_LENGTH, bytes as u32);
+        stream.write::<u16>(STREAM_LAST_INDEX, 1);
+        stream.write::<u16>(STREAM_FORMAT, FORMAT_48K_16_STEREO);
+        stream.write::<u32>(STREAM_CONTROL, STREAM_TAG << 20);
 
         let address = codec.address;
         self.command_long(
@@ -387,11 +398,11 @@ impl Controller {
         // without it ignore the verb.
         let _ = self.command(address, pin.node, VERB_SET_EAPD, EAPD_ENABLE);
 
-        let start = read32(stream, STREAM_POSITION);
-        write32(stream, STREAM_CONTROL, STREAM_TAG << 20 | STREAM_RUN);
+        let start = stream.read::<u32>(STREAM_POSITION);
+        stream.write::<u32>(STREAM_CONTROL, STREAM_TAG << 20 | STREAM_RUN);
         delay_ms(milliseconds);
-        let end = read32(stream, STREAM_POSITION);
-        write32(stream, STREAM_CONTROL, STREAM_TAG << 20);
+        let end = stream.read::<u32>(STREAM_POSITION);
+        stream.write::<u32>(STREAM_CONTROL, STREAM_TAG << 20);
         Ok(end.wrapping_sub(start) % bytes as u32)
     }
 
@@ -422,10 +433,10 @@ impl Controller {
         };
         flush_cache(entry as usize, 4);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        write16(self.base, CORB_WRITE, self.corb_write);
+        self.registers.write::<u16>(CORB_WRITE, self.corb_write);
         let next = (self.rirb_read + 1) % RING_ENTRIES as u16;
         if !wait_until_ms(COMMAND_TIMEOUT_MS, || {
-            read16(self.base, RIRB_WRITE) & 0xff == next
+            self.registers.read::<u16>(RIRB_WRITE) & 0xff == next
         }) {
             return Err(Error::CommandTimedOut);
         }
@@ -437,7 +448,7 @@ impl Controller {
         flush_cache(entry as usize, 8);
         // SAFETY: as above.
         let response = unsafe { entry.read_volatile() };
-        write8(self.base, RIRB_STATUS, RIRB_STATUS_CLEAR);
+        self.registers.write::<u8>(RIRB_STATUS, RIRB_STATUS_CLEAR);
         Ok(response)
     }
 }
@@ -495,29 +506,4 @@ fn fill_tone() -> usize {
 /// Decodes a subordinate-node-count response into a first node and count.
 fn node_range(response: u32) -> (u8, u8) {
     ((response >> 16) as u8, response as u8)
-}
-
-fn read16(base: usize, offset: usize) -> u16 {
-    // SAFETY: callers pass identity-mapped controller registers.
-    unsafe { ((base + offset) as *const u16).read_volatile() }
-}
-
-fn read32(base: usize, offset: usize) -> u32 {
-    // SAFETY: as for read16.
-    unsafe { ((base + offset) as *const u32).read_volatile() }
-}
-
-fn write8(base: usize, offset: usize, value: u8) {
-    // SAFETY: as for read16.
-    unsafe { ((base + offset) as *mut u8).write_volatile(value) }
-}
-
-fn write16(base: usize, offset: usize, value: u16) {
-    // SAFETY: as for read16.
-    unsafe { ((base + offset) as *mut u16).write_volatile(value) }
-}
-
-fn write32(base: usize, offset: usize, value: u32) {
-    // SAFETY: as for read16.
-    unsafe { ((base + offset) as *mut u32).write_volatile(value) }
 }

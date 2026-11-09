@@ -16,6 +16,7 @@ use linox_usb_hid as usb_hid;
 
 use super::{pci, say, xhci};
 use crate::linux_input;
+use crate::trusted::mmio::Mmio;
 
 /// xHCI controllers driven for input.
 pub(crate) const MAX_CONTROLLERS: usize = 2;
@@ -160,8 +161,8 @@ static mut STATE: State = State {
 };
 static PUMPING: AtomicBool = AtomicBool::new(false);
 
-/// Opens the controllers in `hosts`, whose registers are mapped at
-/// `registers` (by index, `None` where mapping failed), and registers an
+/// Opens the controllers in `hosts`, whose registers are `registers` (by
+/// index, `None` where mapping failed; each is taken), and registers an
 /// evdev device for each input interface. `admit` must let the controllers
 /// (bus, device, function) reach the DMA regions (start, length) through
 /// the I/O MMU for good, or return false; without it no controller starts.
@@ -169,7 +170,7 @@ static PUMPING: AtomicBool = AtomicBool::new(false);
 /// left running cannot fault DMA translations later.
 pub(crate) fn start(
     hosts: &Hosts,
-    registers: &[Option<usize>],
+    registers: &mut [Option<Mmio>],
     admit: impl FnOnce(&[(u8, u8, u8)], &[(u64, u64)]) -> bool,
 ) {
     let found = &hosts.hosts[..hosts.count];
@@ -199,7 +200,7 @@ pub(crate) fn start(
     let mut registered = 0;
     for (slot, host) in found.iter().flatten().enumerate() {
         let function = host.function;
-        let Some(base) = registers.get(slot).copied().flatten() else {
+        let Some(base) = registers.get_mut(slot).and_then(Option::take) else {
             say!(
                 "linox: xHCI {:02x}:{:02x}.{}: registers not mapped\n",
                 function.bus,
@@ -209,9 +210,8 @@ pub(crate) fn start(
             function.disable_bus_master();
             continue;
         };
-        // SAFETY: nothing else drives the controller, `base` maps its whole
-        // BAR 0 uncached, and the DMA pool is identity mapped and admitted
-        // through the I/O MMU above.
+        // SAFETY: nothing else drives the controller, and the DMA pool is
+        // identity mapped and admitted through the I/O MMU above.
         let mut controller = match unsafe { xhci::Controller::open(function, base, false) } {
             Ok(controller) => controller,
             Err(error) => {

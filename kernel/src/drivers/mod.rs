@@ -2,9 +2,9 @@
 //! devices that the main boot path is built around.
 //!
 //! These drivers poll instead of taking interrupts, use page-aligned static DMA
-//! buffers, and access registers through the identity map, so they work both
-//! in hardware bring-up mode (on the firmware page tables) and later from the
-//! main kernel.
+//! buffers, and reach registers through a `trusted::mmio::Mmio` window: in
+//! hardware bring-up mode the firmware identity maps them (`Mmio::firmware`),
+//! and in the main kernel the device window does (`Mmio::mapped`).
 //!
 //! The virtio drivers (`virtio`, `virtio_gpu`) run only in the main kernel:
 //! they reach registers through the kernel's device window and take DMA

@@ -92,7 +92,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use trusted::port::Port8;
+use trusted::{mmio::Mmio, port::Port8};
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
@@ -4092,7 +4092,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             kernel_fail("\r\nlinox: persistent local configuration invalid\r\n");
         }
     }
-    let device_registers: [Option<usize>; arch::x86_64::paging::MAX_DEVICE_REGIONS] =
+    let mut device_registers: [Option<Mmio>; arch::x86_64::paging::MAX_DEVICE_REGIONS] =
         core::array::from_fn(|index| {
             let (physical, length) = device_regions[index];
             device_mappings
@@ -4103,20 +4103,15 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
                     arch::x86_64::paging::mmio_translation_is_bounded(*mapping, physical, length)
                         && arch::x86_64::paging::mmio_identity_alias_is_absent(*mapping)
                 })
-                .and_then(|mapping| mapping.address(physical, length))
+                .and_then(|mapping| Mmio::mapped(mapping, physical, length))
         });
-    let usb_registers = &device_registers[..drivers::usb_input::MAX_CONTROLLERS];
     // The virtio-gpu opens first, because the DMA it needs depends on the
     // display mode the host reports; with translation still off, it can run
     // its setup commands before it is admitted.
     let mut gpu = gpu_probe
-        .zip(device_registers[usb_count])
-        .and_then(|(probe, registers)| {
-            // SAFETY: registers maps the probe's register span uncached in
-            // the device window (checked above) for the kernel's life, and
-            // no other driver touches the device.
-            unsafe { drivers::virtio_gpu::prepare(&probe, registers) }
-        });
+        .zip(device_registers[usb_count].take())
+        .and_then(|(probe, registers)| drivers::virtio_gpu::prepare(&probe, registers));
+    let usb_registers = &mut device_registers[..drivers::usb_input::MAX_CONTROLLERS];
     let admit = |functions: &[(u8, u8, u8)], regions: &[(u64, u64)]| {
         arch::x86_64::iommu::admit_standing_devices(
             platform.first_iommu_register_base,
