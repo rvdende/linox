@@ -57,7 +57,8 @@ impl Port8 {
     }
 
     pub(crate) fn write(self, value: u8) {
-        // SAFETY: as for `read`.
+        // SAFETY: writing a register of one of the devices in the module
+        // comment changes only that device's state, never memory.
         unsafe {
             asm!(
                 "out dx, al",
@@ -119,7 +120,8 @@ pub(super) mod pci {
 
     pub(in crate::trusted) fn read_u32() -> u32 {
         let value: u32;
-        // SAFETY: as for `select`; see `trusted::pci_config` for why
+        // SAFETY: reading CONFIG_DATA returns the selected configuration
+        // register and touches no memory; see `pci_config` for why
         // configuration accesses are safe.
         unsafe {
             asm!(
@@ -135,7 +137,8 @@ pub(super) mod pci {
     /// Reads the 16 bits at byte `half` (0 or 2) of the selected dword.
     pub(in crate::trusted) fn read_u16(half: u16) -> u16 {
         let value: u16;
-        // SAFETY: as for `read_u32`.
+        // SAFETY: a 16-bit read of the selected register (CONFIG_DATA plus
+        // 0 or 2), touching no memory, as `read_u32`.
         unsafe {
             asm!(
                 "in ax, dx",
@@ -148,7 +151,9 @@ pub(super) mod pci {
     }
 
     pub(in crate::trusted) fn write_u32(value: u32) {
-        // SAFETY: as for `read_u32`.
+        // SAFETY: writes the selected configuration register, which changes
+        // a device's decoding or bus mastering but no memory (`pci_config`
+        // says why that is the same power as a device register write).
         unsafe {
             asm!(
                 "out dx, eax",
@@ -161,7 +166,8 @@ pub(super) mod pci {
 
     /// Writes the 16 bits at byte `half` (0 or 2) of the selected dword.
     pub(in crate::trusted) fn write_u16(half: u16, value: u16) {
-        // SAFETY: as for `read_u32`.
+        // SAFETY: as `write_u32`, for the 16 bits at CONFIG_DATA plus 0
+        // or 2.
         unsafe {
             asm!(
                 "out dx, ax",

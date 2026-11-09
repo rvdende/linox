@@ -6,19 +6,69 @@ kernel_source="${repo_root}/kernel/src"
 
 # rg exits 1 when nothing matches, which is the goal for each of these.
 unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc -l | tr -d ' ')"
-safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
 if (( unsafe_blocks > 130 )); then
     echo "kernel unsafe check: unsafe blocks grew from 130 to ${unsafe_blocks}" >&2
     exit 1
 fi
-# Unsafe blocks without a SAFETY comment may only go down. (This replaced a
-# floor on the number of SAFETY comments, which removing a documented
-# unsafe block would trip.)
-undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > -29 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -29 to ${undocumented}" >&2
+# Every unsafe site says why it is sound where it stands: each `unsafe`
+# block, `unsafe impl` and `unsafe extern` fn has a `// SAFETY:` comment in
+# the comment lines directly above it (attributes in between are skipped),
+# and each `unsafe fn` and `unsafe trait` has that or a `# Safety` section
+# in its doc comment. Comment lines are not sites; a function-pointer type
+# (`= unsafe extern ... fn(`) is not one either.
+undocumented_sites() {
+    awk '
+        function trim(text) {
+            sub(/^[ \t]+/, "", text)
+            sub(/[ \t]+$/, "", text)
+            return text
+        }
+        FNR == 1 { count = 0 }
+        {
+            lines[++count] = $0
+            code = $0
+            sub(/\/\/.*$/, "", code)
+            if (trim($0) ~ /^\/\//) {
+                next
+            }
+            if (code !~ /unsafe (\{|fn |impl[ <]|trait |extern "[^"]*" fn )/ \
+                || code ~ /= unsafe extern/) {
+                next
+            }
+            contract = code ~ /unsafe (extern "[^"]*" )?fn |unsafe trait /
+            documented = 0
+            above = count - 1
+            while (above > 0 && trim(lines[above]) ~ /^#\[/) {
+                above--
+            }
+            while (above > 0 && trim(lines[above]) ~ /^\/\//) {
+                line = trim(lines[above])
+                if (line ~ /SAFETY:/ || (contract && line ~ /^\/\/\/ # Safety$/)) {
+                    documented = 1
+                }
+                above--
+            }
+            if (!documented) {
+                print FILENAME ":" FNR ": " trim($0)
+            }
+        }
+    ' "$@"
+}
+mapfile -t kernel_files < <(find "$kernel_source" -name '*.rs' | sort)
+undocumented="$(undocumented_sites "${kernel_files[@]}")"
+if [[ -n "$undocumented" ]]; then
+    echo "kernel unsafe check: unsafe sites without a SAFETY comment directly above them:" >&2
+    echo "$undocumented" >&2
+    exit 1
+fi
+# The check must find a site that has none.
+negative="$(mktemp "${TMPDIR:-/tmp}/linox-unsafe-negative.XXXXXX")"
+trap 'rm -f "$negative"' EXIT
+printf '// SAFETY: documented.\nlet a = unsafe { f() };\nlet b = 1;\nlet c = unsafe { g() };\n' >"$negative"
+if [[ "$(undocumented_sites "$negative")" != "${negative}:4: let c = unsafe { g() };" ]]; then
+    echo "kernel unsafe check: the SAFETY comment check let an undocumented block through" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -248,4 +298,4 @@ if [[ -n "$firmware_views" ]]; then
     exit 1
 fi
 
-echo "Kernel unsafe baseline passed (${unsafe_blocks} blocks, ${safety_comments} SAFETY comments, ${static_mut} static mut)"
+echo "Kernel unsafe baseline passed (${unsafe_blocks} blocks, each with a SAFETY comment; ${static_mut} static mut)"

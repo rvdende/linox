@@ -165,7 +165,10 @@ impl DmaView {
     pub(crate) fn write<T: Word>(&self, offset: usize, value: T) {
         let size = size_of::<T>();
         if let Some(address) = span(self.base, self.length, offset, size, size) {
-            // SAFETY: as for read.
+            // SAFETY: the type invariant keeps the memory the view's (no
+            // Rust reference covers it), span keeps the aligned access
+            // inside it, and the store is volatile because the device
+            // reads it.
             unsafe { (address as *mut T).write_volatile(value) };
         }
     }

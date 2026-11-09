@@ -147,6 +147,9 @@ fn free_pages(pointer: *mut u8, layout: Layout) {
 // frame runs are page aligned and owned by the kernel until freed (the
 // module invariant).
 unsafe impl GlobalAlloc for KernelHeap {
+    // SAFETY: `GlobalAlloc::alloc`'s contract is the caller's (a non-zero
+    // size); the block it returns is as the impl's comment says, or null
+    // without memory.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match size_class(layout) {
             Some(class) => self.allocate_object(class),
@@ -154,6 +157,9 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
     }
 
+    // SAFETY: the caller hands back a block `alloc` made with this
+    // `layout` (`GlobalAlloc::dealloc`'s contract), so `size_class` picks
+    // the slab class or frame count it came from.
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         match size_class(layout) {
             Some(class) => self.free_object(class, pointer),
@@ -161,6 +167,7 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
     }
 
+    // SAFETY: as for `alloc`; the block is zeroed before it is returned.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         match size_class(layout) {
             Some(class) => {

@@ -99,9 +99,8 @@ impl BootImage {
         // SAFETY: the caller's contract: the range is the loader's
         // immutable, never reallocated image, identity-mapped (checked
         // against the identity map's bounds above).
-        Some(Self {
-            bytes: unsafe { core::slice::from_raw_parts(pointer, length) },
-        })
+        let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+        Some(Self { bytes })
     }
 
     pub(crate) fn bytes(self) -> &'static [u8] {
@@ -117,8 +116,7 @@ impl BootImage {
         // SAFETY: the direct map maps the same physical bytes (an identity
         // address is its physical address), which the module invariant
         // keeps allocated and unchanged for the kernel's lifetime.
-        Some(Self {
-            bytes: unsafe { core::slice::from_raw_parts(address as *const u8, self.bytes.len()) },
-        })
+        let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, self.bytes.len()) };
+        Some(Self { bytes })
     }
 }

@@ -103,7 +103,8 @@ impl PixelBuffer {
         let Some(address) = self.at(offset, length).filter(|_| length != 0) else {
             return 0;
         };
-        // SAFETY: as for copy_from.
+        // SAFETY: the module invariant, for the range `at` checked; `bytes`
+        // is the caller's own exclusive buffer, which no surface overlaps.
         unsafe { core::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), length) };
         length
     }

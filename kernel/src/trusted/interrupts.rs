@@ -67,20 +67,23 @@ pub(crate) fn restore(state: InterruptState) {
 
 /// Enables interrupts on this CPU (`sti`).
 pub(crate) fn enable() {
-    // SAFETY: see the module comment.
+    // SAFETY: `sti` touches no memory; the handlers it lets in reach shared
+    // state only through atomics and ranked locks (the module comment), so
+    // no reference the caller holds is aliased by one.
     unsafe { asm!("sti", options(nomem, nostack)) };
 }
 
 /// Disables interrupts on this CPU (`cli`).
 pub(crate) fn disable() {
-    // SAFETY: see the module comment.
+    // SAFETY: `cli` touches no memory and only keeps handlers out.
     unsafe { asm!("cli", options(nomem, nostack)) };
 }
 
 /// Lets an interrupt pending on this CPU in for one instruction
 /// (`sti; nop; cli`: `sti` takes effect after the next instruction).
 pub(crate) fn admit_pending() {
-    // SAFETY: see the module comment.
+    // SAFETY: as `enable`, for one instruction's window; none of the three
+    // instructions touches memory.
     unsafe { asm!("sti", "nop", "cli", options(nomem, nostack)) };
 }
 
@@ -88,21 +91,24 @@ pub(crate) fn admit_pending() {
 /// disables them again (`sti; hlt; cli`: no interrupt can slip in between
 /// `sti` and `hlt`).
 pub(crate) fn wait() {
-    // SAFETY: see the module comment.
+    // SAFETY: as `enable` for the handler that ends the halt; `hlt` only
+    // stops the CPU until it arrives, and none of them touches memory.
     unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
 }
 
 /// Halts until the next interrupt (`hlt`), leaving the interrupt flag as it
 /// is: with interrupts off only an NMI, SMI or INIT ends the halt.
 pub(crate) fn halt() {
-    // SAFETY: see the module comment.
+    // SAFETY: `hlt` touches no memory and leaves the interrupt flag as it
+    // is; at worst (interrupts off) it is a hang.
     unsafe { asm!("hlt", options(nomem, nostack)) };
 }
 
 /// Disables interrupts and halts, for good (`cli; hlt` in a loop).
 pub(crate) fn park() -> ! {
     loop {
-        // SAFETY: see the module comment.
+        // SAFETY: neither instruction touches memory; the CPU stops here for
+        // good, which is a hang, not a memory-safety matter.
         unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
     }
 }

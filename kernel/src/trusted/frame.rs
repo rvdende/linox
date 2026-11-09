@@ -96,7 +96,9 @@ impl Frame {
 
     pub(crate) fn write_u64(self, index: usize, value: u64) {
         let word = self.word_pointer(index);
-        // SAFETY: as for `read_u64`.
+        // SAFETY: the module invariant (direct-mapped kernel memory no Rust
+        // reference covers, so writing aliases nothing) and `at_aligned`'s
+        // bounds and alignment check.
         unsafe { word.write(value) }
     }
 
@@ -139,7 +141,8 @@ impl Frame {
     /// user space reads while the kernel updates it (the vvar page).
     pub(crate) fn write_volatile_u64(self, offset: usize, value: u64) {
         let word = self.at_aligned::<u64>(offset);
-        // SAFETY: as for `read_u64`.
+        // SAFETY: as `write_u64`: the module invariant and `at_aligned`'s
+        // check; volatile because user space reads the page concurrently.
         unsafe { word.write_volatile(value) }
     }
 

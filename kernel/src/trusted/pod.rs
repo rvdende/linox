@@ -18,17 +18,17 @@
 /// `pod!`.
 pub(crate) unsafe trait Pod: Copy + 'static {}
 
-// SAFETY: integers have no padding and accept every bit pattern.
+// SAFETY: a u8 has no padding and every bit pattern is a value.
 unsafe impl Pod for u8 {}
-// SAFETY: as for u8.
+// SAFETY: a u16 has no padding and every bit pattern is a value.
 unsafe impl Pod for u16 {}
-// SAFETY: as for u8.
+// SAFETY: a u32 has no padding and every bit pattern is a value.
 unsafe impl Pod for u32 {}
-// SAFETY: as for u8.
+// SAFETY: a u64 has no padding and every bit pattern is a value.
 unsafe impl Pod for u64 {}
-// SAFETY: as for u8.
+// SAFETY: an i32 has no padding and every bit pattern is a value.
 unsafe impl Pod for i32 {}
-// SAFETY: as for u8.
+// SAFETY: an i64 has no padding and every bit pattern is a value.
 unsafe impl Pod for i64 {}
 // SAFETY: an array of `Pod` elements has no padding between them (an
 // element's size is a multiple of its alignment) and accepts every bit
