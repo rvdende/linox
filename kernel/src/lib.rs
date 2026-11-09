@@ -1,4 +1,10 @@
 #![no_std]
+// Unsafe code is denied by default (docs/FRAMEKERNEL.md §6): the modules
+// below that still hold some say so where they are declared, and the
+// trusted core (`trusted`) is where it is meant to end up. This file has
+// none of its own. A module whose last unsafe goes loses its allow, and
+// keeps `#![forbid(unsafe_code)]` (tools/architecture/check-kernel-unsafe.sh).
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
@@ -9,7 +15,9 @@ extern crate alloc;
 #[cfg(all(target_os = "uefi", not(all(aes_force_soft, polyval_force_soft))))]
 compile_error!("the kernel must be built with --cfg aes_force_soft --cfg polyval_force_soft");
 
+#[allow(unsafe_code)]
 mod address_space;
+#[allow(unsafe_code)]
 mod arch;
 mod bringup;
 mod capability;
@@ -17,10 +25,14 @@ mod control_abi;
 mod cpu_time;
 mod crypto;
 mod domain;
+#[allow(unsafe_code)]
 mod drivers;
 mod executable;
+#[allow(unsafe_code)]
 mod framebuffer;
+#[allow(unsafe_code)]
 mod heap;
+#[allow(unsafe_code)]
 mod image_store;
 mod initramfs;
 mod ipc;
@@ -53,15 +65,18 @@ mod linux_mount;
 mod linux_mount_paths;
 mod linux_mounts;
 mod linux_namespace;
+#[allow(unsafe_code)]
 mod linux_overlay;
 mod linux_overlayfs;
 mod linux_path_views;
 mod linux_pidfs;
+#[allow(unsafe_code)]
 mod linux_process;
 mod linux_profile;
 mod linux_pty;
 mod linux_ramdisk;
 mod linux_record_lock;
+#[allow(unsafe_code)]
 mod linux_signal;
 mod linux_socket;
 mod linux_strace;
@@ -83,8 +98,10 @@ mod owned_state;
 mod packet;
 mod pe;
 mod published_rootfs;
+#[allow(unsafe_code)]
 mod scheduler;
 mod sync;
+#[allow(unsafe_code)]
 mod trusted;
 mod volume;
 
@@ -92,6 +109,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
 use trusted::boot::{Handoff, HandoffError};
+use trusted::dma::DmaView;
 use trusted::take_once::TakeOnce;
 use trusted::{
     firmware, frame::Frame, image::BootImage, mmio::Mmio, pixels::PixelBuffer, port::Port8,
@@ -1335,7 +1353,7 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     }
     serial_write("\r\nlinox: IOMMU root table installed");
     serial_write("\r\nlinox: IOMMU translation enabled for virtio DMA");
-    let Some(virtio_dma_virtual) = virtio_dma_frame.direct_map_address() else {
+    let Some(virtio_dma) = DmaView::leased(virtio_dma_frame) else {
         kernel_fail("\r\nlinox: virtio DMA frame is outside direct map\r\n");
     };
     let Some(iommu_guard) = Frame::leased(iommu_guard_frame) else {
@@ -1345,15 +1363,11 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         // The guard remains owned but deliberately absent from the translation
         // hierarchy. A blocked device write must leave every sentinel byte intact.
         iommu_guard.fill(0xa5);
-        // SAFETY: This deliberately invalid DMA request is restricted to the
+        // This deliberately invalid DMA request is restricted to the
         // verification image. Normal boots never provoke a hardware fault.
-        let Some(mut fault_probe) = (unsafe {
-            arch::x86_64::pci::VirtioBlockBackend::start(
-                virtio_block,
-                virtio_mmio,
-                virtio_dma_frame.address(),
-                virtio_dma_virtual,
-            )
+        // The probe gets a view of its own of the same page.
+        let Some(mut fault_probe) = DmaView::leased(virtio_dma_frame).and_then(|dma| {
+            arch::x86_64::pci::VirtioBlockBackend::start(virtio_block, virtio_mmio, dma)
         }) else {
             kernel_fail("\r\nlinox: adversarial virtio backend activation failed\r\n");
         };
@@ -1390,20 +1404,17 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         serial_write("\r\nlinox: IOMMU write-permission fault reason validated");
         serial_write("\r\nlinox: IOMMU fault record cleared and translation recovered");
     }
-    // SAFETY: The allocator returned one exclusively kernel-owned page, its
+    // The allocator returned one exclusively kernel-owned page, its
     // direct-map alias covers the complete physical frame, and the lease stays
     // live until the device has reset and bus mastering is disabled.
-    let Some(virtio_read) = (unsafe {
-        arch::x86_64::pci::read_blank_sector_interrupt(
-            virtio_block,
-            virtio_mmio,
-            virtio_msix_mmio,
-            &local_apic,
-            virtio_dma_frame.address(),
-            virtio_dma_virtual,
-            2,
-        )
-    }) else {
+    let Some(virtio_read) = arch::x86_64::pci::read_blank_sector_interrupt(
+        virtio_block,
+        virtio_mmio,
+        virtio_msix_mmio,
+        &local_apic,
+        &virtio_dma,
+        2,
+    ) else {
         kernel_fail("\r\nlinox: bounded virtio block read failed\r\n");
     };
     serial_write("\r\nlinox: kernel-owned virtio MSI-X interrupt delivered");
@@ -1415,17 +1426,12 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     {
         kernel_fail("\r\nlinox: deterministic virtio block geometry invalid\r\n");
     }
-    // SAFETY: The one-shot probe returned only after reset and bus-master
+    // The one-shot probe returned only after reset and bus-master
     // revocation. The same exclusive lease remains live and is reused by the
     // persistent backend until `finish` proves teardown.
-    let Some(mut persistent_block) = (unsafe {
-        arch::x86_64::pci::VirtioBlockBackend::start(
-            virtio_block,
-            virtio_mmio,
-            virtio_dma_frame.address(),
-            virtio_dma_virtual,
-        )
-    }) else {
+    let Some(mut persistent_block) =
+        arch::x86_64::pci::VirtioBlockBackend::start(virtio_block, virtio_mmio, virtio_dma)
+    else {
         kernel_fail("\r\nlinox: persistent virtio backend activation failed\r\n");
     };
     let mut persisted_local_configuration = [0_u8; PERSISTENT_LOCAL_CONFIG_SIZE];
@@ -1501,7 +1507,7 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     else {
         kernel_fail("\r\nlinox: virtio-net DMA and guard frame allocation failed\r\n");
     };
-    // SAFETY: The allocator owns and directly maps this live kernel lease.
+    // The allocator owns and directly maps this live kernel lease.
     if !memory::frames_owned_by(
         memory::FrameOwner::KERNEL,
         &[virtio_network_dma_frame, virtio_network_guard_frame],
@@ -1543,7 +1549,7 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     serial_write("\r\nlinox: virtio-net DMA and IOMMU leases are generation-fresh");
     serial_write("\r\nlinox: virtio-net IOMMU hardware remained inactive");
     serial_write("\r\nlinox: virtio-net bus mastering remained disabled");
-    let Some(virtio_network_dma_virtual) = virtio_network_dma_frame.direct_map_address() else {
+    let Some(virtio_network_dma) = DmaView::leased(virtio_network_dma_frame) else {
         kernel_fail("\r\nlinox: virtio-net DMA page is outside direct map\r\n");
     };
     let Some(virtio_network_guard) = Frame::leased(virtio_network_guard_frame) else {
@@ -1561,28 +1567,24 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         kernel_fail("\r\nlinox: virtio-net IOMMU activation failed\r\n");
     };
     let network_queues_activated = virtio_network_active.is_active()
-        && unsafe {
-            arch::x86_64::pci::activate_network_queues_without_io(
-                virtio_network,
-                virtio_network_common_mmio,
-                virtio_network_dma_frame.address(),
-                virtio_network_dma_virtual,
-            )
-        };
-    // SAFETY: The same exclusive page and exact source translation remain
+        && arch::x86_64::pci::activate_network_queues_without_io(
+            virtio_network,
+            virtio_network_common_mmio,
+            &virtio_network_dma,
+        );
+    // The same exclusive page and exact source translation remain
     // live. The empty-queue proof returned only after resetting the device and
     // revoking bus mastering, so the one-shot transmit can safely reconfigure
     // the function before the IOMMU translation is retired below.
     let network_transmit = network_queues_activated
-        .then(|| unsafe {
+        .then(|| {
             arch::x86_64::pci::transmit_network_probe(
                 virtio_network,
                 virtio_network_common_mmio,
                 virtio_network_notify_mmio,
                 virtio_network_msix_mmio,
                 &local_apic,
-                virtio_network_dma_frame.address(),
-                virtio_network_dma_virtual,
+                &virtio_network_dma,
             )
         })
         .flatten();
@@ -1593,15 +1595,14 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         virtio_network_guard.fill(0xa5);
         let network_dma_fault = network_transmit
             .is_some()
-            .then(|| unsafe {
+            .then(|| {
                 arch::x86_64::pci::attempt_unmapped_network_receive(
                     virtio_network,
                     virtio_network_common_mmio,
                     virtio_network_notify_mmio,
                     virtio_network_msix_mmio,
                     &local_apic,
-                    virtio_network_dma_frame.address(),
-                    virtio_network_dma_virtual,
+                    &virtio_network_dma,
                     virtio_network_guard_frame.address(),
                 )
             })
@@ -1621,19 +1622,18 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         ) {
             kernel_fail("\r\nlinox: virtio-net IOMMU fault validation or recovery failed\r\n");
         }
-        // SAFETY: The faulting exchange returned with the function reset and
+        // The faulting exchange returned with the function reset and
         // bus mastering revoked before this valid verification exchange.
         network_dma_fault
             .is_some()
-            .then(|| unsafe {
+            .then(|| {
                 arch::x86_64::pci::receive_network_arp_reply(
                     virtio_network,
                     virtio_network_common_mmio,
                     virtio_network_notify_mmio,
                     virtio_network_msix_mmio,
                     &local_apic,
-                    virtio_network_dma_frame.address(),
-                    virtio_network_dma_virtual,
+                    &virtio_network_dma,
                 )
             })
             .flatten()
@@ -1641,17 +1641,14 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
         // Normal boot exercises only the valid, mapped receive path. This
         // leaves the NIC in the same verified reset state without provoking a
         // VT-d fault merely to prove rejection.
-        unsafe {
-            arch::x86_64::pci::receive_network_arp_reply(
-                virtio_network,
-                virtio_network_common_mmio,
-                virtio_network_notify_mmio,
-                virtio_network_msix_mmio,
-                &local_apic,
-                virtio_network_dma_frame.address(),
-                virtio_network_dma_virtual,
-            )
-        }
+        arch::x86_64::pci::receive_network_arp_reply(
+            virtio_network,
+            virtio_network_common_mmio,
+            virtio_network_notify_mmio,
+            virtio_network_msix_mmio,
+            &local_apic,
+            &virtio_network_dma,
+        )
     };
     let network_translation_retired = virtio_network_active.finish();
     if !network_queues_activated {
@@ -4736,7 +4733,7 @@ fn with_runtime_volume<T>(
     operation: impl FnOnce(&mut arch::x86_64::pci::VirtioBlockBackend) -> Option<T>,
 ) -> Option<T> {
     let [dma_frame] = memory::allocate_frames::<1>(memory::FrameOwner::KERNEL)?;
-    let Some(dma_virtual) = dma_frame.direct_map_address() else {
+    let Some(dma) = DmaView::leased(dma_frame) else {
         let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[dma_frame]);
         return None;
     };
@@ -4744,14 +4741,8 @@ fn with_runtime_volume<T>(
         let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[dma_frame]);
         return None;
     };
-    let Some(mut backend) = (unsafe {
-        arch::x86_64::pci::VirtioBlockBackend::start(
-            device,
-            mapping,
-            dma_frame.address(),
-            dma_virtual,
-        )
-    }) else {
+    let Some(mut backend) = arch::x86_64::pci::VirtioBlockBackend::start(device, mapping, dma)
+    else {
         let translation_retired = translation.finish();
         let _ = retire_runtime_volume_dma(dma_frame, true, translation_retired);
         return None;

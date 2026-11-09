@@ -1,4 +1,5 @@
-use core::ptr::{read_volatile, write_volatile};
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use super::{
@@ -8,7 +9,7 @@ use super::{
     timer,
 };
 use crate::trusted::interrupts;
-use crate::trusted::{entry, mmio::Mmio};
+use crate::trusted::{dma::DmaView, entry, mmio::Mmio};
 use crate::{
     control_abi,
     scheduler::{self, UserInterruptFrame},
@@ -452,7 +453,7 @@ pub(crate) struct VirtioBlockBackend {
     common: Mmio,
     notification: Mmio,
     dma_physical: u64,
-    dma_virtual: usize,
+    dma: DmaView,
     capacity_sectors: u64,
     queue_size: u16,
     available_index: u16,
@@ -1084,7 +1085,7 @@ pub(crate) extern "sysv64" fn virtio_interrupt_handler(_frame: &mut UserInterrup
     apic.write(APIC_EOI, 0);
 }
 
-unsafe fn wait_for_one_virtio_interrupt() -> bool {
+fn wait_for_one_virtio_interrupt() -> bool {
     interrupts::enable();
     let mut interrupted = false;
     for _ in 0..QUEUE_POLL_LIMIT {
@@ -1186,19 +1187,18 @@ pub(crate) fn initialize_network_without_dma(
 
 /// Activates two empty virtio-net queues and immediately quiesces the device.
 ///
-/// # Safety
-///
-/// The caller must exclusively own the complete DMA page and must have already
-/// activated an IOMMU translation that permits this device to access only that
-/// page. The lease must remain live until this function returns.
-pub(crate) unsafe fn activate_network_queues_without_io(
+/// The caller owns the DMA page's lease and has already activated an IOMMU
+/// translation that permits this device to access only that page; the lease
+/// stays live until this function returns. (The kernel reaches the page only
+/// through `dma`'s bounds-checked copies; what the device may reach is the
+/// translation's policy.)
+pub(crate) fn activate_network_queues_without_io(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
 ) -> bool {
+    let dma_physical = dma.device_address(0);
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || !network_function_is_disabled(device)
         || !verify_network_dma_layout()
     {
@@ -1210,7 +1210,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
     let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
-    core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
+    dma.fill(0, DMA_PAGE_SIZE, 0);
     let command = network_function_command(device);
     pci_config::write_u16(
         device.bus,
@@ -1304,19 +1304,16 @@ pub(crate) unsafe fn activate_network_queues_without_io(
 
 /// Activates the kernel-owned virtio-net queues and leaves DMA enabled.
 ///
-/// # Safety
-///
-/// The caller must exclusively own the DMA page and an active IOMMU
-/// translation that restricts this device to that page. Both must remain live
-/// until the device is reset and bus mastering is revoked.
-pub(crate) unsafe fn activate_kernel_network_queues(
+/// The caller owns the DMA page's lease and an active IOMMU translation that
+/// restricts this device to that page; both stay live until the device is
+/// reset and bus mastering is revoked.
+pub(crate) fn activate_kernel_network_queues(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
 ) -> bool {
+    let dma_physical = dma.device_address(0);
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || !network_function_is_disabled(device)
         || !network_msix_is_disabled(device)
         || !verify_network_dma_layout()
@@ -1329,7 +1326,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
     let Some(common) = Mmio::mapped(common_mapping, common_physical, common_length) else {
         return false;
     };
-    core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
+    dma.fill(0, DMA_PAGE_SIZE, 0);
     pci_config::write_u16(
         device.bus,
         device.device,
@@ -1427,13 +1424,16 @@ pub(crate) fn activate_isolated_network_empty_queues(
     dma_physical: u64,
     dma_virtual: usize,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || !network_msix_is_disabled(device)
         || network_function_command(device)
             & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
             != COMMAND_MEMORY_SPACE
-        || !(0..DMA_PAGE_SIZE).all(|offset| read_dma_u8(dma_virtual + offset) == 0)
+        || !(0..DMA_PAGE_SIZE).all(|offset| read_dma_u8(dma, offset) == 0)
         || !network_empty_queues_are_bound(device, common_mapping, dma_physical, false)
     {
         return false;
@@ -1519,15 +1519,18 @@ pub(crate) fn activate_isolated_network_interrupt_queues(
     domain: u64,
     request: u64,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || PCI_INTERRUPTS.virtio_domain.load(Ordering::SeqCst) != domain
         || PCI_INTERRUPTS.virtio_request.load(Ordering::SeqCst) != request
         || PCI_INTERRUPTS.virtio_object.load(Ordering::SeqCst) != control_abi::NETWORK_DEVICE_OBJECT
         || network_function_command(device)
             & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
             != COMMAND_MEMORY_SPACE
-        || !(0..DMA_PAGE_SIZE).all(|offset| read_dma_u8(dma_virtual + offset) == 0)
+        || !(0..DMA_PAGE_SIZE).all(|offset| read_dma_u8(dma, offset) == 0)
         || !network_queues_are_bound(
             device,
             common_mapping,
@@ -1832,6 +1835,10 @@ pub(crate) fn quiesce_isolated_network_interrupt(
 }
 
 pub(crate) fn network_service_transmit_is_complete(dma_physical: u64, dma_virtual: usize) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const ETHERNET_FRAME: [u8; 19] = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'L',
@@ -1839,31 +1846,27 @@ pub(crate) fn network_service_transmit_is_complete(dma_physical: u64, dma_virtua
     ];
     const PAYLOAD_LENGTH: usize = HEADER_LENGTH + ETHERNET_FRAME.len();
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        || read_dma_u64(dma_virtual + NET_TX_DESC_OFFSET)
-            != dma_physical + NET_TX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) != PAYLOAD_LENGTH as u32
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12) != 0
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) != 1
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4) != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) != 1
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) != 0
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 8) > PAYLOAD_LENGTH as u32
-        || (0..HEADER_LENGTH)
-            .any(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) != 0)
+        || read_dma_u64(dma, NET_TX_DESC_OFFSET) != dma_physical + NET_TX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) != PAYLOAD_LENGTH as u32
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 12) != 0
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) != 1
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4) != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET + 2) != 1
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 4) != 0
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 8) > PAYLOAD_LENGTH as u32
+        || (0..HEADER_LENGTH).any(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) != 0)
         || ETHERNET_FRAME.iter().enumerate().any(|(offset, byte)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
         })
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET - 1) != 0x3c
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) != 0xc3
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET - 1) != 0x3c
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) != 0xc3
     {
         return false;
     }
     (1..usize::from(QUEUE_SIZE)).all(|descriptor| {
-        (0..16)
-            .all(|byte| read_dma_u8(dma_virtual + NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0)
+        (0..16).all(|byte| read_dma_u8(dma, NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0)
     })
 }
 
@@ -1872,6 +1875,10 @@ pub(crate) fn network_service_egress_transmit_count_is_complete(
     dma_virtual: usize,
     completed: u16,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const ICMP_ECHO_REPLY: [u8; 42] = [
         0x52, 0x55, 0x0a, 0x00, 0x02, 0x02, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x08, 0x00, 0x45,
@@ -1881,36 +1888,31 @@ pub(crate) fn network_service_egress_transmit_count_is_complete(
     const PAYLOAD_LENGTH: usize = HEADER_LENGTH + ICMP_ECHO_REPLY.len();
     if !(1..=QUEUE_SIZE).contains(&completed)
         || !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        || read_dma_u64(dma_virtual + NET_TX_DESC_OFFSET)
-            != dma_physical + NET_TX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) != PAYLOAD_LENGTH as u32
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12) != 0
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) != completed
+        || read_dma_u64(dma, NET_TX_DESC_OFFSET) != dma_physical + NET_TX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) != PAYLOAD_LENGTH as u32
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 12) != 0
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) != completed
         || (0..usize::from(completed))
-            .any(|entry| read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4 + entry * 2) != 0)
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET) & !1 != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) != completed
+            .any(|entry| read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4 + entry * 2) != 0)
+        || read_dma_u16(dma, NET_TX_USED_OFFSET) & !1 != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET + 2) != completed
         || (0..usize::from(completed)).any(|entry| {
-            read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4 + entry * 8) != 0
-                || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 8 + entry * 8)
-                    > PAYLOAD_LENGTH as u32
+            read_dma_u32(dma, NET_TX_USED_OFFSET + 4 + entry * 8) != 0
+                || read_dma_u32(dma, NET_TX_USED_OFFSET + 8 + entry * 8) > PAYLOAD_LENGTH as u32
         })
-        || (0..HEADER_LENGTH)
-            .any(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) != 0)
+        || (0..HEADER_LENGTH).any(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) != 0)
         || ICMP_ECHO_REPLY.iter().enumerate().any(|(offset, byte)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
         })
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET - 1) != 0x3c
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) != 0xc3
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET - 1) != 0x3c
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) != 0xc3
     {
         return false;
     }
     (1..usize::from(QUEUE_SIZE)).all(|descriptor| {
-        (0..16)
-            .all(|byte| read_dma_u8(dma_virtual + NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0)
+        (0..16).all(|byte| read_dma_u8(dma, NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0)
     })
 }
 
@@ -1918,6 +1920,10 @@ pub(crate) fn network_service_arp_exchange_is_complete(
     dma_physical: u64,
     dma_virtual: usize,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const RX_LENGTH: usize = NET_BUFFER_LENGTH - 1;
     const ARP_REQUEST: [u8; 60] = [
@@ -1930,42 +1936,39 @@ pub(crate) fn network_service_arp_exchange_is_complete(
     const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
     const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
     let tx_length = HEADER_LENGTH + ARP_REQUEST.len();
-    let receive_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 8);
+    let receive_length = read_dma_u32(dma, NET_RX_USED_OFFSET + 8);
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        || read_dma_u64(dma_virtual + NET_RX_DESC_OFFSET)
-            != dma_physical + NET_RX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_RX_DESC_OFFSET + 8) != RX_LENGTH as u32
-        || read_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 12) != DESC_WRITE
-        || read_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 2) != 1
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 4) != 0
-        || read_dma_u16(dma_virtual + NET_RX_USED_OFFSET) & !1 != 0
-        || read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2) != 1
-        || read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 4) != 0
-        || read_dma_u64(dma_virtual + NET_TX_DESC_OFFSET)
-            != dma_physical + NET_TX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) != tx_length as u32
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12) != 0
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) != 1
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4) != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET) & !1 != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) != 1
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) != 0
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 8) > tx_length as u32
-        || (0..HEADER_LENGTH)
-            .any(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) != 0)
+        || read_dma_u64(dma, NET_RX_DESC_OFFSET) != dma_physical + NET_RX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_RX_DESC_OFFSET + 8) != RX_LENGTH as u32
+        || read_dma_u16(dma, NET_RX_DESC_OFFSET + 12) != DESC_WRITE
+        || read_dma_u16(dma, NET_RX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 2) != 1
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 4) != 0
+        || read_dma_u16(dma, NET_RX_USED_OFFSET) & !1 != 0
+        || read_dma_u16(dma, NET_RX_USED_OFFSET + 2) != 1
+        || read_dma_u32(dma, NET_RX_USED_OFFSET + 4) != 0
+        || read_dma_u64(dma, NET_TX_DESC_OFFSET) != dma_physical + NET_TX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) != tx_length as u32
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 12) != 0
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) != 1
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4) != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET) & !1 != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET + 2) != 1
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 4) != 0
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 8) > tx_length as u32
+        || (0..HEADER_LENGTH).any(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) != 0)
         || ARP_REQUEST.iter().enumerate().any(|(offset, byte)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
         })
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1) != 0x3c
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET - 1) != 0x3c
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
         || !network_arp_reply_is_valid(
-            dma_virtual + NET_RX_BUFFER_OFFSET,
+            dma,
+            NET_RX_BUFFER_OFFSET,
             receive_length,
             GUEST_MAC,
             GATEWAY_MAC,
@@ -1977,13 +1980,17 @@ pub(crate) fn network_service_arp_exchange_is_complete(
     }
     (1..usize::from(QUEUE_SIZE)).all(|descriptor| {
         (0..16).all(|byte| {
-            read_dma_u8(dma_virtual + NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
-                && read_dma_u8(dma_virtual + NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
+            read_dma_u8(dma, NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
+                && read_dma_u8(dma, NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
         })
     })
 }
 
 pub(crate) fn network_service_arp_reuse_is_complete(dma_physical: u64, dma_virtual: usize) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const RX_LENGTH: usize = NET_BUFFER_LENGTH - 1;
     const ARP_REQUEST: [u8; 60] = [
@@ -1996,47 +2003,44 @@ pub(crate) fn network_service_arp_reuse_is_complete(dma_physical: u64, dma_virtu
     const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
     const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
     let tx_length = HEADER_LENGTH + ARP_REQUEST.len();
-    let receive_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 16);
+    let receive_length = read_dma_u32(dma, NET_RX_USED_OFFSET + 16);
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        || read_dma_u64(dma_virtual + NET_RX_DESC_OFFSET)
-            != dma_physical + NET_RX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_RX_DESC_OFFSET + 8) != RX_LENGTH as u32
-        || read_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 12) != DESC_WRITE
-        || read_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 2) != 2
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 4) != 0
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 6) != 0
-        || read_dma_u16(dma_virtual + NET_RX_USED_OFFSET) & !1 != 0
-        || read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2) != 2
-        || read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 4) != 0
-        || read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 12) != 0
-        || read_dma_u64(dma_virtual + NET_TX_DESC_OFFSET)
-            != dma_physical + NET_TX_BUFFER_OFFSET as u64
-        || read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) != tx_length as u32
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12) != 0
-        || read_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) != 2
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 6) != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET) & !1 != 0
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) != 2
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) != 0
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 12) != 0
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 8) > tx_length as u32
-        || read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 16) > tx_length as u32
-        || (0..HEADER_LENGTH)
-            .any(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) != 0)
+        || read_dma_u64(dma, NET_RX_DESC_OFFSET) != dma_physical + NET_RX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_RX_DESC_OFFSET + 8) != RX_LENGTH as u32
+        || read_dma_u16(dma, NET_RX_DESC_OFFSET + 12) != DESC_WRITE
+        || read_dma_u16(dma, NET_RX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 2) != 2
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 4) != 0
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 6) != 0
+        || read_dma_u16(dma, NET_RX_USED_OFFSET) & !1 != 0
+        || read_dma_u16(dma, NET_RX_USED_OFFSET + 2) != 2
+        || read_dma_u32(dma, NET_RX_USED_OFFSET + 4) != 0
+        || read_dma_u32(dma, NET_RX_USED_OFFSET + 12) != 0
+        || read_dma_u64(dma, NET_TX_DESC_OFFSET) != dma_physical + NET_TX_BUFFER_OFFSET as u64
+        || read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) != tx_length as u32
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 12) != 0
+        || read_dma_u16(dma, NET_TX_DESC_OFFSET + 14) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) != 2
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 6) != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET) & !1 != 0
+        || read_dma_u16(dma, NET_TX_USED_OFFSET + 2) != 2
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 4) != 0
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 12) != 0
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 8) > tx_length as u32
+        || read_dma_u32(dma, NET_TX_USED_OFFSET + 16) > tx_length as u32
+        || (0..HEADER_LENGTH).any(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) != 0)
         || ARP_REQUEST.iter().enumerate().any(|(offset, byte)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
         })
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1) != 0x3c
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET - 1) != 0x3c
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
         || !network_arp_reply_is_valid(
-            dma_virtual + NET_RX_BUFFER_OFFSET,
+            dma,
+            NET_RX_BUFFER_OFFSET,
             receive_length,
             GUEST_MAC,
             GATEWAY_MAC,
@@ -2048,8 +2052,8 @@ pub(crate) fn network_service_arp_reuse_is_complete(dma_physical: u64, dma_virtu
     }
     (1..usize::from(QUEUE_SIZE)).all(|descriptor| {
         (0..16).all(|byte| {
-            read_dma_u8(dma_virtual + NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
-                && read_dma_u8(dma_virtual + NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
+            read_dma_u8(dma, NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
+                && read_dma_u8(dma, NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
         })
     })
 }
@@ -2058,6 +2062,10 @@ pub(crate) fn network_service_icmp_exchange_is_complete(
     dma_physical: u64,
     dma_virtual: usize,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const RX_LENGTH: usize = NET_BUFFER_LENGTH - 1;
     const ICMP_REQUEST: [u8; 42] = [
@@ -2069,44 +2077,42 @@ pub(crate) fn network_service_icmp_exchange_is_complete(
     const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
     const GATEWAY_MAC: [u8; 6] = [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02];
     let tx_length = HEADER_LENGTH + ICMP_REQUEST.len();
-    let receive_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 16) as usize;
-    let frame = dma_virtual + NET_RX_BUFFER_OFFSET + HEADER_LENGTH;
+    let receive_length = read_dma_u32(dma, NET_RX_USED_OFFSET + 16) as usize;
+    let frame = NET_RX_BUFFER_OFFSET + HEADER_LENGTH;
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        || read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 2) != 2
-        || read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2) != 2
-        || read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 12) != 0
-        || read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) != 2
-        || read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) != 2
-        || read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) != tx_length as u32
-        || (0..HEADER_LENGTH)
-            .any(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) != 0)
+        || read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 2) != 2
+        || read_dma_u16(dma, NET_RX_USED_OFFSET + 2) != 2
+        || read_dma_u32(dma, NET_RX_USED_OFFSET + 12) != 0
+        || read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) != 2
+        || read_dma_u16(dma, NET_TX_USED_OFFSET + 2) != 2
+        || read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) != tx_length as u32
+        || (0..HEADER_LENGTH).any(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) != 0)
         || ICMP_REQUEST.iter().enumerate().any(|(offset, byte)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) != *byte
         })
         || !(HEADER_LENGTH + 42..=RX_LENGTH).contains(&receive_length)
-        || (0..10).any(|offset| read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + offset) != 0)
-        || read_dma_u16(dma_virtual + NET_RX_BUFFER_OFFSET + 10) != 1
-        || (0..6).any(|offset| read_dma_u8(frame + offset) != GUEST_MAC[offset])
-        || (0..6).any(|offset| read_dma_u8(frame + 6 + offset) != GATEWAY_MAC[offset])
-        || read_dma_u16(frame + 12) != u16::from_be_bytes([0x08, 0x00]).swap_bytes()
-        || read_dma_u8(frame + 14) != 0x45
-        || read_dma_u16(frame + 16) != u16::from_be_bytes([0x00, 0x1c]).swap_bytes()
-        || read_dma_u8(frame + 23) != 1
-        || (0..4).any(|offset| read_dma_u8(frame + 26 + offset) != [10, 0, 2, 2][offset])
-        || (0..4).any(|offset| read_dma_u8(frame + 30 + offset) != [10, 0, 2, 15][offset])
+        || (0..10).any(|offset| read_dma_u8(dma, NET_RX_BUFFER_OFFSET + offset) != 0)
+        || read_dma_u16(dma, NET_RX_BUFFER_OFFSET + 10) != 1
+        || (0..6).any(|offset| read_dma_u8(dma, frame + offset) != GUEST_MAC[offset])
+        || (0..6).any(|offset| read_dma_u8(dma, frame + 6 + offset) != GATEWAY_MAC[offset])
+        || read_dma_u16(dma, frame + 12) != u16::from_be_bytes([0x08, 0x00]).swap_bytes()
+        || read_dma_u8(dma, frame + 14) != 0x45
+        || read_dma_u16(dma, frame + 16) != u16::from_be_bytes([0x00, 0x1c]).swap_bytes()
+        || read_dma_u8(dma, frame + 23) != 1
+        || (0..4).any(|offset| read_dma_u8(dma, frame + 26 + offset) != [10, 0, 2, 2][offset])
+        || (0..4).any(|offset| read_dma_u8(dma, frame + 30 + offset) != [10, 0, 2, 15][offset])
         || (0..ICMP_REPLY.len())
-            .any(|offset| read_dma_u8(frame + 34 + offset) != ICMP_REPLY[offset])
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1) != 0x3c
-        || read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
-        || read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
+            .any(|offset| read_dma_u8(dma, frame + 34 + offset) != ICMP_REPLY[offset])
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET - 1) != 0x3c
+        || read_dma_u8(dma, NET_RX_BUFFER_OFFSET + RX_LENGTH) != 0xc3
+        || read_dma_u8(dma, NET_TX_BUFFER_OFFSET + tx_length) != 0xa5
     {
         return false;
     }
     (1..usize::from(QUEUE_SIZE)).all(|descriptor| {
         (0..16).all(|byte| {
-            read_dma_u8(dma_virtual + NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
-                && read_dma_u8(dma_virtual + NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
+            read_dma_u8(dma, NET_RX_DESC_OFFSET + descriptor * 16 + byte) == 0
+                && read_dma_u8(dma, NET_TX_DESC_OFFSET + descriptor * 16 + byte) == 0
         })
     })
 }
@@ -2115,61 +2121,65 @@ pub(crate) fn network_service_dhcp_exchange_is_complete(
     dma_physical: u64,
     dma_virtual: usize,
 ) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const HEADER_LENGTH: usize = 12;
     const RX_LENGTH: usize = NET_BUFFER_LENGTH - 1;
-    let tx_length = read_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8) as usize;
-    let rx_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 16) as usize;
-    let tx = dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH;
-    let rx = dma_virtual + NET_RX_BUFFER_OFFSET + HEADER_LENGTH;
+    let tx_length = read_dma_u32(dma, NET_TX_DESC_OFFSET + 8) as usize;
+    let rx_length = read_dma_u32(dma, NET_RX_USED_OFFSET + 16) as usize;
+    let tx = NET_TX_BUFFER_OFFSET + HEADER_LENGTH;
+    let rx = NET_RX_BUFFER_OFFSET + HEADER_LENGTH;
     dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        && dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
-        && read_dma_u64(dma_virtual + NET_RX_DESC_OFFSET)
-            == dma_physical + NET_RX_BUFFER_OFFSET as u64
-        && read_dma_u32(dma_virtual + NET_RX_DESC_OFFSET + 8) == RX_LENGTH as u32
-        && read_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 12) == DESC_WRITE
-        && read_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 2) == 2
-        && read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2) == 2
-        && read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 12) == 0
-        && read_dma_u64(dma_virtual + NET_TX_DESC_OFFSET)
-            == dma_physical + NET_TX_BUFFER_OFFSET as u64
-        && read_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2) == 2
-        && read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) == 2
-        && read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 12) == 0
+        && read_dma_u64(dma, NET_RX_DESC_OFFSET) == dma_physical + NET_RX_BUFFER_OFFSET as u64
+        && read_dma_u32(dma, NET_RX_DESC_OFFSET + 8) == RX_LENGTH as u32
+        && read_dma_u16(dma, NET_RX_DESC_OFFSET + 12) == DESC_WRITE
+        && read_dma_u16(dma, NET_RX_AVAIL_OFFSET + 2) == 2
+        && read_dma_u16(dma, NET_RX_USED_OFFSET + 2) == 2
+        && read_dma_u32(dma, NET_RX_USED_OFFSET + 12) == 0
+        && read_dma_u64(dma, NET_TX_DESC_OFFSET) == dma_physical + NET_TX_BUFFER_OFFSET as u64
+        && read_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2) == 2
+        && read_dma_u16(dma, NET_TX_USED_OFFSET + 2) == 2
+        && read_dma_u32(dma, NET_TX_USED_OFFSET + 12) == 0
         && (HEADER_LENGTH + 14 + 20 + 8 + 240..=NET_BUFFER_LENGTH).contains(&tx_length)
         && (HEADER_LENGTH + 14 + 20 + 8 + 240..=RX_LENGTH).contains(&rx_length)
-        && (0..HEADER_LENGTH)
-            .all(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) == 0)
-        && (0..6).all(|offset| read_dma_u8(tx + offset) == 0xff)
+        && (0..HEADER_LENGTH).all(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) == 0)
+        && (0..6).all(|offset| read_dma_u8(dma, tx + offset) == 0xff)
         && (0..6).all(|offset| {
-            read_dma_u8(tx + 6 + offset) == [0x52, 0x54, 0x00, 0x12, 0x34, 0x56][offset]
+            read_dma_u8(dma, tx + 6 + offset) == [0x52, 0x54, 0x00, 0x12, 0x34, 0x56][offset]
         })
-        && read_dma_u8(tx + 12) == 0x08
-        && read_dma_u8(tx + 13) == 0x00
-        && read_dma_u8(tx + 23) == 17
-        && read_dma_u8(tx + 34) == 0
-        && read_dma_u8(tx + 35) == 68
-        && read_dma_u8(tx + 36) == 0
-        && read_dma_u8(tx + 37) == 67
-        && read_dma_u8(tx + 42) == 1
-        && read_dma_u8(tx + 282) == 53
-        && read_dma_u8(tx + 284) == 3
-        && read_dma_u8(rx + 12) == 0x08
-        && read_dma_u8(rx + 13) == 0x00
-        && read_dma_u8(rx + 23) == 17
-        && read_dma_u8(rx + 34) == 0
-        && read_dma_u8(rx + 35) == 67
-        && read_dma_u8(rx + 36) == 0
-        && read_dma_u8(rx + 37) == 68
-        && read_dma_u8(rx + 42) == 2
+        && read_dma_u8(dma, tx + 12) == 0x08
+        && read_dma_u8(dma, tx + 13) == 0x00
+        && read_dma_u8(dma, tx + 23) == 17
+        && read_dma_u8(dma, tx + 34) == 0
+        && read_dma_u8(dma, tx + 35) == 68
+        && read_dma_u8(dma, tx + 36) == 0
+        && read_dma_u8(dma, tx + 37) == 67
+        && read_dma_u8(dma, tx + 42) == 1
+        && read_dma_u8(dma, tx + 282) == 53
+        && read_dma_u8(dma, tx + 284) == 3
+        && read_dma_u8(dma, rx + 12) == 0x08
+        && read_dma_u8(dma, rx + 13) == 0x00
+        && read_dma_u8(dma, rx + 23) == 17
+        && read_dma_u8(dma, rx + 34) == 0
+        && read_dma_u8(dma, rx + 35) == 67
+        && read_dma_u8(dma, rx + 36) == 0
+        && read_dma_u8(dma, rx + 37) == 68
+        && read_dma_u8(dma, rx + 42) == 2
 }
 
 pub(crate) fn corrupt_network_service_arp_reply(dma_physical: u64, dma_virtual: usize) -> bool {
+    let Some(dma) = DmaView::from_direct_map(dma_physical, dma_virtual) else {
+        return false;
+    };
+    let dma = &dma;
     const ARP_OPERATION_LOW_BYTE: usize = NET_RX_BUFFER_OFFSET + 12 + 14 + 7;
     if !network_service_arp_exchange_is_complete(dma_physical, dma_virtual) {
         return false;
     }
-    write_dma_u8(dma_virtual + ARP_OPERATION_LOW_BYTE, 3);
-    read_dma_u8(dma_virtual + ARP_OPERATION_LOW_BYTE) == 3
+    write_dma_u8(dma, ARP_OPERATION_LOW_BYTE, 3);
+    read_dma_u8(dma, ARP_OPERATION_LOW_BYTE) == 3
 }
 
 pub(crate) fn quiesce_isolated_network(
@@ -2199,19 +2209,17 @@ pub(crate) fn quiesce_isolated_network(
 
 /// Transmits one fixed, bounded Ethernet frame through queue 1.
 ///
-/// # Safety
-///
-/// The caller must exclusively own the DMA page and have an active IOMMU
-/// translation restricting this function to that page until return.
-pub(crate) unsafe fn transmit_network_probe(
+/// The caller owns the DMA page's lease and keeps an IOMMU translation that
+/// restricts the device to that page active until return.
+pub(crate) fn transmit_network_probe(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
     notification_mapping: MmioMapping,
     msix_mapping: MmioMapping,
     apic: &LocalApic,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
 ) -> Option<VirtioNetworkTransmit> {
+    let dma_physical = dma.device_address(0);
     const HEADER_LENGTH: usize = 12;
     const ETHERNET_FRAME: [u8; 19] = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x88, 0xb5, b'L',
@@ -2219,7 +2227,6 @@ pub(crate) unsafe fn transmit_network_probe(
     ];
     const PAYLOAD_LENGTH: usize = HEADER_LENGTH + ETHERNET_FRAME.len();
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || !network_function_is_disabled(device)
         || PAYLOAD_LENGTH >= NET_BUFFER_LENGTH
     {
@@ -2231,7 +2238,7 @@ pub(crate) unsafe fn transmit_network_probe(
     if !install_virtio_interrupt_at(apic, VIRTIO_NETWORK_TX_VECTOR) {
         return None;
     }
-    core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
+    dma.fill(0, DMA_PAGE_SIZE, 0);
     pci_config::write_u16(
         device.bus,
         device.device,
@@ -2287,26 +2294,24 @@ pub(crate) unsafe fn transmit_network_probe(
         );
 
         write_dma_u64(
-            dma_virtual + NET_TX_DESC_OFFSET,
+            dma,
+            NET_TX_DESC_OFFSET,
             dma_physical + NET_TX_BUFFER_OFFSET as u64,
         );
-        write_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8, PAYLOAD_LENGTH as u32);
-        write_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12, 0);
-        write_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14, 0);
+        write_dma_u32(dma, NET_TX_DESC_OFFSET + 8, PAYLOAD_LENGTH as u32);
+        write_dma_u16(dma, NET_TX_DESC_OFFSET + 12, 0);
+        write_dma_u16(dma, NET_TX_DESC_OFFSET + 14, 0);
         for offset in 0..HEADER_LENGTH {
-            write_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset, 0);
+            write_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset, 0);
         }
         for (offset, byte) in ETHERNET_FRAME.into_iter().enumerate() {
-            write_dma_u8(
-                dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset,
-                byte,
-            );
+            write_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset, byte);
         }
-        write_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET - 1, 0x3c);
-        write_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH, 0xc3);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET, 0);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2, 1);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4, 0);
+        write_dma_u8(dma, NET_TX_BUFFER_OFFSET - 1, 0x3c);
+        write_dma_u8(dma, NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH, 0xc3);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET, 0);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2, 1);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4, 0);
         compiler_fence(Ordering::SeqCst);
         write_common_u16(&common, COMMON_QUEUE_ENABLE, 1);
         if read_common_u16(&common, COMMON_QUEUE_ENABLE) != 1
@@ -2346,20 +2351,20 @@ pub(crate) unsafe fn transmit_network_probe(
         compiler_fence(Ordering::SeqCst);
         write_mmio_u16(&notification, 0, 1);
         let interrupted = wait_for_one_virtio_interrupt();
-        let header_unchanged = (0..HEADER_LENGTH)
-            .all(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) == 0);
+        let header_unchanged =
+            (0..HEADER_LENGTH).all(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) == 0);
         let frame_unchanged = ETHERNET_FRAME.iter().enumerate().all(|(offset, expected)| {
-            read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) == *expected
+            read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) == *expected
         });
         let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         (interrupted
-            && read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) == 1
-            && read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) == 0
+            && read_dma_u16(dma, NET_TX_USED_OFFSET + 2) == 1
+            && read_dma_u32(dma, NET_TX_USED_OFFSET + 4) == 0
             && device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) == 0
             && header_unchanged
             && frame_unchanged
-            && read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET - 1) == 0x3c
-            && read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) == 0xc3)
+            && read_dma_u8(dma, NET_TX_BUFFER_OFFSET - 1) == 0x3c
+            && read_dma_u8(dma, NET_TX_BUFFER_OFFSET + PAYLOAD_LENGTH) == 0xc3)
             .then_some(VirtioNetworkTransmit {
                 frame_length: ETHERNET_FRAME.len() as u32,
             })
@@ -2395,19 +2400,17 @@ pub(crate) unsafe fn transmit_network_probe(
 
 /// Sends one ARP request and receives the bounded gateway reply through queue 0.
 ///
-/// # Safety
-///
-/// The caller must exclusively own the DMA page and have an active IOMMU
-/// translation restricting this function to that page until return.
-pub(crate) unsafe fn receive_network_arp_reply(
+/// The caller owns the DMA page's lease and keeps an IOMMU translation that
+/// restricts the device to that page active until return.
+pub(crate) fn receive_network_arp_reply(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
     notification_mapping: MmioMapping,
     msix_mapping: MmioMapping,
     apic: &LocalApic,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
 ) -> Option<VirtioNetworkReceive> {
+    let dma_physical = dma.device_address(0);
     let receive_physical = dma_physical.checked_add(NET_RX_BUFFER_OFFSET as u64)?;
     match network_arp_exchange(
         device,
@@ -2416,7 +2419,7 @@ pub(crate) unsafe fn receive_network_arp_reply(
         msix_mapping,
         apic,
         dma_physical,
-        dma_virtual,
+        dma,
         receive_physical,
         true,
     )? {
@@ -2427,21 +2430,19 @@ pub(crate) unsafe fn receive_network_arp_reply(
 
 /// Attempts one receive into an owned page absent from the active IOMMU map.
 ///
-/// # Safety
-///
-/// The caller must exclusively own both pages, map only `dma_physical` into the
-/// active device domain, and keep both leases live until return.
+/// The caller owns both pages' leases, maps only `dma` into the active device
+/// domain, and keeps both leases live until return.
 #[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn attempt_unmapped_network_receive(
+pub(crate) fn attempt_unmapped_network_receive(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
     notification_mapping: MmioMapping,
     msix_mapping: MmioMapping,
     apic: &LocalApic,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
     unmapped_physical: u64,
 ) -> Option<VirtioNetworkDmaFault> {
+    let dma_physical = dma.device_address(0);
     if !unmapped_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
         || unmapped_physical == dma_physical
         || unmapped_physical
@@ -2457,7 +2458,7 @@ pub(crate) unsafe fn attempt_unmapped_network_receive(
         msix_mapping,
         apic,
         dma_physical,
-        dma_virtual,
+        dma,
         unmapped_physical,
         false,
     )? {
@@ -2467,14 +2468,14 @@ pub(crate) unsafe fn attempt_unmapped_network_receive(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn network_arp_exchange(
+fn network_arp_exchange(
     device: VirtioNetworkDevice,
     common_mapping: MmioMapping,
     notification_mapping: MmioMapping,
     msix_mapping: MmioMapping,
     apic: &LocalApic,
     dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
     receive_physical: u64,
     expect_reply: bool,
 ) -> Option<NetworkArpOutcome> {
@@ -2494,7 +2495,6 @@ unsafe fn network_arp_exchange(
     let mapped_receive = dma_physical.checked_add(NET_RX_BUFFER_OFFSET as u64)?;
 
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || !network_function_is_disabled(device)
         || TX_LENGTH >= NET_BUFFER_LENGTH
         || receive_physical
@@ -2515,7 +2515,7 @@ unsafe fn network_arp_exchange(
         return None;
     }
 
-    core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
+    dma.fill(0, DMA_PAGE_SIZE, 0);
     pci_config::write_u16(
         device.bus,
         device.device,
@@ -2620,44 +2620,36 @@ unsafe fn network_arp_exchange(
             return None;
         }
 
-        write_dma_u64(dma_virtual + NET_RX_DESC_OFFSET, receive_physical);
-        write_dma_u32(
-            dma_virtual + NET_RX_DESC_OFFSET + 8,
-            RX_DESCRIPTOR_LENGTH as u32,
-        );
-        write_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 12, DESC_WRITE);
-        write_dma_u16(dma_virtual + NET_RX_DESC_OFFSET + 14, 0);
+        write_dma_u64(dma, NET_RX_DESC_OFFSET, receive_physical);
+        write_dma_u32(dma, NET_RX_DESC_OFFSET + 8, RX_DESCRIPTOR_LENGTH as u32);
+        write_dma_u16(dma, NET_RX_DESC_OFFSET + 12, DESC_WRITE);
+        write_dma_u16(dma, NET_RX_DESC_OFFSET + 14, 0);
         if expect_reply {
-            write_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1, 0x3c);
-            write_dma_u8(
-                dma_virtual + NET_RX_BUFFER_OFFSET + RX_DESCRIPTOR_LENGTH,
-                0xc3,
-            );
+            write_dma_u8(dma, NET_RX_BUFFER_OFFSET - 1, 0x3c);
+            write_dma_u8(dma, NET_RX_BUFFER_OFFSET + RX_DESCRIPTOR_LENGTH, 0xc3);
         }
-        write_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET, 0);
-        write_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 2, 1);
-        write_dma_u16(dma_virtual + NET_RX_AVAIL_OFFSET + 4, 0);
+        write_dma_u16(dma, NET_RX_AVAIL_OFFSET, 0);
+        write_dma_u16(dma, NET_RX_AVAIL_OFFSET + 2, 1);
+        write_dma_u16(dma, NET_RX_AVAIL_OFFSET + 4, 0);
 
         write_dma_u64(
-            dma_virtual + NET_TX_DESC_OFFSET,
+            dma,
+            NET_TX_DESC_OFFSET,
             dma_physical + NET_TX_BUFFER_OFFSET as u64,
         );
-        write_dma_u32(dma_virtual + NET_TX_DESC_OFFSET + 8, TX_LENGTH as u32);
-        write_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 12, 0);
-        write_dma_u16(dma_virtual + NET_TX_DESC_OFFSET + 14, 0);
+        write_dma_u32(dma, NET_TX_DESC_OFFSET + 8, TX_LENGTH as u32);
+        write_dma_u16(dma, NET_TX_DESC_OFFSET + 12, 0);
+        write_dma_u16(dma, NET_TX_DESC_OFFSET + 14, 0);
         for offset in 0..HEADER_LENGTH {
-            write_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset, 0);
+            write_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset, 0);
         }
         for (offset, byte) in ARP_REQUEST.into_iter().enumerate() {
-            write_dma_u8(
-                dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset,
-                byte,
-            );
+            write_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset, byte);
         }
-        write_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + TX_LENGTH, 0xa5);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET, 0);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 2, 1);
-        write_dma_u16(dma_virtual + NET_TX_AVAIL_OFFSET + 4, 0);
+        write_dma_u8(dma, NET_TX_BUFFER_OFFSET + TX_LENGTH, 0xa5);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET, 0);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET + 2, 1);
+        write_dma_u16(dma, NET_TX_AVAIL_OFFSET + 4, 0);
 
         compiler_fence(Ordering::SeqCst);
         write_common_u8(
@@ -2695,15 +2687,14 @@ unsafe fn network_arp_exchange(
         write_mmio_u16(&transmit_notification, 0, 1);
         let transmit_interrupted = wait_for_one_virtio_interrupt();
         let transmit_completed = transmit_interrupted
-            && read_dma_u16(dma_virtual + NET_TX_USED_OFFSET + 2) == 1
-            && read_dma_u32(dma_virtual + NET_TX_USED_OFFSET + 4) == 0
+            && read_dma_u16(dma, NET_TX_USED_OFFSET + 2) == 1
+            && read_dma_u32(dma, NET_TX_USED_OFFSET + 4) == 0
             && (0..HEADER_LENGTH)
-                .all(|offset| read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + offset) == 0)
+                .all(|offset| read_dma_u8(dma, NET_TX_BUFFER_OFFSET + offset) == 0)
             && ARP_REQUEST.iter().enumerate().all(|(offset, expected)| {
-                read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset)
-                    == *expected
+                read_dma_u8(dma, NET_TX_BUFFER_OFFSET + HEADER_LENGTH + offset) == *expected
             })
-            && read_dma_u8(dma_virtual + NET_TX_BUFFER_OFFSET + TX_LENGTH) == 0xa5;
+            && read_dma_u8(dma, NET_TX_BUFFER_OFFSET + TX_LENGTH) == 0xa5;
         if !transmit_completed
             || !set_msix_entry_mask_raw(device.msix_target(), msix_mapping, 1, true)
         {
@@ -2716,16 +2707,17 @@ unsafe fn network_arp_exchange(
             return None;
         }
         let receive_interrupted = wait_for_one_virtio_interrupt();
-        let receive_index = read_dma_u16(dma_virtual + NET_RX_USED_OFFSET + 2);
-        let receive_id = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 4);
-        let receive_length = read_dma_u32(dma_virtual + NET_RX_USED_OFFSET + 8);
+        let receive_index = read_dma_u16(dma, NET_RX_USED_OFFSET + 2);
+        let receive_id = read_dma_u32(dma, NET_RX_USED_OFFSET + 4);
+        let receive_length = read_dma_u32(dma, NET_RX_USED_OFFSET + 8);
         let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         let device_healthy = device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) == 0;
         if expect_reply {
-            let guards_valid = read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET - 1) == 0x3c
-                && read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + RX_DESCRIPTOR_LENGTH) == 0xc3;
+            let guards_valid = read_dma_u8(dma, NET_RX_BUFFER_OFFSET - 1) == 0x3c
+                && read_dma_u8(dma, NET_RX_BUFFER_OFFSET + RX_DESCRIPTOR_LENGTH) == 0xc3;
             let reply_valid = network_arp_reply_is_valid(
-                dma_virtual + NET_RX_BUFFER_OFFSET,
+                dma,
+                NET_RX_BUFFER_OFFSET,
                 receive_length,
                 GUEST_MAC,
                 GATEWAY_MAC,
@@ -2752,9 +2744,9 @@ unsafe fn network_arp_exchange(
             };
             (completion_bounded
                 && device_healthy
-                && read_dma_u64(dma_virtual + NET_RX_DESC_OFFSET) == receive_physical
+                && read_dma_u64(dma, NET_RX_DESC_OFFSET) == receive_physical
                 && (0..NET_BUFFER_LENGTH)
-                    .all(|offset| read_dma_u8(dma_virtual + NET_RX_BUFFER_OFFSET + offset) == 0))
+                    .all(|offset| read_dma_u8(dma, NET_RX_BUFFER_OFFSET + offset) == 0))
             .then_some(NetworkArpOutcome::DmaBlocked(VirtioNetworkDmaFault {
                 completion_published,
             }))
@@ -2793,6 +2785,7 @@ unsafe fn network_arp_exchange(
 }
 
 fn network_arp_reply_is_valid(
+    dma: &DmaView,
     buffer: usize,
     used_length: u32,
     guest_mac: [u8; 6],
@@ -2804,51 +2797,47 @@ fn network_arp_reply_is_valid(
     const ARP_LENGTH: usize = 42;
     if used_length < (HEADER_LENGTH + ARP_LENGTH) as u32
         || used_length > (NET_BUFFER_LENGTH - 1) as u32
-        || !(0..10).all(|offset| read_dma_u8(buffer + offset) == 0)
-        || read_dma_u16(buffer + 10) != 1
+        || !(0..10).all(|offset| read_dma_u8(dma, buffer + offset) == 0)
+        || read_dma_u16(dma, buffer + 10) != 1
     {
         return false;
     }
     let frame = buffer + HEADER_LENGTH;
-    bytes_match(frame, &guest_mac)
-        && bytes_match(frame + 6, &gateway_mac)
-        && bytes_match(frame + 12, &[0x08, 0x06])
+    bytes_match(dma, frame, &guest_mac)
+        && bytes_match(dma, frame + 6, &gateway_mac)
+        && bytes_match(dma, frame + 12, &[0x08, 0x06])
         && bytes_match(
+            dma,
             frame + 14,
             &[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02],
         )
-        && bytes_match(frame + 22, &gateway_mac)
-        && bytes_match(frame + 28, &gateway_ip)
-        && bytes_match(frame + 32, &guest_mac)
-        && bytes_match(frame + 38, &guest_ip)
+        && bytes_match(dma, frame + 22, &gateway_mac)
+        && bytes_match(dma, frame + 28, &gateway_ip)
+        && bytes_match(dma, frame + 32, &guest_mac)
+        && bytes_match(dma, frame + 38, &guest_ip)
 }
 
-fn bytes_match(address: usize, expected: &[u8]) -> bool {
+fn bytes_match(dma: &DmaView, address: usize, expected: &[u8]) -> bool {
     expected
         .iter()
         .enumerate()
-        .all(|(offset, byte)| read_dma_u8(address + offset) == *byte)
+        .all(|(offset, byte)| read_dma_u8(dma, address + offset) == *byte)
 }
 
 /// Executes one interrupt-driven read-only DMA request using one caller-owned
 /// page and one kernel-owned MSI-X vector.
 ///
-/// # Safety
-///
-/// `dma_virtual` must be a writable direct-map alias of the complete physical
-/// page at `dma_physical`, and that page must remain exclusively owned until
-/// this function returns.
-pub(crate) unsafe fn read_blank_sector_interrupt(
+/// The caller owns `dma`'s lease until this function returns.
+pub(crate) fn read_blank_sector_interrupt(
     device: VirtioBlockDevice,
     mapping: MmioMapping,
     msix_mapping: MmioMapping,
     apic: &LocalApic,
-    dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
     sector: u64,
 ) -> Option<VirtioBlockRead> {
+    let dma_physical = dma.device_address(0);
     if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-        || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
         || dma_physical.checked_add(DMA_PAGE_SIZE as u64).is_none()
     {
         return None;
@@ -2918,7 +2907,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
             return None;
         }
 
-        prepare_read_request(dma_physical, dma_virtual, sector);
+        prepare_read_request(dma_physical, dma, sector);
         write_common_u64(
             &common,
             COMMON_QUEUE_DESC,
@@ -2973,16 +2962,16 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
         let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         if !interrupted
             || device_status & (STATUS_DEVICE_NEEDS_RESET | STATUS_FAILED) != 0
-            || read_dma_u16(dma_virtual + USED_OFFSET + 2) != 1
-            || read_dma_u32(dma_virtual + USED_OFFSET + 4) != 0
-            || read_dma_u8(dma_virtual + STATUS_OFFSET) != 0
-            || read_dma_u8(dma_virtual + DATA_OFFSET - 1) != 0x3c
-            || read_dma_u8(dma_virtual + DATA_OFFSET + DATA_LENGTH) != 0xc3
-            || (0..DATA_LENGTH).any(|offset| read_dma_u8(dma_virtual + DATA_OFFSET + offset) != 0)
+            || read_dma_u16(dma, USED_OFFSET + 2) != 1
+            || read_dma_u32(dma, USED_OFFSET + 4) != 0
+            || read_dma_u8(dma, STATUS_OFFSET) != 0
+            || read_dma_u8(dma, DATA_OFFSET - 1) != 0x3c
+            || read_dma_u8(dma, DATA_OFFSET + DATA_LENGTH) != 0xc3
+            || (0..DATA_LENGTH).any(|offset| read_dma_u8(dma, DATA_OFFSET + offset) != 0)
         {
             return None;
         }
-        let used_length = read_dma_u32(dma_virtual + USED_OFFSET + 8);
+        let used_length = read_dma_u32(dma, USED_OFFSET + 8);
         (used_length == (DATA_LENGTH + 1) as u32).then_some(VirtioBlockRead {
             capacity_sectors,
             used_length,
@@ -3015,19 +3004,15 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
 impl VirtioBlockBackend {
     /// Activates queue zero over one exclusively owned DMA page.
     ///
-    /// # Safety
-    ///
-    /// The DMA addresses must satisfy the same ownership and alias contract as
-    /// [`read_blank_sector_interrupt`] and remain live until `finish`
-    /// succeeds.
-    pub(crate) unsafe fn start(
+    /// The caller owns `dma`'s lease, as for [`read_blank_sector_interrupt`],
+    /// until `finish` succeeds.
+    pub(crate) fn start(
         device: VirtioBlockDevice,
         mapping: MmioMapping,
-        dma_physical: u64,
-        dma_virtual: usize,
+        dma: DmaView,
     ) -> Option<Self> {
+        let dma_physical = dma.device_address(0);
         if !dma_physical.is_multiple_of(DMA_PAGE_SIZE as u64)
-            || !dma_virtual.is_multiple_of(DMA_PAGE_SIZE)
             || dma_physical.checked_add(DMA_PAGE_SIZE as u64).is_none()
         {
             return None;
@@ -3078,7 +3063,7 @@ impl VirtioBlockBackend {
                 return None;
             }
 
-            unsafe { core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE) };
+            dma.fill(0, DMA_PAGE_SIZE, 0);
             write_common_u64(
                 &common,
                 COMMON_QUEUE_DESC,
@@ -3115,7 +3100,7 @@ impl VirtioBlockBackend {
                 common: Mmio::mapped(mapping, common_physical, common_length)?,
                 notification,
                 dma_physical,
-                dma_virtual,
+                dma,
                 capacity_sectors,
                 queue_size,
                 available_index: 0,
@@ -3180,35 +3165,36 @@ impl VirtioBlockBackend {
         }
         prepare_operation(
             self.dma_physical,
-            self.dma_virtual,
+            &self.dma,
             0,
             sector,
             DATA_LENGTH,
             true,
             None,
         );
-        write_dma_u64(self.dma_virtual + DESC_OFFSET + 16, unmapped_physical);
+        write_dma_u64(&self.dma, DESC_OFFSET + 16, unmapped_physical);
 
         let available_slot = usize::from(self.available_index % self.queue_size);
         let used_slot = usize::from(self.used_index % self.queue_size);
         let expected_used_index = self.used_index.wrapping_add(1);
-        if read_dma_u16(self.dma_virtual + USED_OFFSET + 2) != self.used_index {
+        if read_dma_u16(&self.dma, USED_OFFSET + 2) != self.used_index {
             return None;
         }
         write_dma_u16(
-            self.dma_virtual + AVAIL_OFFSET + 4 + available_slot * size_of::<u16>(),
+            &self.dma,
+            AVAIL_OFFSET + 4 + available_slot * size_of::<u16>(),
             0,
         );
         compiler_fence(Ordering::SeqCst);
         let expected_available = self.available_index.wrapping_add(1);
-        write_dma_u16(self.dma_virtual + AVAIL_OFFSET + 2, expected_available);
+        write_dma_u16(&self.dma, AVAIL_OFFSET + 2, expected_available);
         self.available_index = expected_available;
         write_mmio_u16(&self.notification, 0, 0);
 
         let mut completed = false;
         for _ in 0..QUEUE_POLL_LIMIT {
             compiler_fence(Ordering::SeqCst);
-            if read_dma_u16(self.dma_virtual + USED_OFFSET + 2) == expected_used_index {
+            if read_dma_u16(&self.dma, USED_OFFSET + 2) == expected_used_index {
                 completed = true;
                 break;
             }
@@ -3221,20 +3207,19 @@ impl VirtioBlockBackend {
             core::hint::spin_loop();
         }
         compiler_fence(Ordering::SeqCst);
-        let used_element = self.dma_virtual + USED_OFFSET + 4 + used_slot * 8;
+        let used_element = USED_OFFSET + 4 + used_slot * 8;
         Some(UnmappedDmaAttempt {
             completion_published: completed,
-            used_index: read_dma_u16(self.dma_virtual + USED_OFFSET + 2),
-            used_id: read_dma_u32(used_element),
-            used_length: read_dma_u32(used_element + 4),
-            request_status: read_dma_u8(self.dma_virtual + STATUS_OFFSET),
+            used_index: read_dma_u16(&self.dma, USED_OFFSET + 2),
+            used_id: read_dma_u32(&self.dma, used_element),
+            used_length: read_dma_u32(&self.dma, used_element + 4),
+            request_status: read_dma_u8(&self.dma, STATUS_OFFSET),
             device_status: read_common_u8(&self.common, COMMON_DEVICE_STATUS),
-            mapped_payload_unchanged: read_dma_u8(self.dma_virtual + DATA_OFFSET - 1) == 0x3c
-                && read_dma_u8(self.dma_virtual + DATA_OFFSET + DATA_LENGTH) == 0xc3
+            mapped_payload_unchanged: read_dma_u8(&self.dma, DATA_OFFSET - 1) == 0x3c
+                && read_dma_u8(&self.dma, DATA_OFFSET + DATA_LENGTH) == 0xc3
                 && (0..DATA_LENGTH)
-                    .all(|offset| read_dma_u8(self.dma_virtual + DATA_OFFSET + offset) == 0xa5),
-            descriptor_unchanged: read_dma_u64(self.dma_virtual + DESC_OFFSET + 16)
-                == unmapped_physical,
+                    .all(|offset| read_dma_u8(&self.dma, DATA_OFFSET + offset) == 0xa5),
+            descriptor_unchanged: read_dma_u64(&self.dma, DESC_OFFSET + 16) == unmapped_physical,
         })
     }
 
@@ -3259,7 +3244,7 @@ impl VirtioBlockBackend {
         }
         prepare_operation(
             self.dma_physical,
-            self.dma_virtual,
+            &self.dma,
             request_type,
             sector,
             data_length,
@@ -3272,16 +3257,17 @@ impl VirtioBlockBackend {
 
         let available_slot = usize::from(self.available_index % self.queue_size);
         let used_slot = usize::from(self.used_index % self.queue_size);
-        if read_dma_u16(self.dma_virtual + USED_OFFSET + 2) != self.used_index {
+        if read_dma_u16(&self.dma, USED_OFFSET + 2) != self.used_index {
             return false;
         }
         write_dma_u16(
-            self.dma_virtual + AVAIL_OFFSET + 4 + available_slot * size_of::<u16>(),
+            &self.dma,
+            AVAIL_OFFSET + 4 + available_slot * size_of::<u16>(),
             0,
         );
         compiler_fence(Ordering::SeqCst);
         let expected_available = self.available_index.wrapping_add(1);
-        write_dma_u16(self.dma_virtual + AVAIL_OFFSET + 2, expected_available);
+        write_dma_u16(&self.dma, AVAIL_OFFSET + 2, expected_available);
         self.available_index = expected_available;
         write_mmio_u16(&self.notification, 0, 0);
 
@@ -3295,28 +3281,28 @@ impl VirtioBlockBackend {
             {
                 return false;
             }
-            if read_dma_u16(self.dma_virtual + USED_OFFSET + 2) == expected_used_index {
+            if read_dma_u16(&self.dma, USED_OFFSET + 2) == expected_used_index {
                 completed = true;
                 break;
             }
             core::hint::spin_loop();
         }
         compiler_fence(Ordering::SeqCst);
-        let used_element = self.dma_virtual + USED_OFFSET + 4 + used_slot * 8;
+        let used_element = USED_OFFSET + 4 + used_slot * 8;
         if !completed
-            || read_dma_u32(used_element) != 0
-            || read_dma_u32(used_element + 4) != expected_used
-            || read_dma_u8(self.dma_virtual + STATUS_OFFSET) != 0
+            || read_dma_u32(&self.dma, used_element) != 0
+            || read_dma_u32(&self.dma, used_element + 4) != expected_used
+            || read_dma_u8(&self.dma, STATUS_OFFSET) != 0
             || (data_length != 0
-                && (read_dma_u8(self.dma_virtual + DATA_OFFSET - 1) != 0x3c
-                    || read_dma_u8(self.dma_virtual + DATA_OFFSET + data_length) != 0xc3))
+                && (read_dma_u8(&self.dma, DATA_OFFSET - 1) != 0x3c
+                    || read_dma_u8(&self.dma, DATA_OFFSET + data_length) != 0xc3))
         {
             return false;
         }
         self.used_index = expected_used_index;
         if let BlockOperation::Read { output, .. } = operation {
             for (offset, byte) in output.iter_mut().enumerate() {
-                *byte = read_dma_u8(self.dma_virtual + DATA_OFFSET + offset);
+                *byte = read_dma_u8(&self.dma, DATA_OFFSET + offset);
             }
         }
         true
@@ -4007,108 +3993,82 @@ fn read_capacity(common: &Mmio, device_configuration: &Mmio) -> Option<u64> {
     None
 }
 
-fn prepare_read_request(dma_physical: u64, dma_virtual: usize, sector: u64) {
-    unsafe { core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE) };
-    write_dma_u64(
-        dma_virtual + DESC_OFFSET,
-        dma_physical + REQUEST_OFFSET as u64,
-    );
-    write_dma_u32(dma_virtual + DESC_OFFSET + 8, 16);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 12, DESC_NEXT);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 14, 1);
+fn prepare_read_request(dma_physical: u64, dma: &DmaView, sector: u64) {
+    dma.fill(0, DMA_PAGE_SIZE, 0);
+    write_dma_u64(dma, DESC_OFFSET, dma_physical + REQUEST_OFFSET as u64);
+    write_dma_u32(dma, DESC_OFFSET + 8, 16);
+    write_dma_u16(dma, DESC_OFFSET + 12, DESC_NEXT);
+    write_dma_u16(dma, DESC_OFFSET + 14, 1);
 
-    write_dma_u64(
-        dma_virtual + DESC_OFFSET + 16,
-        dma_physical + DATA_OFFSET as u64,
-    );
-    write_dma_u32(dma_virtual + DESC_OFFSET + 24, DATA_LENGTH as u32);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 28, DESC_NEXT | DESC_WRITE);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 30, 2);
+    write_dma_u64(dma, DESC_OFFSET + 16, dma_physical + DATA_OFFSET as u64);
+    write_dma_u32(dma, DESC_OFFSET + 24, DATA_LENGTH as u32);
+    write_dma_u16(dma, DESC_OFFSET + 28, DESC_NEXT | DESC_WRITE);
+    write_dma_u16(dma, DESC_OFFSET + 30, 2);
 
-    write_dma_u64(
-        dma_virtual + DESC_OFFSET + 32,
-        dma_physical + STATUS_OFFSET as u64,
-    );
-    write_dma_u32(dma_virtual + DESC_OFFSET + 40, 1);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 44, DESC_WRITE);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 46, 0);
+    write_dma_u64(dma, DESC_OFFSET + 32, dma_physical + STATUS_OFFSET as u64);
+    write_dma_u32(dma, DESC_OFFSET + 40, 1);
+    write_dma_u16(dma, DESC_OFFSET + 44, DESC_WRITE);
+    write_dma_u16(dma, DESC_OFFSET + 46, 0);
 
-    write_dma_u32(dma_virtual + REQUEST_OFFSET, 0);
-    write_dma_u32(dma_virtual + REQUEST_OFFSET + 4, 0);
-    write_dma_u64(dma_virtual + REQUEST_OFFSET + 8, sector);
-    unsafe {
-        core::ptr::write_bytes((dma_virtual + DATA_OFFSET) as *mut u8, 0xa5, DATA_LENGTH);
-    }
-    write_dma_u8(dma_virtual + DATA_OFFSET - 1, 0x3c);
-    write_dma_u8(dma_virtual + DATA_OFFSET + DATA_LENGTH, 0xc3);
-    write_dma_u8(dma_virtual + STATUS_OFFSET, 0xff);
+    write_dma_u32(dma, REQUEST_OFFSET, 0);
+    write_dma_u32(dma, REQUEST_OFFSET + 4, 0);
+    write_dma_u64(dma, REQUEST_OFFSET + 8, sector);
+    dma.fill(DATA_OFFSET, DATA_LENGTH, 0xa5);
+    write_dma_u8(dma, DATA_OFFSET - 1, 0x3c);
+    write_dma_u8(dma, DATA_OFFSET + DATA_LENGTH, 0xc3);
+    write_dma_u8(dma, STATUS_OFFSET, 0xff);
 
-    write_dma_u16(dma_virtual + AVAIL_OFFSET, 0);
-    write_dma_u16(dma_virtual + AVAIL_OFFSET + 2, 1);
-    write_dma_u16(dma_virtual + AVAIL_OFFSET + 4, 0);
+    write_dma_u16(dma, AVAIL_OFFSET, 0);
+    write_dma_u16(dma, AVAIL_OFFSET + 2, 1);
+    write_dma_u16(dma, AVAIL_OFFSET + 4, 0);
     compiler_fence(Ordering::SeqCst);
 }
 
 fn prepare_operation(
     dma_physical: u64,
-    dma_virtual: usize,
+    dma: &DmaView,
     request_type: u32,
     sector: u64,
     data_length: usize,
     device_writes: bool,
     input: Option<&[u8]>,
 ) {
-    unsafe {
-        core::ptr::write_bytes((dma_virtual + DESC_OFFSET) as *mut u8, 0, 3 * 16);
-        core::ptr::write_bytes((dma_virtual + REQUEST_OFFSET) as *mut u8, 0, 16);
-    }
-    write_dma_u32(dma_virtual + REQUEST_OFFSET, request_type);
-    write_dma_u64(dma_virtual + REQUEST_OFFSET + 8, sector);
-    write_dma_u64(
-        dma_virtual + DESC_OFFSET,
-        dma_physical + REQUEST_OFFSET as u64,
-    );
-    write_dma_u32(dma_virtual + DESC_OFFSET + 8, 16);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 12, DESC_NEXT);
-    write_dma_u16(dma_virtual + DESC_OFFSET + 14, 1);
+    dma.fill(DESC_OFFSET, 3 * 16, 0);
+    dma.fill(REQUEST_OFFSET, 16, 0);
+    write_dma_u32(dma, REQUEST_OFFSET, request_type);
+    write_dma_u64(dma, REQUEST_OFFSET + 8, sector);
+    write_dma_u64(dma, DESC_OFFSET, dma_physical + REQUEST_OFFSET as u64);
+    write_dma_u32(dma, DESC_OFFSET + 8, 16);
+    write_dma_u16(dma, DESC_OFFSET + 12, DESC_NEXT);
+    write_dma_u16(dma, DESC_OFFSET + 14, 1);
 
     if data_length != 0 {
-        write_dma_u64(
-            dma_virtual + DESC_OFFSET + 16,
-            dma_physical + DATA_OFFSET as u64,
-        );
-        write_dma_u32(dma_virtual + DESC_OFFSET + 24, data_length as u32);
+        write_dma_u64(dma, DESC_OFFSET + 16, dma_physical + DATA_OFFSET as u64);
+        write_dma_u32(dma, DESC_OFFSET + 24, data_length as u32);
         write_dma_u16(
-            dma_virtual + DESC_OFFSET + 28,
+            dma,
+            DESC_OFFSET + 28,
             DESC_NEXT | if device_writes { DESC_WRITE } else { 0 },
         );
-        write_dma_u16(dma_virtual + DESC_OFFSET + 30, 2);
-        write_dma_u64(
-            dma_virtual + DESC_OFFSET + 32,
-            dma_physical + STATUS_OFFSET as u64,
-        );
-        write_dma_u32(dma_virtual + DESC_OFFSET + 40, 1);
-        write_dma_u16(dma_virtual + DESC_OFFSET + 44, DESC_WRITE);
+        write_dma_u16(dma, DESC_OFFSET + 30, 2);
+        write_dma_u64(dma, DESC_OFFSET + 32, dma_physical + STATUS_OFFSET as u64);
+        write_dma_u32(dma, DESC_OFFSET + 40, 1);
+        write_dma_u16(dma, DESC_OFFSET + 44, DESC_WRITE);
         if let Some(input) = input {
             for (offset, byte) in input.iter().copied().enumerate() {
-                write_dma_u8(dma_virtual + DATA_OFFSET + offset, byte);
+                write_dma_u8(dma, DATA_OFFSET + offset, byte);
             }
         } else {
-            unsafe {
-                core::ptr::write_bytes((dma_virtual + DATA_OFFSET) as *mut u8, 0xa5, data_length);
-            }
+            dma.fill(DATA_OFFSET, data_length, 0xa5);
         }
-        write_dma_u8(dma_virtual + DATA_OFFSET - 1, 0x3c);
-        write_dma_u8(dma_virtual + DATA_OFFSET + data_length, 0xc3);
-        write_dma_u8(dma_virtual + STATUS_OFFSET, 0xff);
+        write_dma_u8(dma, DATA_OFFSET - 1, 0x3c);
+        write_dma_u8(dma, DATA_OFFSET + data_length, 0xc3);
+        write_dma_u8(dma, STATUS_OFFSET, 0xff);
     } else {
-        write_dma_u64(
-            dma_virtual + DESC_OFFSET + 16,
-            dma_physical + STATUS_OFFSET as u64,
-        );
-        write_dma_u32(dma_virtual + DESC_OFFSET + 24, 1);
-        write_dma_u16(dma_virtual + DESC_OFFSET + 28, DESC_WRITE);
-        write_dma_u8(dma_virtual + STATUS_OFFSET, 0xff);
+        write_dma_u64(dma, DESC_OFFSET + 16, dma_physical + STATUS_OFFSET as u64);
+        write_dma_u32(dma, DESC_OFFSET + 24, 1);
+        write_dma_u16(dma, DESC_OFFSET + 28, DESC_WRITE);
+        write_dma_u8(dma, STATUS_OFFSET, 0xff);
     }
     compiler_fence(Ordering::SeqCst);
 }
@@ -4201,36 +4161,36 @@ fn write_mmio_u16(registers: &Mmio, offset: usize, value: u16) {
     compiler_fence(Ordering::SeqCst);
 }
 
-fn read_dma_u8(address: usize) -> u8 {
-    unsafe { read_volatile(address as *const u8) }
+fn read_dma_u8(dma: &DmaView, offset: usize) -> u8 {
+    dma.read::<u8>(offset)
 }
 
-fn read_dma_u16(address: usize) -> u16 {
-    u16::from_le(unsafe { read_volatile(address as *const u16) })
+fn read_dma_u16(dma: &DmaView, offset: usize) -> u16 {
+    u16::from_le(dma.read::<u16>(offset))
 }
 
-fn read_dma_u32(address: usize) -> u32 {
-    u32::from_le(unsafe { read_volatile(address as *const u32) })
+fn read_dma_u32(dma: &DmaView, offset: usize) -> u32 {
+    u32::from_le(dma.read::<u32>(offset))
 }
 
-fn read_dma_u64(address: usize) -> u64 {
-    u64::from_le(unsafe { read_volatile(address as *const u64) })
+fn read_dma_u64(dma: &DmaView, offset: usize) -> u64 {
+    u64::from_le(dma.read::<u64>(offset))
 }
 
-fn write_dma_u8(address: usize, value: u8) {
-    unsafe { write_volatile(address as *mut u8, value) };
+fn write_dma_u8(dma: &DmaView, offset: usize, value: u8) {
+    dma.write::<u8>(offset, value);
 }
 
-fn write_dma_u16(address: usize, value: u16) {
-    unsafe { write_volatile(address as *mut u16, value.to_le()) };
+fn write_dma_u16(dma: &DmaView, offset: usize, value: u16) {
+    dma.write::<u16>(offset, value.to_le());
 }
 
-fn write_dma_u32(address: usize, value: u32) {
-    unsafe { write_volatile(address as *mut u32, value.to_le()) };
+fn write_dma_u32(dma: &DmaView, offset: usize, value: u32) {
+    dma.write::<u32>(offset, value.to_le());
 }
 
-fn write_dma_u64(address: usize, value: u64) {
-    unsafe { write_volatile(address as *mut u64, value.to_le()) };
+fn write_dma_u64(dma: &DmaView, offset: usize, value: u64) {
+    dma.write::<u64>(offset, value.to_le());
 }
 
 fn parse_virtio_block(

@@ -665,6 +665,54 @@ root filesystem's entries are `Entry<'static>` borrowed by callers in
 (`linux_signal`: senders hold locks up to the heap's rank, so its lock
 needs a rank audit first).
 
+**Done so far (2026-11-09, continued): boot, entry stubs, locks, paging
+and virtio into the core.** `trusted/` now also holds:
+`interrupts` (the interrupt-flag and halt sequences; why changing IF is
+not a memory-safety operation here), `lock` (`SpinLock`, `IrqSpinLock`,
+re-exported by `sync.rs`, which keeps the ranks and the kernel-entry
+lock), `owned_state` (re-exported by `owned_state.rs`; `Sync` now needs
+`T: Send + Sync`), `entry` (the register-saving stubs of the virtio, local
+APIC timer and IPI vectors; the virtio and timer handlers take
+`&mut UserInterruptFrame`),
+`ap_start` (the AP trampoline and its mailbox, filled only with the kernel
+root, the CPU's own stack and a safe entry), `boot` (`kernel_entry`, the
+boot stack, and `Handoff`: the loader's `BootInfo` after its checks, with
+memory-map descriptors by index, the boot inputs as `&'static [u8]`,
+`ResetSystem` and the firmware console), `control` (control registers,
+RSP, CS, CR0.WP, `ud2`), `crash` (the bring-up exception table and stubs,
+the live page-table walk, crashed-stack reads, a sequence-locked stage
+text), `take_once` (a static handed out as `&'static mut` once), `tsc`,
+`dma::DmaFrame` (a frame-allocator page shared with a virtio device,
+volatile and bounds-checked like `DmaPages`), `Frame::with_extent_mut`
+(a scoped in-place view of a fresh contiguous extent) and
+`root::{install,activate}_kernel_root`. `kernel_main` is a safe function
+that takes the handoff; the static page tables in `paging.rs` are
+`AtomicU64` arrays written by index, so the boot install needs no raw
+pointers; `pci.rs`'s virtio queues and `linux_socket/virtio_net.rs` reach
+their DMA page only through `DmaFrame` and their notification registers
+through `Mmio`, and copy frames in and out instead of borrowing the
+buffers. `sync.rs`, `owned_state.rs`, `smp.rs`, `timer.rs`, `paging.rs`,
+`pci.rs`, `linux_socket/virtio_net.rs` and `bringup/trap.rs` carry
+`#![forbid(unsafe_code)]`; `lib.rs` has no unsafe left and the crate root
+now denies unsafe code (part of step 4, §6): the 23 modules that still
+hold some are allowed it on their `mod` line, a list
+`check-kernel-unsafe.sh` lets only shrink. Assembly is confined to
+`trusted/`, `cpu.rs`, `cpu/` and `address_space.rs`. Site counts went
+`pci.rs` 25 -> 0, `virtio_net.rs` 10 -> 0, `lib.rs` 20 -> 0, `paging.rs`
+13 -> 0, `trap.rs` 10 -> 0, `bringup/mod.rs` 8 -> 3, `smp.rs` 8 -> 0,
+`timer.rs` 8 -> 0, `sync.rs` 7 -> 0, `owned_state.rs` 4 -> 0; kernel
+`unsafe` blocks 599 -> 550, blocks without a SAFETY comment 266 -> 231,
+`static mut` 19 -> 17. Not yet done: `bringup/mod.rs` still calls three
+`unsafe fn` driver constructors (`xhci::Controller::open`,
+`amd_iommu::DeviceTableBuilder::new`, `amd_iommu::Remapping::enable`),
+which go when the drivers make them safe; `OwnedState`'s two documented
+gaps (`reset` while `get` references may live, the safe
+`publish_initialized`) go when `scheduler.rs` moves its workspace to a
+lock; and the `pci.rs` functions `address_space.rs` calls still take the
+DMA page as a (physical, direct-map) pair, checked into a `DmaFrame`
+(`DmaFrame::from_direct_map`, which the check script confines to `pci.rs`
+and the memory layer) until `address_space.rs` passes its lease.
+
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
 operations of eight `unsafe fn`s in `cpu.rs` and step 4 adds one line at the

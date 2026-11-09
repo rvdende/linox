@@ -4,13 +4,15 @@
 //! interface's own addresses never reach the device; they wait in a
 //! loopback queue and are received on the next pass.
 //!
-//! The unsafe code of the socket layer is here: volatile accesses to the DMA
-//! page and the device's notification registers, which `start` vouches for.
+//! The DMA page is a `trusted::dma::DmaView` and the notification
+//! registers `trusted::mmio::Mmio` windows: every access is volatile and
+//! bounds-checked, and frames are copied in and out of the page, never
+//! borrowed from it.
+#![forbid(unsafe_code)]
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, Ordering};
 
 use smoltcp::phy::{
@@ -25,6 +27,7 @@ use smoltcp::wire::{
 use super::Platform;
 use crate::arch::x86_64::{iommu::DeviceTranslation, pci};
 use crate::memory;
+use crate::trusted::{dma::DmaView, mmio::Mmio};
 
 const PAGE_SIZE: usize = 4096;
 const QUEUE_SIZE: u16 = 8;
@@ -42,15 +45,19 @@ const VIRTIO_HEADER_LENGTH: usize = 12;
 /// busy wire would.
 pub(super) const LOOPBACK_FRAME_COUNT: usize = 16;
 const FRAME_SIZE: usize = 1514;
+/// The longest frame the receive buffer holds after its virtio header.
+const RX_FRAME_CAPACITY: usize = RX_DESCRIPTOR_LENGTH - VIRTIO_HEADER_LENGTH;
+/// The longest frame the transmit buffer holds after its virtio header.
+const TX_FRAME_CAPACITY: usize = PAGE_SIZE - TX_BUFFER_OFFSET - VIRTIO_HEADER_LENGTH;
 
 pub(super) struct VirtioNet {
-    /// The DMA page's kernel address and the address the device uses.
-    dma: usize,
+    /// The DMA page, and the address the device uses for it.
+    dma: DmaView,
     dma_device: u64,
     dma_frame: memory::FrameLease,
     translation: DeviceTranslation,
-    rx_notify: usize,
-    tx_notify: usize,
+    rx_notify: Mmio,
+    tx_notify: Mmio,
     local_address: u32,
     rx_avail: Cell<u16>,
     rx_used: Cell<u16>,
@@ -67,15 +74,22 @@ impl VirtioNet {
     /// Gives the device a DMA page, confined to it by the I/O MMU, and
     /// starts its queues, for an interface with IPv4 `local_address`.
     pub(super) fn start(platform: &Platform, local_address: u32) -> Option<Self> {
-        let rx_notify = platform
-            .notification
-            .address(platform.initialization.receive_notification, 2)?;
-        let tx_notify = platform
-            .notification
-            .address(platform.initialization.transmit_notification, 2)?;
+        let rx_notify = Mmio::mapped(
+            platform.notification,
+            platform.initialization.receive_notification,
+            2,
+        )?;
+        let tx_notify = Mmio::mapped(
+            platform.notification,
+            platform.initialization.transmit_notification,
+            2,
+        )?;
+        if !rx_notify.is_aligned(2) || !tx_notify.is_aligned(2) {
+            return None;
+        }
         let [dma_frame] = memory::allocate_frames::<1>(memory::FrameOwner::KERNEL)?;
         let release = || memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[dma_frame]);
-        let Some(dma) = dma_frame.direct_map_address() else {
+        let Some(dma) = DmaView::leased(dma_frame) else {
             let _ = release();
             return None;
         };
@@ -83,18 +97,11 @@ impl VirtioNet {
             let _ = release();
             return None;
         };
-        // SAFETY: the kernel owns the freshly allocated DMA page, and the
-        // active translation confines the device to it; both live in the
-        // returned value until `stop` resets the device.
+        // The kernel owns the freshly allocated DMA page, and the active
+        // translation confines the device to it; both live in the returned
+        // value until `stop` resets the device.
         if !translation.is_active()
-            || !unsafe {
-                pci::activate_kernel_network_queues(
-                    platform.device,
-                    platform.common,
-                    dma_frame.address(),
-                    dma,
-                )
-            }
+            || !pci::activate_kernel_network_queues(platform.device, platform.common, &dma)
         {
             let _ = translation.finish();
             let _ = release();
@@ -151,9 +158,7 @@ impl VirtioNet {
         self.rx_avail.set(avail.wrapping_add(1));
         compiler_fence(Ordering::SeqCst);
         self.write_u16(RX_AVAIL_OFFSET + 2, self.rx_avail.get());
-        // SAFETY: start found the receive notification register in the
-        // device's mapped notification window.
-        unsafe { write_volatile(self.rx_notify as *mut u16, 0) };
+        self.rx_notify.write::<u16>(0, 0);
     }
 
     fn post_transmit(&self, length: usize) {
@@ -166,8 +171,7 @@ impl VirtioNet {
         self.tx_avail.set(avail.wrapping_add(1));
         compiler_fence(Ordering::SeqCst);
         self.write_u16(TX_AVAIL_OFFSET + 2, self.tx_avail.get());
-        // SAFETY: as in post_receive, for the transmit register.
-        unsafe { write_volatile(self.tx_notify as *mut u16, 1) };
+        self.tx_notify.write::<u16>(0, 1);
     }
 
     /// Queues `frame` to be received on the next pass (a frame to the
@@ -188,43 +192,24 @@ impl VirtioNet {
         }
     }
 
-    /// The address of `size` bytes at `offset` in the DMA page, which the
-    /// device's buffers and rings all lie in.
-    fn dma_address(&self, offset: usize, size: usize) -> usize {
-        assert!(offset + size <= PAGE_SIZE);
-        self.dma + offset
-    }
-
-    /// The address of a `size`-byte ring field at `offset`, which is
-    /// aligned to its size.
-    fn dma_field(&self, offset: usize, size: usize) -> usize {
-        assert!(offset.is_multiple_of(size));
-        self.dma_address(offset, size)
-    }
-
     fn read_u16(&self, offset: usize) -> u16 {
-        // SAFETY: start's DMA page stays mapped and owned while self lives.
-        unsafe { read_volatile(self.dma_field(offset, 2) as *const u16) }
+        self.dma.read::<u16>(offset)
     }
 
     fn read_u32(&self, offset: usize) -> u32 {
-        // SAFETY: as for read_u16.
-        unsafe { read_volatile(self.dma_field(offset, 4) as *const u32) }
+        self.dma.read::<u32>(offset)
     }
 
     fn write_u16(&self, offset: usize, value: u16) {
-        // SAFETY: as for read_u16.
-        unsafe { write_volatile(self.dma_field(offset, 2) as *mut u16, value) };
+        self.dma.write::<u16>(offset, value);
     }
 
     fn write_u32(&self, offset: usize, value: u32) {
-        // SAFETY: as for read_u16.
-        unsafe { write_volatile(self.dma_field(offset, 4) as *mut u32, value) };
+        self.dma.write::<u32>(offset, value);
     }
 
     fn write_u64(&self, offset: usize, value: u64) {
-        // SAFETY: as for read_u16.
-        unsafe { write_volatile(self.dma_field(offset, 8) as *mut u64, value) };
+        self.dma.write::<u64>(offset, value);
     }
 }
 
@@ -313,10 +298,13 @@ impl RxToken for ReceiveToken<'_> {
             let frame = device.loopback.borrow_mut().pop_front().unwrap_or_default();
             return callback(&frame);
         };
-        let start = device.dma_address(RX_BUFFER_OFFSET + VIRTIO_HEADER_LENGTH, length);
-        // SAFETY: the device wrote this frame into the receive buffer and
-        // leaves the buffer alone until post_receive hands it back below.
-        let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, length) };
+        // The device wrote this frame into the receive buffer and leaves the
+        // buffer alone until post_receive hands it back below.
+        let mut bytes = [0; RX_FRAME_CAPACITY];
+        let bytes = &mut bytes[..length.min(RX_FRAME_CAPACITY)];
+        device
+            .dma
+            .read_bytes(RX_BUFFER_OFFSET + VIRTIO_HEADER_LENGTH, bytes);
         let result = callback(bytes);
         device.rx_used.set(device.rx_used.get().wrapping_add(1));
         device.post_receive();
@@ -334,16 +322,9 @@ impl TxToken for TransmitToken<'_> {
         F: FnOnce(&mut [u8]) -> R,
     {
         let device = self.0;
-        let length = length.min(PAGE_SIZE - TX_BUFFER_OFFSET - VIRTIO_HEADER_LENGTH);
-        let start = device.dma_address(TX_BUFFER_OFFSET, VIRTIO_HEADER_LENGTH + length);
-        // SAFETY: the device has used every frame posted before (transmit
-        // hands out a token only then), so the transmit buffer is the
-        // driver's until post_transmit below.
-        let buffer = unsafe {
-            core::slice::from_raw_parts_mut(start as *mut u8, VIRTIO_HEADER_LENGTH + length)
-        };
-        let (header, frame) = buffer.split_at_mut(VIRTIO_HEADER_LENGTH);
-        header.fill(0);
+        let length = length.min(TX_FRAME_CAPACITY);
+        let mut buffer = [0; TX_FRAME_CAPACITY];
+        let frame = &mut buffer[..length];
         let result = callback(frame);
         // A TUN or TAP device's traffic stays here: queued for its reader,
         // or received again (its own addresses, the answer for a TUN peer).
@@ -359,6 +340,13 @@ impl TxToken for TransmitToken<'_> {
                 } else if frame_loops_back(frame, device.local_address) {
                     device.loop_back(frame);
                 } else {
+                    // The device has used every frame posted before
+                    // (transmit hands out a token only then), so the
+                    // transmit buffer is the driver's until post_transmit.
+                    device.dma.fill(TX_BUFFER_OFFSET, VIRTIO_HEADER_LENGTH, 0);
+                    device
+                        .dma
+                        .write_bytes(TX_BUFFER_OFFSET + VIRTIO_HEADER_LENGTH, frame);
                     device.post_transmit(length);
                 }
             }

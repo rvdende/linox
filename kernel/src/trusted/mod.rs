@@ -9,11 +9,13 @@
 //! - [`boot`]: the loader's boot handoff (the firmware memory map).
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
-//! - [`root`]: reading and reloading the page-table root register.
+//! - [`root`]: reading and reloading the page-table root register, and
+//!   loading the kernel's own root.
 //! - [`firmware`]: firmware (ACPI) tables viewed in place for parsing.
 //! - [`dma`]: DMA memory the drivers' devices reach: static pages claimed
 //!   by one driver instance at a time, a static pool sub-allocated by one
-//!   instance at a time, and frame-allocator buffers.
+//!   instance at a time, frame-allocator buffers, and views of leased
+//!   frames shared with a virtio device.
 //! - [`pixels`]: a display surface the console and /dev/fb0 draw into.
 //! - [`claim`]: a value one context at a time may claim, the others
 //!   skipping it while it is busy.
@@ -31,6 +33,8 @@
 //! - [`boot`]: the kernel's entry from the loader and the boot information
 //!   it hands over.
 //! - [`control`]: control registers, the stack pointer, CR0.WP.
+//! - [`crash`]: the bring-up exception table, the live page-table walk and
+//!   the reads crash reports make.
 //! - [`take_once`]: a static handed out as `&'static mut` once.
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
