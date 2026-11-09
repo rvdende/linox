@@ -346,17 +346,20 @@ pub(super) enum LinuxBlockedWait {
     Return(u64),
 }
 
-/// Lets other processes in the domain run while the current one blocks in
-/// syscall `number`: the process, init included, parks in the call and the
-/// scheduler loop that ran it runs others, then resumes it to look at its
-/// wait again (where it cannot park, it yields with the call set to
-/// restart). Returns `None` when nothing else can run.
+/// Blocks the current process in syscall `number` until `wait` ends: the
+/// process, init included, parks in the call, leaves the run queue until a
+/// waker for what it waits on, a signal or its deadline makes it ready
+/// (docs/SCHEDULER.md, step 5), and then looks at its wait once more
+/// (`Recheck`). Where it cannot park it yields with the call set to
+/// restart. Returns `None` when it cannot wait here (a ready sibling
+/// thread runs instead, or an application processor's caller restarts).
 pub(super) fn run_other_linux_processes(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
     number: u64,
+    wait: WaitOn,
 ) -> Option<LinuxBlockedWait> {
-    run_other_linux_processes_deferring(output, caller, number, true)
+    run_other_linux_processes_deferring(output, caller, number, wait, true)
 }
 
 /// `run_other_linux_processes`; with `defer_to_siblings` false, the other
@@ -366,6 +369,7 @@ pub(super) fn run_other_linux_processes_deferring(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
     number: u64,
+    wait: WaitOn,
     defer_to_siblings: bool,
 ) -> Option<LinuxBlockedWait> {
     // The boot verification probe has no scheduler loop to wait in.
@@ -417,8 +421,13 @@ pub(super) fn run_other_linux_processes_deferring(
     if !yield_current_linux_process(restart, number) {
         return None;
     }
-    // Waiting in the call: /proc shows it sleeping until dispatched.
-    linux_process::set_live_process_waiting(pid, true);
+    // Waiting in the call: /proc shows it sleeping until dispatched. It
+    // is blocked until what it waits for comes, unless a thread of it has
+    // work meanwhile.
+    match linux_process_block(wait) {
+        Some(block) => linux_process::block_live_process(pid, block),
+        None => linux_process::set_live_process_waiting(pid, true),
+    }
     if !park_linux_process(pid) {
         if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
             serial_write("linox: process cannot park pid/cpu/call/activation: ");
@@ -477,73 +486,93 @@ pub(super) fn run_other_linux_processes_deferring(
     })
 }
 
-/// How long before its deadline a sleep (nanosleep) stops being passed over
-/// and looks at the clock itself, every round, as an unmarked sleep does,
-/// in a domain run on one CPU: a marked process is dispatched at a
-/// scheduling point after its deadline, which the process the loop runs may
-/// hold off for milliseconds, where one that looks for itself halts until
-/// its own deadline (nanosleep01's 1 to 25 ms sleeps woke 1-10 ms late
-/// marked to the end). With more CPUs an idle one resumes a due sleeper
-/// (`run_application_processor_runtime`), and sleeps are marked to their
-/// deadline. A futex wait, which has no look of its own, always is.
-const LINUX_SLEEP_WAKE_MARGIN_NS: u64 = 2_000_000;
-
-/// The margin a sleep is marked asleep with (`LINUX_SLEEP_WAKE_MARGIN_NS`).
-pub(in crate::arch::x86_64) fn linux_sleep_wake_margin() -> u64 {
-    if linux_smp_runtime_active() && linux_available_cpu_count() > 1 {
-        0
-    } else {
-        LINUX_SLEEP_WAKE_MARGIN_NS
+/// What blocks the current process, waiting in a call for `wait`: that,
+/// until its own real or POSIX timer is due if sooner (only its call
+/// notices those), and whatever its other threads wait for, which only it
+/// switches to. None when another thread of it is ready or runs on another
+/// CPU: the process has work, and is passed over by no one.
+fn linux_process_block(wait: WaitOn) -> Option<WaitOn> {
+    let current = current_linux_thread_slot();
+    let mut block = wait
+        .until(
+            X86_RUNTIME
+                .ELF_PROBE_REAL_TIMER_DEADLINE
+                .load(Ordering::SeqCst),
+        )
+        .until(
+            X86_RUNTIME
+                .ELF_PROBE_POSIX_TIMER_DEADLINE
+                .load(Ordering::SeqCst),
+        );
+    for slot in (0..LINUX_THREAD_LIMIT).filter(|slot| Some(*slot) != current) {
+        match X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) {
+            LINUX_THREAD_FREE => {}
+            LINUX_THREAD_BLOCKED if !linux_thread_runs_elsewhere(slot) => {
+                block = block
+                    .until(X86_RUNTIME.LINUX_THREAD_WAIT_DEADLINES[slot].load(Ordering::SeqCst));
+                // A futex word only this process's threads wake, a sleep and
+                // a signal wait end with the deadline or a signal; anything
+                // else a thread waits on is looked at again whenever
+                // anything may have changed.
+                if !matches!(
+                    X86_RUNTIME.LINUX_THREAD_WAIT_KINDS[slot].load(Ordering::SeqCst),
+                    LINUX_THREAD_WAIT_FUTEX
+                        | LINUX_THREAD_WAIT_SLEEP
+                        | LINUX_THREAD_WAIT_SIGNAL
+                        | LINUX_THREAD_WAIT_PAUSE
+                        | LINUX_THREAD_WAIT_SIGSUSPEND
+                ) {
+                    block = block.and(WaitOn::ANYTHING);
+                }
+            }
+            _ => return None,
+        }
     }
+    Some(block)
 }
 
-/// Marks process `pid` (current, other than init) asleep in a wait of its
-/// own until `deadline` (0: none) or a timer of its own falls due, whichever
-/// comes first, less `margin`: the scheduler passes over it until then, or
-/// until a wake clears its `waiting` (a futex wake, a signal it takes, a
-/// child's change of state for a wait for children). A wait due within the
-/// margin is left unmarked. Each dispatch clears the mark, so a wait sets it
-/// again for every sleep. Only a single-threaded process sleeps so; another
-/// thread of it may have work to do.
-pub(in crate::arch::x86_64) fn mark_linux_process_asleep(pid: u32, deadline: u64, margin: u64) {
-    if pid == 1 {
+/// What a call waiting for descriptor `descriptor` to be ready waits on: a
+/// local socket's or pipe's wakeups, a timerfd's expiry, the system calls
+/// that change an eventfd, signalfd or pidfd; anything else (a terminal, a
+/// network socket, whose device is polled, a device file) any change or
+/// tick.
+pub(super) fn linux_descriptor_wait(descriptor: u64) -> WaitOn {
+    if let Some(slot) = linux_socket_slot(descriptor) {
+        return if crate::linux_socket::event_counts(slot).is_some() {
+            WaitOn::keyed(wait_events::SOCKET, u64::from(slot))
+        } else {
+            WaitOn::ANYTHING
+        };
+    }
+    if let Some(timer) = linux_timerfd_state(descriptor) {
+        return WaitOn::of(wait_events::STATE).until(timer.deadline.load(Ordering::SeqCst));
+    }
+    if linux_eventfd_descriptor(descriptor)
+        || linux_signalfd_descriptor(descriptor)
+        || linux_pidfd_descriptor(descriptor)
+    {
+        return WaitOn::of(wait_events::STATE);
+    }
+    WaitOn::ANYTHING
+}
+
+/// What the boot CPU's scheduler takes from the wait queues
+/// (`linux_wait_queue`) before it picks a process: the processes blocked on
+/// what came since make the run queue again. Every scheduler calls this
+/// before it looks for work.
+pub(in crate::arch::x86_64) fn deliver_linux_wakeups() {
+    let wakeups = crate::linux_wait_queue::take();
+    if wakeups.is_empty() {
         return;
     }
-    let single_threaded = (0..LINUX_THREAD_LIMIT).all(|slot| {
-        Some(slot) == current_linux_thread_slot()
-            || X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) == LINUX_THREAD_FREE
-    });
-    if !single_threaded {
-        return;
+    if wakeups.all != 0 {
+        linux_process::wake_live_processes(wakeups.all, None);
     }
-    // Its own timers only its call notices: it wakes for the first due.
-    let wake = [
-        deadline,
-        X86_RUNTIME
-            .ELF_PROBE_REAL_TIMER_DEADLINE
-            .load(Ordering::SeqCst),
-        X86_RUNTIME
-            .ELF_PROBE_POSIX_TIMER_DEADLINE
-            .load(Ordering::SeqCst),
-    ]
-    .into_iter()
-    .filter(|deadline| *deadline != 0)
-    .min()
-    .unwrap_or(0);
-    let wake = if wake == 0 {
-        0
-    } else {
-        let now = linux_elapsed_nanoseconds().unwrap_or(u64::MAX);
-        match wake.checked_sub(margin) {
-            Some(early) if early > now => early,
-            // Due within the margin: it looks for itself.
-            _ => {
-                linux_process::set_live_process_futex_sleep(pid, None);
-                return;
-            }
+    for (event, key) in wakeups.keyed() {
+        if wakeups.all & event == 0 {
+            linux_process::wake_live_processes(*event, Some(*key));
         }
-    };
-    linux_process::set_live_process_futex_sleep(pid, Some(wake));
+    }
 }
 
 /// The key activations of process `pid` in the running domain have: the
@@ -557,6 +586,16 @@ pub(super) fn linux_activation_owner(pid: u32) -> u64 {
 /// address space current again, which whatever ran meanwhile replaced.
 /// False when it cannot park.
 fn park_linux_process(pid: u32) -> bool {
+    // A call never waits holding a spin lock: whoever runs meanwhile would
+    // deadlock on it, and the call may continue on another CPU.
+    if crate::sync::spin_lock_held() {
+        serial_write("linox: a system call tried to park holding a spin lock; pid ");
+        serial_write_u64(u64::from(pid));
+        serial_write(" rank ");
+        serial_write_u64(u64::from(crate::sync::held_rank()));
+        serial_write("\r\n");
+        return false;
+    }
     let fs_base = active_fs_base();
     let root = address_space::current_root_address();
     // Others sharing its state run while it waits, and it sees what they
@@ -752,7 +791,8 @@ pub(super) fn linux_vfork_wait_live(
         if !pending {
             break u64::from(linux_pid_seen_by(pid, child));
         }
-        match run_other_linux_processes(output, caller, LINUX_VFORK_WAIT_SYSCALL) {
+        let wait = WaitOn::of(wait_events::CHILD);
+        match run_other_linux_processes(output, caller, LINUX_VFORK_WAIT_SYSCALL, wait) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => break result,
             // It cannot wait in the call here (an application processor,
@@ -1191,6 +1231,9 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         let _ = linux_mount::deactivate_initial();
         return LinuxElfResult::FAILED;
     }
+    // Wakeups queued while the domain was suspended went to other domains'
+    // schedulers: every blocked process looks at its wait once more.
+    let _ = linux_process::wake_all_live_processes();
     let Some(saved_msrs) = configure_linux_syscall() else {
         serial_write("linox: suspended Linux resume could not configure syscall state\r\n");
         let _ = linux_process::suspend_runtime_process_registry();
@@ -1411,14 +1454,14 @@ fn suspend_linux_runtime_from_loop() -> bool {
 /// nested inside another's system call, and a fork leaves its child ready
 /// in the queue while the parent goes on. A process with SIGKILL pending
 /// goes first, as Linux wakes a killed task, and `first` (a process being
-/// resumed after a suspension, or a domain exec's command) before any. With
-/// nothing ready, or once every process has had a round without a system
-/// call, the CPU halts until an interrupt. Returns when init has ended
-/// (its state left current) or the runtime is suspending; false if a
-/// process could not be run.
+/// resumed after a suspension, or a domain exec's command) before any.
+/// Blocked processes are not ready: the wakeups queued since the last
+/// round make theirs ready first (`deliver_linux_wakeups`). With nothing
+/// ready the CPU halts until an interrupt (a tick at the earliest
+/// deadline at the latest). Returns when init has ended (its state left
+/// current) or the runtime is suspending; false if a process could not be
+/// run.
 fn run_linux_runtime_loop(mut first: Option<u32>) -> bool {
-    let mut entries = linux_syscall::linux_syscall_entries_here().load(Ordering::Relaxed);
-    let mut idle_rounds = 0_usize;
     let mut ran = true;
     loop {
         if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
@@ -1430,6 +1473,7 @@ fn run_linux_runtime_loop(mut first: Option<u32>) -> bool {
             return ran;
         }
         linux_stall_diagnostic_from_loop();
+        deliver_linux_wakeups();
         let now = linux_elapsed_nanoseconds().unwrap_or(0);
         let picked = first
             .take()
@@ -1452,17 +1496,6 @@ fn run_linux_runtime_loop(mut first: Option<u32>) -> bool {
             // kernel-entry lock serializes the work they start.
             None => linux_wait_for_interrupt(),
         }
-        // Rounds in which the process run only rechecked its wait and parked
-        // again make no system call. Once every process has had such a round
-        // in a row, nothing changes until an interrupt (the tick, a device)
-        // does: wait for one instead of going round again.
-        let now = linux_syscall::linux_syscall_entries_here().load(Ordering::Relaxed);
-        idle_rounds = if now == entries { idle_rounds + 1 } else { 0 };
-        if idle_rounds > usize::from(linux_process::live_process_count().unwrap_or(1)) {
-            linux_wait_for_interrupt();
-            idle_rounds = 0;
-        }
-        entries = linux_syscall::linux_syscall_entries_here().load(Ordering::Relaxed);
         // Other CPUs' system calls go first.
         crate::sync::kernel_entry_yield();
     }

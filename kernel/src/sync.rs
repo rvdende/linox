@@ -156,6 +156,10 @@ impl LockRank {
     /// only scans and writes its slots, so it ranks above the locks its
     /// callers may hold.
     pub(crate) const LIVE_VOLUME: Self = Self(880);
+    /// The wakeups subsystems queue for the scheduler
+    /// (`linux_wait_queue::notify`): a leaf, taken under any subsystem's
+    /// lock (the sockets', System V IPC's), with nothing taken while held.
+    pub(crate) const WAKEUPS: Self = Self(885);
     pub(crate) const DIAGNOSTICS: Self = Self(900);
     /// The evdev input queues (`linux_input`): drivers queue events from
     /// interrupt handlers, over whatever lock the interrupted code holds,
@@ -615,6 +619,18 @@ fn cpu_slot() -> usize {
 /// at or above it.
 pub(crate) fn rank_available(rank: LockRank) -> bool {
     HELD_RANKS[cpu_slot()].load(Ordering::Acquire) < rank.0
+}
+
+/// Whether this CPU holds a spin lock other than the kernel-entry lock
+/// (which ranks as `ARCHITECTURE`): a system call must not park (and maybe
+/// continue on another CPU) while it does.
+pub(crate) fn spin_lock_held() -> bool {
+    held_rank() > LockRank::ARCHITECTURE.0
+}
+
+/// The rank of the highest lock this CPU holds (0: none).
+pub(crate) fn held_rank() -> u16 {
+    HELD_RANKS[cpu_slot()].load(Ordering::Acquire)
 }
 
 fn enter_rank(rank: LockRank) -> u16 {

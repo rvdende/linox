@@ -486,7 +486,9 @@ pub(super) fn linux_semop_live(
         if crate::linux_sysv_ipc::begin_semaphore_wait(wait).is_err() {
             return LINUX_ENOMEM;
         }
-        match run_other_linux_processes(output, caller, number) {
+        // Only semop, semctl and the set's removal change it: system calls.
+        let wait = WaitOn::of(wait_events::STATE).until_some(deadline);
+        match run_other_linux_processes(output, caller, number, wait) {
             Some(LinuxBlockedWait::Recheck) => {}
             // Yielded: the call starts again and finds its wait.
             Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {
@@ -834,7 +836,8 @@ pub(super) fn linux_message_wait_live(
         if crate::linux_sysv_ipc::begin_message_wait(pid, id as u32).is_err() {
             return LINUX_ENOMEM;
         }
-        match run_other_linux_processes(output, caller, number) {
+        let wait = WaitOn::of(wait_events::STATE);
+        match run_other_linux_processes(output, caller, number, wait) {
             Some(LinuxBlockedWait::Recheck) => {}
             // Yielded: the call starts again and finds its wait.
             Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {
@@ -1364,7 +1367,14 @@ pub(super) fn linux_mq_wait_live(
         if crate::linux_sysv_ipc::begin_message_wait(pid, waited).is_err() {
             return LINUX_ENOMEM;
         }
-        match run_other_linux_processes(output, caller, number) {
+        // The timeout is on CLOCK_REALTIME: its deadline on the monotonic
+        // clock is recomputed each time the call looks (setting the clock is
+        // a state change, which wakes it).
+        let wait = WaitOn::of(wait_events::STATE).until_some(deadline.and_then(|deadline| {
+            let left = deadline.saturating_sub(linux_mq_now());
+            linux_elapsed_nanoseconds().map(|now| now.saturating_add(left.max(1)))
+        }));
+        match run_other_linux_processes(output, caller, number, wait) {
             Some(LinuxBlockedWait::Recheck) => {}
             // Yielded: the call starts again and finds its wait.
             Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {

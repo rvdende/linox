@@ -623,14 +623,14 @@ struct Process {
     /// until that child executes or exits, or 0.
     vfork_child: u32,
     /// Gave up the CPU in a blocking system call and has not been dispatched
-    /// since: Linux's interruptible sleep ('S').
+    /// since: Linux's interruptible sleep ('S'). A wake clears it.
     waiting: bool,
-    /// Asleep in a wait of its own (a single-threaded process's futex wait
-    /// or wait for its children) until woken (which clears `waiting`:
-    /// a futex wake, a signal, a child's change of state) or this deadline
-    /// (0: none), in nanoseconds since boot: the wait's, or a timer of its
-    /// own due sooner. Not worth resuming before then.
-    futex_sleep: Option<u64>,
+    /// Blocked in that call (docs/SCHEDULER.md, step 5): what it waits for
+    /// and until when. While `waiting` holds and the deadline has not
+    /// passed, the scheduler passes over it (`Process::is_asleep`); a
+    /// waker for one of its events, a signal or a child's change of state
+    /// clears `waiting`. Every dispatch clears both.
+    block: Option<crate::linux_wait_queue::WaitOn>,
     /// CPU time used, in timestamp-counter cycles, and the part of it in
     /// user mode (the rest is system time).
     cpu_cycles: u64,
@@ -773,12 +773,15 @@ struct ProcessTable {
     /// next turn goes to the ready process after it (`next_ready_live_process`).
     dispatch_cursor: u32,
     init: Option<ProcessHandle>,
-    /// The deadlines processes are marked asleep until (`futex_sleep`), by
-    /// pid: one entry per mark, checked against the process when looked at
-    /// (`next_live_futex_sleep_deadline`) rather than taken out wherever a
-    /// mark ends. Lossy after an allocation failure, until rebuilt.
+    /// The deadlines of blocked processes (`Process::block`), by pid: one
+    /// entry per block, checked against the process when looked at
+    /// (`next_live_block_deadline`) rather than taken out wherever a
+    /// block ends. Lossy after an allocation failure, until rebuilt.
     sleepers: linox_deadline_heap::DeadlineHeap<u32>,
     sleepers_lossy: bool,
+    /// Some process may be blocked (`Process::block`): wakers look only
+    /// then.
+    blocked: bool,
 }
 
 /// One installed seccomp program and the filter before it in its chain.
@@ -811,6 +814,7 @@ impl ProcessTable {
             init: None,
             sleepers: linox_deadline_heap::DeadlineHeap::new(),
             sleepers_lossy: false,
+            blocked: false,
         }
     }
 
@@ -1944,7 +1948,7 @@ impl ProcessTable {
     fn dispatch(&mut self, handle: ProcessHandle) -> Option<LiveProcessDispatch> {
         let process = self.process_mut(handle)?;
         process.waiting = false;
-        process.futex_sleep = None;
+        process.block = None;
         let process = self.process(handle)?;
         let address_space = process.address_space.as_ref()?;
         let context = process.context?;
@@ -2104,7 +2108,7 @@ impl ProcessTable {
             cloned_by: None,
             vfork_child: 0,
             waiting: false,
-            futex_sleep: None,
+            block: None,
             cpu_cycles: 0,
             user_cycles: 0,
             children_cycles: (0, 0),
@@ -2233,6 +2237,8 @@ impl ProcessTable {
         process.executed = true;
         process.posix_timers = [None; POSIX_TIMER_LIMIT];
         process.debug_registers = DebugRegisters::RESET;
+        // A vfork parent waits for this.
+        self.wake_state_waiters(handle);
         true
     }
 
@@ -2269,6 +2275,8 @@ impl ProcessTable {
         if let Some(process) = self.process_mut(handle) {
             process.shared[SharedResource::Memory as usize] = memory;
         }
+        // A vfork parent waits for this.
+        self.wake_state_waiters(handle);
         true
     }
 
@@ -3719,23 +3727,66 @@ pub(crate) fn set_live_process_waiting(pid: u32, waiting: bool) {
     }
 }
 
-/// Records that process `pid` sleeps in a futex wait until `deadline` (0:
-/// none), or no longer (None).
-pub(crate) fn set_live_process_futex_sleep(pid: u32, deadline: Option<u64>) {
+/// Blocks process `pid` in its system call until `wait` ends: it waits
+/// (`set_live_process_waiting`) and the scheduler passes over it until a
+/// waker, a signal or the wait's deadline makes it ready again.
+pub(crate) fn block_live_process(pid: u32, wait: crate::linux_wait_queue::WaitOn) {
     if let Some(table) = live_process_table_mut() {
         if let Some(process) = table
             .handle_by_pid(pid)
             .and_then(|handle| table.process_mut(handle))
         {
-            process.futex_sleep = deadline;
+            process.waiting = true;
+            process.block = Some(wait);
         } else {
             return;
         }
+        table.blocked = true;
         table.note_sleeper(pid);
     }
 }
 
-/// Whether process `pid` is parked asleep with its mark's deadline passed
+/// What process `pid` is blocked on, if it is (waiting, not yet woken).
+pub(crate) fn live_process_block(pid: u32) -> Option<crate::linux_wait_queue::WaitOn> {
+    let table = live_process_table_mut()?;
+    let process = table.process(table.handle_by_pid(pid)?)?;
+    process.block.filter(|_| process.waiting)
+}
+
+/// Makes every process blocked in a wait that event `events` on `key` ends
+/// ready again (None: every key); returns how many it woke.
+pub(crate) fn wake_live_processes(events: u16, key: Option<u64>) -> u32 {
+    let Some(table) = live_process_table_mut() else {
+        return 0;
+    };
+    if !table.blocked {
+        return 0;
+    }
+    let mut woken = 0;
+    let mut blocked = false;
+    for process in table.processes.iter_mut().flatten() {
+        let Some(block) = process.block.filter(|_| process.waiting) else {
+            continue;
+        };
+        if block.woken_by(events, key) {
+            process.waiting = false;
+            woken += 1;
+        } else {
+            blocked = true;
+        }
+    }
+    table.blocked = blocked;
+    woken
+}
+
+/// Makes every blocked process ready again, to look at its wait once more:
+/// what woke them may have been missed (a domain resumed after other
+/// domains ran, whose events this one's scheduler never saw).
+pub(crate) fn wake_all_live_processes() -> u32 {
+    wake_live_processes(u16::MAX, None)
+}
+
+/// Whether process `pid` is parked asleep with its block's deadline passed
 /// by `now`: due to run, to find its wait over.
 pub(crate) fn live_process_sleep_due(pid: u32, now: u64) -> bool {
     live_process_table_mut().is_some_and(|table| {
@@ -3752,7 +3803,7 @@ pub(crate) fn live_process_sleep_due(pid: u32, now: u64) -> bool {
 /// halts until its next tick would resume it late, and one that halts with
 /// it due (its deadline came between the look for work and the halt) a
 /// whole tick late.
-pub(crate) fn next_live_futex_sleep_deadline() -> Option<u64> {
+pub(crate) fn next_live_block_deadline() -> Option<u64> {
     let table = live_process_table_mut()?;
     if table.sleepers_lossy {
         table.rebuild_sleepers();
@@ -3821,22 +3872,24 @@ impl ProcessTable {
 }
 
 impl Process {
-    /// The deadline the process is marked asleep until, if it is: running,
-    /// waiting, with a deadline to its mark.
+    /// The deadline the process is blocked until, if it is: running,
+    /// waiting, with a deadline to its block.
     fn marked_asleep_until(&self) -> Option<u64> {
         (self.state == ProcessState::Running && self.waiting)
-            .then_some(self.futex_sleep)
+            .then_some(self.block)
             .flatten()
+            .map(|block| block.deadline())
             .filter(|deadline| *deadline != 0)
     }
 
-    /// Asleep in a futex wait that no wake (which clears `waiting`), signal
-    /// it takes (likewise) or deadline has ended by `now`.
+    /// Blocked in a wait that no wake (which clears `waiting`), signal it
+    /// takes (likewise) or deadline has ended by `now`.
     fn is_asleep(&self, now: u64) -> bool {
         self.waiting
-            && self
-                .futex_sleep
-                .is_some_and(|deadline| deadline == 0 || now < deadline)
+            && self.block.is_some_and(|block| {
+                let deadline = block.deadline();
+                deadline == 0 || now < deadline
+            })
     }
 }
 
@@ -4720,6 +4773,18 @@ pub(crate) fn mark_live_process_executed(pid: u32) -> bool {
 
 pub(crate) fn set_live_process_exec_context(pid: u32, rip: u64, rsp: u64) -> bool {
     live_process_table_mut().is_some_and(|table| table.set_exec_context(pid, rip, rsp))
+}
+
+/// Makes the process in table slot `slot` ready if it waits in a call: a
+/// signal was queued for it, which ends any wait (or is looked at and the
+/// call waits on).
+pub(crate) fn wake_live_process_at_slot(slot: usize) {
+    if let Some(process) = live_process_table_mut()
+        .and_then(|table| table.processes.get_mut(slot))
+        .and_then(Option::as_mut)
+    {
+        process.waiting = false;
+    }
 }
 
 pub(crate) fn live_process_slot(pid: u32) -> Option<usize> {

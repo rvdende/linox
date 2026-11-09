@@ -1,9 +1,9 @@
 # Kernel stacks and scheduling: design
 
 Status: steps 1-4 below are done (2026-11-09: the scheduler loop owns the
-run queue and nothing runs nested); step 5 (real wakeups, activations per
-thread) and step 6 (per-CPU loops, splitting the kernel-entry lock) are
-next. Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
+run queue and nothing runs nested); of step 5, real wakeups are done (wait
+queues, "Wait queues" below); activations per thread and cheaper switches
+are next, then step 6 (per-CPU loops, splitting the kernel-entry lock). Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
 execution model with Linux's: every thread has its own kernel stack,
 blocking switches stacks, and a scheduler decides who runs next on each CPU.
 
@@ -118,7 +118,9 @@ a fork transaction's exec'd child); the scheduler loop makes that everyone.
    instead of returning to the kernel with a restart, and the loop resumes
    parked activations by switching to them; threads get activations of their
    own; per-process globals become task fields so a switch no longer copies
-   them in and out.
+   them in and out. Done (2026-11-09): wakeups. A parked call is blocked on
+   what it waits for and leaves the run queue until a waker, a signal or
+   its deadline makes it ready ("Wait queues" below).
 6. Per-CPU scheduler loops with load balancing and wakeups by IPI, then
    splitting `kernel_entry_lock` into per-subsystem locks so CPUs run kernel
    code in parallel (lock ranks from
@@ -220,14 +222,9 @@ child-first path remains only for the boot verification probe.
 
 ### What step 5 (M2) must do
 
-- **Wakeups instead of rechecks.** A parked call is still resumed by the
-  loop to look at its wait again (only futex, wait4/waitid and nanosleep
-  sleepers are skipped until due or woken, `linux_process_asleep`). Each
-  wait kind needs a wait queue (the records in "What waits look like" are
-  the start: SysV IPC, futex coordination, pipes, poll/epoll, children)
-  whose waker marks the waiter ready and hands it its result; then a
-  parked process leaves the run queue (Blocked) until woken, and the
-  idle-round heuristic and `mark_linux_process_asleep` go.
+- **Wakeups instead of rechecks.** Done (2026-11-09, "Wait queues"
+  below): every parked call is blocked on what it waits for, and the
+  idle-round heuristic and `mark_linux_process_asleep` are gone.
 - **Activations per thread.** Activations are keyed by process
   (`linux_activation_owner`): a multithreaded process's sibling threads
   still switch inside its one activation. Each thread needs its own, and
@@ -239,6 +236,68 @@ child-first path remains only for the boot verification probe.
 - **Yields.** `yield_current_linux_process` still records the
   CHILD_YIELDED flags for a caller that no longer needs them; with real
   blocking the restart contexts it writes go too.
+
+## Wait queues (step 5, done 2026-11-09)
+
+A process whose system call must wait now *blocks*: every wait goes
+through `run_other_linux_processes(output, caller, number, wait)`, whose
+`wait` (`linux_wait_queue::WaitOn`) says what ends it besides a signal:
+a set of events, some narrowed to keys, and a deadline. Before parking,
+the call records it in the process registry (`Process::block`,
+`block_live_process`) with `waiting` set, and the run queue passes the
+process over (`Process::is_asleep`) until `waiting` is cleared or the
+deadline passes. Woken, the call looks at its wait once more in its own
+frame (`LinuxBlockedWait::Recheck`), and returns or blocks again; nothing
+resumes a blocked call to look for nothing. A dispatch clears the block,
+so every wait sets its own.
+
+The events (`kernel/src/linux_wait_queue.rs`) and their wakers:
+
+| Event | Waits | Waker |
+|---|---|---|
+| (always) | every wait | a signal queued for the process (`linux_enqueue_signal` wakes it, blocked signals too: sigtimedwait takes those) |
+| deadline | timed waits, the process's own real and POSIX timers, the deadlines of its blocked threads | the registry's deadline heap (`next_live_block_deadline`), which the loop's halt and the tick bring forward to (`request_linux_tick_within`), and wakeup preemption (`linux_sleeper_due_from_timer`) |
+| `FUTEX` | futex wait, futex_waitv (process level) | FUTEX_WAKE/requeue mark the record and clear `waiting` (`wake_linux_process_futex_waits`) |
+| `CHILD` | wait4, waitid, the vfork wait | a child's stop, continue, exit, exec (`wake_state_waiters`; exec through `mark_executed` and `set_exec_context`) and adoption by init |
+| `SOCKET` + slot | read, write, recv on pipes and local (Unix, netlink, loopback TCP) sockets; poll, select and epoll on them | every data, room, hangup, shutdown, connect and accept change of the slot (`Slot::wake`, from `note_input`/`note_output` and the listener queue), queued with `linux_wait_queue::notify` under the sockets' lock |
+| `STATE` | SysV semaphores and messages, POSIX queues, eventfd, signalfd, pidfd, timerfd (with its expiry as deadline), file locks, a stopped process's wait for SIGCONT, init's exit rounds | any system call outside a short list of calls that read only their own state or the clock (`linux_syscall_may_change_waits`), and every exit settled by the loop |
+| `TICK` | the console, network sockets (smoltcp is polled), devices, leases, futex2 waits with no record, and the descriptor waits of a multithreaded process's other threads | every tick of the boot CPU (`note_tick` in `expire_linux_waits_from_timer`) |
+
+poll, select and epoll fold the wait of each descriptor (`linux_descriptor_wait`;
+epoll over its watches, `linux_epoll_wait_on`); a wait that names more than
+`WAIT_KEYS` sockets takes any socket's event.
+
+Wakers that hold the registry (futex, children, signals) clear `waiting`
+at once. Wakers deep in a subsystem queue the event in a small ranked leaf
+(`LockRank::WAKEUPS`, a 64-entry table that overflows into "every waiter
+of this event"); the coarse events are counters. `deliver_linux_wakeups`
+hands all of them to the registry before every scheduler, the boot CPU's
+loop and the application processors', looks for work, so a woken process
+is ready by the time anything could run it. A domain resumed after a
+suspension wakes all its blocked processes once
+(`wake_all_live_processes`): its scheduler did not see what was queued
+while other domains ran. No call parks while holding a spin lock: the
+waits block in `run_other_linux_processes` after their locks are released
+(SysV IPC records its waiter, then drops `SYSV_IPC` before blocking).
+
+A multithreaded process blocks only when none of its other threads is
+ready or runs on another CPU; it then also waits for its blocked threads'
+deadlines and, when one of them waits on a descriptor, for every state
+change and tick (a thread's own wait has no waker of its own until
+threads have activations of their own, the next part of step 5).
+
+The loop itself no longer counts idle rounds: with nothing ready it halts
+until an interrupt, at the latest the tick at the earliest deadline.
+`mark_linux_process_asleep`, its 2 ms nanosleep margin and the
+`futex_sleep` mark went; `Process::block` replaced them.
+
+What M3 (step 6) must do with them: wakeups are delivered by whichever
+CPU looks for work next, under the kernel-entry lock. With per-CPU run
+queues a waker finds the CPU that owns the woken task and sends it an
+IPI (the queue in `linux_wait_queue` is where that CPU would find the
+event), and the coarse `STATE` and `TICK` events should shrink to
+nothing: each subsystem that still relies on them (eventfd, terminals,
+inotify, the network stack, leases) wants a keyed waker of its own.
 
 ## Step 4 in detail: the plan as made (history)
 
@@ -595,6 +654,11 @@ those calls go to the owner), and lighter rechecks of a parked process
 
 ### Sleepers and their deadlines (2026-11-07)
 
+(Superseded on 2026-11-09 by "Wait queues" above: every wait blocks with
+its deadline, `Process::block` replaced the mark below, and the nanosleep
+margin went. The deadline heap, the tick brought forward to the earliest
+deadline and wakeup preemption stay as described.)
+
 A single-threaded process parked in a futex wait, a wait for children
 (wait4, waitid) or nanosleep is *marked asleep* (`mark_linux_process_asleep`,
 `Process.futex_sleep`) until its wait's deadline or its own real or POSIX
@@ -643,7 +707,5 @@ sleep sets it again.
   (`linux_sleep_wake_margin`). Futex and wait4 waits, which have no look
   of their own, always are.
 
-Still to come: a sleeper is resumed to find its wait over, not handed its
-result by the wake (step 5's real wakeups), and the tick preempts only a
-process in user mode: one in a long system call holds its CPU until the
-call ends.
+Still to come: the tick preempts only a process in user mode: one in a
+long system call holds its CPU until the call ends.

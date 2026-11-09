@@ -1230,6 +1230,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
             break;
         }
         let _ = expire_linux_light_waits();
+        deliver_linux_wakeups();
         // Light threads and dispatchable processes take turns: a process
         // pinned with its threads to this CPU alone (nice05 pins its main
         // thread and two busy threads to one CPU) would otherwise never
@@ -1303,7 +1304,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
                 return true;
             };
             let now = linux_elapsed_nanoseconds().unwrap_or(0);
-            linux_process::next_live_futex_sleep_deadline().is_some_and(|deadline| {
+            linux_process::next_live_block_deadline().is_some_and(|deadline| {
                 deadline.saturating_sub(now) < 1_000_000_000 / timer::LINUX_WAIT_TICKS_PER_SECOND
             })
         };
@@ -1513,6 +1514,9 @@ pub(super) fn settle_linux_process_exit(pid: u32, status: u8) -> bool {
     }
     discard_linux_process_extended_state(pid);
     wake_linux_descriptor_waits();
+    // What it held (descriptors, locks, memory) went: waits on those look
+    // again.
+    crate::linux_wait_queue::note_state_change();
     // A domain exec's command that ends gives the console back, and the
     // domain goes back to the background: the loop suspends it at its next
     // scheduling point (`suspend_linux_runtime_from_loop`), with every other
@@ -1756,7 +1760,7 @@ fn linux_sleeper_due_from_timer() -> bool {
         return false;
     };
     let Some(deadline) =
-        linux_process::next_live_futex_sleep_deadline().filter(|deadline| *deadline <= now)
+        linux_process::next_live_block_deadline().filter(|deadline| *deadline <= now)
     else {
         return false;
     };

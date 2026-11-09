@@ -185,6 +185,41 @@ pub(super) fn linux_select_parse(
 /// Which descriptors of `snapshot`'s sets are ready: sets for read (0)
 /// and write (1) and how many bits they hold, or EBADF for a requested
 /// descriptor not open (ENOMEM without memory for the sets).
+/// What a select on `snapshot`'s descriptors waits on
+/// (`linux_descriptor_wait` for each).
+fn linux_select_wait(snapshot: &LinuxSelectSnapshot) -> WaitOn {
+    let (read, write, exception) = (
+        snapshot.requested.set(0),
+        snapshot.requested.set(1),
+        snapshot.requested.set(2),
+    );
+    let mut wait = WaitOn::NOTHING;
+    for word in 0..snapshot.requested.words {
+        let mut any = read[word] | write[word] | exception[word];
+        while any != 0 {
+            let bit = any.trailing_zeros();
+            any &= any - 1;
+            wait = wait.and(linux_descriptor_wait(
+                (word * u64::BITS as usize) as u64 + u64::from(bit),
+            ));
+        }
+    }
+    wait
+}
+
+/// What a poll on `pollfds` waits on (`linux_descriptor_wait` for each).
+fn linux_pollfd_wait(pollfds: &[u8]) -> WaitOn {
+    pollfds
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|pollfd| i32::from_ne_bytes(pollfd[..4].try_into().unwrap()))
+        .filter(|descriptor| *descriptor >= 0)
+        .fold(WaitOn::NOTHING, |wait, descriptor| {
+            wait.and(linux_descriptor_wait(descriptor as u64))
+        })
+}
+
 pub(super) fn linux_select_ready(
     snapshot: &LinuxSelectSnapshot,
 ) -> Result<(LinuxSelectSets, u64), u64> {
@@ -557,8 +592,9 @@ pub(super) fn linux_select_live_return(
             {
                 return LINUX_EFAULT;
             }
+            let wait = linux_select_wait(&parsed.snapshot).until_some(deadline);
             if let Some(LinuxBlockedWait::Return(result)) =
-                run_other_linux_processes(output, caller, number)
+                run_other_linux_processes(output, caller, number, wait)
             {
                 return result;
             }
@@ -762,7 +798,8 @@ fn linux_poll_run_others_live_return(
                 },
             );
         }
-        let turn = linux_timed_wait_run_others(output, caller, number, deadline);
+        let wait = linux_pollfd_wait(active).until_some(deadline);
+        let turn = linux_timed_wait_run_others(output, caller, number, wait);
         if let LinuxWaitTurn::Done(result) = turn {
             return Ok(result);
         }
@@ -919,8 +956,9 @@ pub(super) fn linux_poll_wait_live_return(
             if ready_linux_thread_handle().is_some() {
                 break;
             }
+            let wait = linux_pollfd_wait(active).until_some(deadline);
             if let LinuxWaitTurn::Done(result) =
-                linux_timed_wait_run_others(output, caller, poll_syscall, deadline)
+                linux_timed_wait_run_others(output, caller, poll_syscall, wait)
             {
                 return result;
             }
@@ -956,7 +994,8 @@ pub(super) fn linux_poll_wait_live_return(
             let prior = temporary_signal_mask
                 .map(|mask| begin_linux_lone_masked_wait(slot, LINUX_THREAD_WAIT_SIGSUSPEND, mask));
             let ended = loop {
-                let turn = linux_timed_wait_run_others(output, caller, number, None);
+                // Only a signal ends it.
+                let turn = linux_timed_wait_run_others(output, caller, number, WaitOn::NOTHING);
                 if let LinuxWaitTurn::Done(result) = turn {
                     break Ok(result);
                 }

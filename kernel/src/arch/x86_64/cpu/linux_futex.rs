@@ -452,11 +452,10 @@ pub(super) fn linux_futex_live_return(
         }
         linux_trace_futex(1, address, key);
         let result = loop {
-            // A process with no other thread sleeps until a wake, a signal
-            // or its deadline: until then nothing need resume it to look
-            // again.
-            mark_linux_process_asleep(pid, deadline, 0);
-            match run_other_linux_processes(output, caller, LINUX_FUTEX_SYSCALL) {
+            // Blocked until FUTEX_WAKE marks the record (and the process
+            // ready), a signal or the deadline.
+            let wait = WaitOn::of(wait_events::FUTEX).until(deadline);
+            match run_other_linux_processes(output, caller, LINUX_FUTEX_SYSCALL, wait) {
                 // Yielded: the call starts again and finds its wait.
                 Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {
                     return LINUX_RETURN_TO_KERNEL;
@@ -483,7 +482,6 @@ pub(super) fn linux_futex_live_return(
                 }
             }
         };
-        linux_process::set_live_process_futex_sleep(pid, None);
         let wait = take_linux_process_futex_wait(&mut LINUX_FUTEX_COORDINATION.lock(), pid, tid);
         linux_trace_futex(
             6,
@@ -627,8 +625,9 @@ pub(super) fn linux_futex_wait_live_return(
     };
     let Some(target) = ready_linux_thread_handle() else {
         // Another process may be the one to change the futex word.
+        // No record names this wait, so nothing wakes it but a change.
         if deadline == 0 {
-            return match run_other_linux_processes(output, caller, number) {
+            return match run_other_linux_processes(output, caller, number, WaitOn::ANYTHING) {
                 Some(LinuxBlockedWait::Return(result)) => result,
                 // Callers recheck their condition after any wakeup, spurious
                 // ones included.
@@ -647,7 +646,12 @@ pub(super) fn linux_futex_wait_live_return(
             {
                 return 0;
             }
-            let turn = linux_timed_wait_run_others(output, caller, number, Some(deadline));
+            let turn = linux_timed_wait_run_others(
+                output,
+                caller,
+                number,
+                WaitOn::ANYTHING.until(deadline),
+            );
             if let LinuxWaitTurn::Done(result) = turn {
                 return result;
             }
@@ -905,7 +909,7 @@ pub(super) fn linux_futex_waitv_live_return(
                 output,
                 caller,
                 LINUX_FUTEX_WAITV_SYSCALL,
-                (deadline != 0).then_some(deadline),
+                WaitOn::of(wait_events::FUTEX).until(deadline),
             );
             match turn {
                 // Yielded: the call starts again and finds its records.

@@ -1346,10 +1346,16 @@ pub(super) fn linux_descriptor_read_live_return(
             && (!crate::serial_input_ready() || linux_console_held_by_domain_exec())
         {
             if ready_linux_thread_handle().is_some() || current_linux_runtime_cpu_index() != 0 {
-                return linux_retry_later_live_return(output, caller, LINUX_READ_SYSCALL);
+                return linux_retry_later_live_return(
+                    output,
+                    caller,
+                    LINUX_READ_SYSCALL,
+                    WaitOn::ANYTHING,
+                );
             }
+            // The serial console is polled: every tick looks again.
             if let Some(LinuxBlockedWait::Return(result)) =
-                run_other_linux_processes(output, caller, LINUX_READ_SYSCALL)
+                run_other_linux_processes(output, caller, LINUX_READ_SYSCALL, WaitOn::ANYTHING)
             {
                 return result;
             }
@@ -1399,7 +1405,7 @@ pub(super) fn linux_descriptor_read_live_return(
         && (linux_inotify_descriptor(descriptor) || linux_fanotify_descriptor(descriptor))
         && !linux_socket_flags(descriptor).is_some_and(|flags| flags & LINUX_O_NONBLOCK as u32 != 0)
     {
-        return linux_retry_later_live_return(output, caller, LINUX_READ_SYSCALL);
+        return linux_retry_later_live_return(output, caller, LINUX_READ_SYSCALL, WaitOn::ANYTHING);
     }
     if immediate != LINUX_ENOSYS
         || !linux_eventfd_descriptor(descriptor)
@@ -1702,7 +1708,8 @@ fn linux_blocking_descriptor_io_live_return(
         return LINUX_ESRCH;
     };
     let Some(target) = ready_linux_thread_handle() else {
-        return match run_other_linux_processes(output, caller, number) {
+        let wait = WaitOn::ANYTHING.until(deadline);
+        return match run_other_linux_processes(output, caller, number, wait) {
             Some(LinuxBlockedWait::Return(result)) => result,
             _ => linux_restart_syscall_live_return(output, caller, number),
         };
@@ -1846,8 +1853,9 @@ pub(super) fn linux_local_socket_io_live_return(
         .store(false, Ordering::SeqCst);
     match result {
         LINUX_EAGAIN => {
+            let wait = linux_descriptor_wait(descriptor);
             let Some(deadline) = deadline else {
-                return linux_retry_later_live_return(output, caller, number);
+                return linux_retry_later_live_return(output, caller, number, wait);
             };
             if linux_elapsed_nanoseconds().is_none_or(|now| now >= deadline) {
                 return LINUX_EAGAIN;
@@ -1855,7 +1863,8 @@ pub(super) fn linux_local_socket_io_live_return(
             // The restarted call takes the deadline back; a call that ends
             // here instead (a signal) drops it.
             save_linux_restart_deadline(caller.rip, deadline);
-            let result = linux_retry_later_live_return(output, caller, number);
+            let result =
+                linux_retry_later_live_return(output, caller, number, wait.until(deadline));
             if !matches!(result, LINUX_RETURN_FROM_IRET | LINUX_RETURN_TO_KERNEL)
                 && result != number
             {
@@ -1883,6 +1892,7 @@ pub(super) fn linux_retry_later_live_return(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
     number: u64,
+    wait: WaitOn,
 ) -> u64 {
     if linux_light_thread_here().is_some() {
         return migrate_current_linux_thread_to_owner(caller, number);
@@ -1934,7 +1944,7 @@ pub(super) fn linux_retry_later_live_return(
             return LINUX_RETURN_FROM_IRET;
         }
     }
-    match run_other_linux_processes_deferring(output, caller, number, !others_first) {
+    match run_other_linux_processes_deferring(output, caller, number, wait, !others_first) {
         Some(LinuxBlockedWait::Return(result)) => result,
         _ => linux_restart_syscall_live_return(output, caller, number),
     }

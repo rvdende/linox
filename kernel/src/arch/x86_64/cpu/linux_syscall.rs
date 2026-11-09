@@ -88,6 +88,11 @@ pub(super) extern "sysv64" fn linux_syscall_handler(
         (user_stack, user_rip, user_rflags),
         inotify,
     );
+    // A call that may have changed what another process waits for wakes
+    // the waits that have no waker of their own (`events::STATE`).
+    if linux_syscall_may_change_waits(number) {
+        crate::linux_wait_queue::note_state_change();
+    }
     // Damage a volume found during the call is reported as it returns.
     let result = linux_volume_failures(result);
     crate::linux_profile::time_syscall(number, timer::timestamp_counter().wrapping_sub(started));
@@ -100,6 +105,41 @@ pub(super) extern "sysv64" fn linux_syscall_handler(
         set_user_time_stamp_access(linux_user_time_stamp_allowed());
     }
     result
+}
+
+/// Whether system call `number` may change what a call of another process
+/// waits for, where that has no waker of its own (`events::STATE`): any
+/// but those that only read the caller's own state or the clock, sleep,
+/// or wake their waiters themselves (futex).
+fn linux_syscall_may_change_waits(number: u64) -> bool {
+    !matches!(
+        number,
+        LINUX_FUTEX_SYSCALL
+            | LINUX_SCHED_YIELD_SYSCALL
+            | LINUX_NANOSLEEP_SYSCALL
+            | LINUX_CLOCK_NANOSLEEP_SYSCALL
+            | LINUX_CLOCK_GETTIME_SYSCALL
+            | LINUX_GETTIMEOFDAY_SYSCALL
+            | LINUX_GETPID_SYSCALL
+            | LINUX_GETTID_SYSCALL
+            | LINUX_GETPPID_SYSCALL
+            | LINUX_GETUID_SYSCALL
+            | LINUX_GETEUID_SYSCALL
+            | LINUX_GETGID_SYSCALL
+            | LINUX_GETEGID_SYSCALL
+            | LINUX_FSTAT_SYSCALL
+            | LINUX_STAT_SYSCALL
+            | LINUX_LSTAT_SYSCALL
+            | LINUX_NEWFSTATAT_SYSCALL
+            | LINUX_STATX_SYSCALL
+            | LINUX_GETRANDOM_SYSCALL
+            | LINUX_RT_SIGPROCMASK_SYSCALL
+            | LINUX_MPROTECT_SYSCALL
+            | LINUX_MADVISE_SYSCALL
+            | LINUX_BRK_SYSCALL
+            | LINUX_GETRUSAGE_SYSCALL
+            | LINUX_PREEMPT_SYSCALL
+    )
 }
 
 /// The trace line of this system call when its process is traced
@@ -546,7 +586,12 @@ fn linux_syscall_dispatch(
                 // A blocking read of /dev/kmsg with no new record: let the
                 // rest of the domain run, then read again.
                 LINUX_EAGAIN if linux_kernel_log_read_waits(number, first_argument) => {
-                    linux_retry_later_live_return(registers, syscall_return, number)
+                    linux_retry_later_live_return(
+                        registers,
+                        syscall_return,
+                        number,
+                        WaitOn::ANYTHING,
+                    )
                 }
                 result => result,
             }
@@ -559,7 +604,12 @@ fn linux_syscall_dispatch(
                 // read of it waits for a fault to read.
                 LINUX_EAGAIN if linux_userfaultfd_descriptor(first_argument) => {
                     if number == LINUX_READ_SYSCALL && !linux_socket_nonblocking(first_argument) {
-                        linux_retry_later_live_return(registers, syscall_return, number)
+                        linux_retry_later_live_return(
+                            registers,
+                            syscall_return,
+                            number,
+                            WaitOn::ANYTHING,
+                        )
                     } else {
                         LINUX_EAGAIN
                     }
@@ -567,16 +617,24 @@ fn linux_syscall_dispatch(
                 // A blocking read of /dev/net/tun waits for a packet.
                 LINUX_EAGAIN if linux_tun_file(first_argument).is_some() => {
                     if number == LINUX_READ_SYSCALL && !linux_socket_nonblocking(first_argument) {
-                        linux_retry_later_live_return(registers, syscall_return, number)
+                        linux_retry_later_live_return(
+                            registers,
+                            syscall_return,
+                            number,
+                            WaitOn::ANYTHING,
+                        )
                     } else {
                         LINUX_EAGAIN
                     }
                 }
                 // An ioctl that waits for the GPU: let the rest of the
                 // domain run, then issue it again.
-                LINUX_EAGAIN if number == LINUX_IOCTL_SYSCALL => {
-                    linux_retry_later_live_return(registers, syscall_return, number)
-                }
+                LINUX_EAGAIN if number == LINUX_IOCTL_SYSCALL => linux_retry_later_live_return(
+                    registers,
+                    syscall_return,
+                    number,
+                    WaitOn::ANYTHING,
+                ),
                 result => result,
             }
         }

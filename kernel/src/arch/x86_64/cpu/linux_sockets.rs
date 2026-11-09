@@ -1340,13 +1340,16 @@ pub(super) fn linux_socket_recvfrom(
                 // The peer, often a forked child on a socketpair, runs; the
                 // receive is retried, or the call restarts later.
                 Err(crate::linux_socket::Error::WouldBlock) => {
-                    match run_other_linux_processes(output, caller, syscall) {
+                    let wait = WaitOn::keyed(wait_events::SOCKET, u64::from(slot));
+                    match run_other_linux_processes(output, caller, syscall, wait) {
                         Some(LinuxBlockedWait::Recheck) => continue,
                         Some(LinuxBlockedWait::Return(result)) => return result,
                         // Nothing else can run now: the call waits parked
                         // and starts again, as a blocking receive never
                         // answers EAGAIN (mq_notify03's helper thread).
-                        None => return linux_retry_later_live_return(output, caller, syscall),
+                        None => {
+                            return linux_retry_later_live_return(output, caller, syscall, wait)
+                        }
                     }
                 }
                 result => break result,
@@ -1894,13 +1897,16 @@ pub(super) fn linux_socket_recvmsg(
                 // The peer, often a forked child on a socketpair, runs; the
                 // receive is retried, or the call restarts later.
                 Err(crate::linux_socket::Error::WouldBlock) => {
-                    match run_other_linux_processes(output, caller, syscall) {
+                    let wait = WaitOn::keyed(wait_events::SOCKET, u64::from(slot));
+                    match run_other_linux_processes(output, caller, syscall, wait) {
                         Some(LinuxBlockedWait::Recheck) => continue,
                         Some(LinuxBlockedWait::Return(result)) => return result,
                         // Nothing else can run now: the call waits parked
                         // and starts again, as a blocking receive never
                         // answers EAGAIN (mq_notify03's helper thread).
-                        None => return linux_retry_later_live_return(output, caller, syscall),
+                        None => {
+                            return linux_retry_later_live_return(output, caller, syscall, wait)
+                        }
                     }
                 }
                 result => break result,

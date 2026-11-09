@@ -419,6 +419,13 @@ fn linux_show_task_states() {
         if next == current {
             serial_write(" (current)");
         }
+        // Blocked: what wakes it (`linux_wait_queue::events`) and when.
+        if let Some(block) = linux_process::live_process_block(next) {
+            serial_write(" blocked events/deadline ");
+            serial_write_u64(u64::from(block.events()));
+            serial_write("/");
+            serial_write_u64(block.deadline());
+        }
         serial_write("\r\n");
         for slot in 0..LINUX_THREAD_LIMIT {
             let thread = if next == current {

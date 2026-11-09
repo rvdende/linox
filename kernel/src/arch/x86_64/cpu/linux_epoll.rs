@@ -263,6 +263,24 @@ static LINUX_EPOLL_CURSORS: [AtomicU16; LINUX_DESCRIPTOR_TABLE_LIMIT as usize] =
 /// the user array at `address`, as epoll_wait does: each watch at most
 /// once, starting where the last call stopped. The count, EFAULT when
 /// nothing could be written, or the instance's error.
+/// What a wait on epoll descriptor `epoll` waits on: what each watched
+/// descriptor's readiness waits on (`linux_descriptor_wait`).
+fn linux_epoll_wait_on(epoll: u64) -> WaitOn {
+    if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) || !linux_epoll_descriptor(epoll) {
+        return WaitOn::ANYTHING;
+    }
+    let instance = (linux_epoll_instance(epoll) as u32).wrapping_add(1);
+    (0..LINUX_DESCRIPTOR_TABLE_LIMIT as usize)
+        .filter(|slot| {
+            X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_EPOLL[*slot].load(Ordering::SeqCst) == instance
+        })
+        .map(|slot| X86_RUNTIME.LINUX_RUNTIME_EPOLL_WATCH_TARGET[slot].load(Ordering::SeqCst))
+        .filter(|target| *target != 0)
+        .fold(WaitOn::NOTHING, |wait, target| {
+            wait.and(linux_descriptor_wait(u64::from(target - 1)))
+        })
+}
+
 fn linux_epoll_collect(epoll: u64, address: u64, maximum: u64) -> Result<u64, u64> {
     let limit = LINUX_DESCRIPTOR_TABLE_LIMIT as usize;
     let cursor = &LINUX_EPOLL_CURSORS[(epoll as usize) % limit];
@@ -793,7 +811,8 @@ pub(super) fn linux_epoll_wait_duration_live_return(
                     }) {
                         break Ok(0);
                     }
-                    let turn = linux_timed_wait_run_others(output, caller, number, deadline);
+                    let wait = linux_epoll_wait_on(input.epoll).until_some(deadline);
+                    let turn = linux_timed_wait_run_others(output, caller, number, wait);
                     if let LinuxWaitTurn::Done(result) = turn {
                         break Ok(result);
                     }

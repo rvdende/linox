@@ -225,7 +225,9 @@ pub(super) fn linux_lease_live_return(
                 }
             }
         }
-        match run_other_linux_processes(output, caller, number) {
+        // A lease is broken by its holder's fcntl, or by force once the
+        // lease break time has passed: every tick looks again.
+        match run_other_linux_processes(output, caller, number, WaitOn::ANYTHING) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => return result,
             None => match ready_linux_thread_handle() {
@@ -812,7 +814,12 @@ pub(super) fn linux_flock_live_return(
                 }
             }
         }
-        match run_other_linux_processes(output, caller, LINUX_FLOCK_SYSCALL) {
+        match run_other_linux_processes(
+            output,
+            caller,
+            LINUX_FLOCK_SYSCALL,
+            WaitOn::of(wait_events::STATE),
+        ) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => return result,
             None => match ready_linux_thread_handle() {
@@ -1011,7 +1018,12 @@ pub(super) fn linux_fcntl_setlkw_live_return(
                 }
             }
         }
-        match run_other_linux_processes(output, caller, LINUX_FCNTL_SYSCALL) {
+        match run_other_linux_processes(
+            output,
+            caller,
+            LINUX_FCNTL_SYSCALL,
+            WaitOn::of(wait_events::STATE),
+        ) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => return result,
             // A sibling thread, which may hold the lock, is ready: it runs

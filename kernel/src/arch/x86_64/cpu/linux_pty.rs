@@ -221,7 +221,7 @@ pub(super) fn linux_pty_syscall_live_return(
         },
     };
     if result == LINUX_EAGAIN && !nonblocking {
-        return linux_retry_later_live_return(output, caller, number);
+        return linux_retry_later_live_return(output, caller, number, WaitOn::ANYTHING);
     }
     result
 }

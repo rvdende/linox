@@ -767,9 +767,19 @@ pub(super) fn linux_fanotify_permission_check(
         Permission::Denied => Some(LINUX_EPERM),
         Permission::Asked => {
             wake_linux_descriptor_waits();
-            Some(linux_retry_later_live_return(output, caller, number))
+            Some(linux_retry_later_live_return(
+                output,
+                caller,
+                number,
+                WaitOn::ANYTHING,
+            ))
         }
-        Permission::Waiting => Some(linux_retry_later_live_return(output, caller, number)),
+        Permission::Waiting => Some(linux_retry_later_live_return(
+            output,
+            caller,
+            number,
+            WaitOn::ANYTHING,
+        )),
     }
 }
 

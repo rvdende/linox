@@ -396,7 +396,9 @@ fn linux_splice_live_return(
         {
             LINUX_EAGAIN
         }
-        LinuxSpliceStep::Blocked => linux_retry_later_live_return(output, caller, number),
+        LinuxSpliceStep::Blocked => {
+            linux_retry_later_live_return(output, caller, number, WaitOn::ANYTHING)
+        }
     }
 }
 

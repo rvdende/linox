@@ -670,11 +670,12 @@ pub(super) fn linux_rt_sigtimedwait_live_return(
             }) {
                 break Ok(LINUX_EAGAIN);
             }
+            // Only a signal or the deadline ends it.
             let turn = linux_timed_wait_run_others(
                 output,
                 caller,
                 LINUX_RT_SIGTIMEDWAIT_SYSCALL,
-                deadline,
+                WaitOn::NOTHING.until_some(deadline),
             );
             if let LinuxWaitTurn::Done(result) = turn {
                 break Ok(result);
@@ -1005,6 +1006,10 @@ pub(crate) fn sample_linux_profile(frame: &UserInterruptFrame) {
 }
 
 pub(crate) fn expire_linux_waits_from_timer(frame: &mut UserInterruptFrame) {
+    // Waits on polled devices and the clock look again (`events::TICK`).
+    if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Relaxed) {
+        crate::linux_wait_queue::note_tick();
+    }
     if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && !X86_RUNTIME
             .LINUX_RUNTIME_STALLED_DIAGNOSTIC_WRITTEN
@@ -1920,7 +1925,14 @@ fn linux_stop_in_call(
         if !linux_process::live_process_stopped(pid) {
             break 0;
         }
-        match run_other_linux_processes_deferring(output, caller, LINUX_KILL_SYSCALL, false) {
+        // SIGCONT (a signal, or a kill: a state change) ends the stop.
+        match run_other_linux_processes_deferring(
+            output,
+            caller,
+            LINUX_KILL_SYSCALL,
+            WaitOn::of(wait_events::STATE),
+            false,
+        ) {
             Some(LinuxBlockedWait::Return(result)) => break result,
             Some(LinuxBlockedWait::Recheck) => {}
             None => linux_wait_for_interrupt(),
@@ -3365,5 +3377,15 @@ fn linux_enqueue_signal(
             return Err(crate::linux_signal::Error::NoMemory);
         }
     }
-    crate::linux_signal::enqueue(instance, scope, slot, pending, realtime)
+    let queued = crate::linux_signal::enqueue(instance, scope, slot, pending, realtime);
+    // A signal ends any wait its process is blocked in, or is looked at
+    // there (a blocked one only by a wait for it, sigtimedwait), and the
+    // call waits on: the process makes the run queue again either way.
+    if queued.is_ok() && instance == linux_signal_instance() {
+        linux_process::wake_live_process_at_slot(match scope {
+            crate::linux_signal::Scope::Process => slot,
+            crate::linux_signal::Scope::Thread => slot / crate::linux_signal::THREAD_LIMIT,
+        });
+    }
+    queued
 }

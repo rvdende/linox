@@ -445,6 +445,9 @@ struct Slot {
     /// only grow (wrapping); a watch remembers the counts it last saw.
     input_events: u32,
     output_events: u32,
+    /// The slot's own id, which its wakeups name
+    /// (`linux_wait_queue::events::SOCKET`): set as it enters the table.
+    id: SlotId,
     /// The input event an EPOLLEXCLUSIVE watch claimed last: each event
     /// wakes one exclusive watcher, not all of them.
     exclusive_claim: Option<u32>,
@@ -508,6 +511,7 @@ impl Slot {
             netlink_messages: VecDeque::new(),
             input_events: 0,
             output_events: 0,
+            id: 0,
             exclusive_claim: None,
             packet_type: 0,
             packet_version: 0,
@@ -521,10 +525,21 @@ impl Slot {
 
     fn note_input(&mut self) {
         self.input_events = self.input_events.wrapping_add(1);
+        self.wake();
     }
 
     fn note_output(&mut self) {
         self.output_events = self.output_events.wrapping_add(1);
+        self.wake();
+    }
+
+    /// Wakes the calls blocked on this socket: something they wait for may
+    /// have changed (docs/SCHEDULER.md, step 5).
+    fn wake(&self) {
+        crate::linux_wait_queue::notify(
+            crate::linux_wait_queue::events::SOCKET,
+            u64::from(self.id),
+        );
     }
 
     /// A change either side of the socket may wait for: a hangup, a
@@ -1217,8 +1232,9 @@ impl Sockets {
     }
 
     /// Puts a new socket in the table and returns its id.
-    fn insert(&mut self, slot: Slot) -> Result<SlotId, Error> {
+    fn insert(&mut self, mut slot: Slot) -> Result<SlotId, Error> {
         let index = vacant(&mut self.slots)?;
+        slot.id = index as SlotId;
         self.slots[index] = Some(slot);
         Ok(index as SlotId)
     }
@@ -1564,10 +1580,9 @@ impl Sockets {
             .map_err(|_| Error::Exhausted)?;
         let accepted = self.insert(accepted)?;
         unix_in_mut(&mut self.slots, id).ok_or(Error::Invalid)?.peer = Some(accepted);
-        slot_in_mut(&mut self.slots, peer)
-            .ok_or(Error::Invalid)?
-            .pending
-            .push_back(accepted);
+        let listener = slot_in_mut(&mut self.slots, peer).ok_or(Error::Invalid)?;
+        listener.pending.push_back(accepted);
+        listener.wake();
         Ok(())
     }
 
@@ -2071,6 +2086,7 @@ impl Sockets {
         accepted.remote = Some(remote);
         accepted.local_port = local_port;
         accepted.options = options;
+        accepted.id = accepted_index as SlotId;
         slots[accepted_index] = Some(accepted);
         let listener = slot_in_mut(slots, id).ok_or(Error::Invalid)?;
         listener.handle = Some(replacement);
@@ -2197,12 +2213,12 @@ impl Sockets {
                     .try_reserve(1)
                     .map_err(|_| Error::Exhausted)?;
                 let accepted_index = vacant(slots)?;
+                accepted.id = accepted_index as SlotId;
                 slots[accepted_index] = Some(accepted);
                 let accepted = accepted_index as SlotId;
-                slot_in_mut(slots, listener)
-                    .ok_or(Error::Invalid)?
-                    .pending
-                    .push_back(accepted);
+                let listener = slot_in_mut(slots, listener).ok_or(Error::Invalid)?;
+                listener.pending.push_back(accepted);
+                listener.wake();
                 let state = slot_in_mut(slots, id).ok_or(Error::Invalid)?;
                 state.local_port = local_port;
                 state.remote = Some(remote);
@@ -2842,13 +2858,17 @@ impl Sockets {
     /// have made room for a write that was refused, as Linux wakes a pipe's
     /// writers when a read frees a slot of a full pipe (fs/pipe.c), and a
     /// datagram socket's on every message read.
+    /// Writers blocked on the queue are woken by every read, which may
+    /// have made the room their write needs.
     fn note_drained(&mut self, id: SlotId, room: usize, datagram: bool) {
-        if room >= LOCAL_ATOMIC_WRITE && !datagram {
-            return;
-        }
+        let event = !(room >= LOCAL_ATOMIC_WRITE && !datagram);
         for writer in self.slots.iter_mut().flatten() {
             if writer.peer == Some(id) {
-                writer.note_output();
+                if event {
+                    writer.note_output();
+                } else {
+                    writer.wake();
+                }
             }
         }
     }

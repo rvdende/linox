@@ -929,18 +929,18 @@ pub(super) enum LinuxWaitTurn {
     Idle,
 }
 
-/// Lets other processes run while a timed wait has nothing to wait for in
-/// its own process.
+/// Blocks a timed wait for `wait` (with its deadline) while it has nothing
+/// to wait for in its own process.
 pub(super) fn linux_timed_wait_run_others(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
     number: u64,
-    deadline: Option<u64>,
+    wait: WaitOn,
 ) -> LinuxWaitTurn {
-    if let Some(deadline) = deadline {
-        save_linux_restart_deadline(caller.rip, deadline);
+    if wait.deadline() != 0 {
+        save_linux_restart_deadline(caller.rip, wait.deadline());
     }
-    let turn = match run_other_linux_processes(output, caller, number) {
+    let turn = match run_other_linux_processes(output, caller, number, wait) {
         // Yielded, or set to start again from user mode: the call comes
         // back and takes its deadline.
         Some(LinuxBlockedWait::Return(result))
@@ -1098,23 +1098,19 @@ fn linux_sleep_live_return(
                     return LINUX_EFAULT;
                 }
             }
-            // Passed over until shortly before its deadline, then resumed
-            // each round to look at the clock itself (see
-            // mark_linux_process_asleep): a thousand children sleeping in
-            // usleep (futex_cmp_requeue01) took the CPU from the one with
-            // work when every round resumed each of them.
-            let pid = current_linux_process_pid();
-            mark_linux_process_asleep(pid, deadline, linux_sleep_wake_margin());
-            let turn = linux_timed_wait_run_others(output, caller, number, Some(deadline));
+            // Blocked until its deadline or a signal: a thousand children
+            // sleeping in usleep (futex_cmp_requeue01) took the CPU from the
+            // one with work when every round resumed each of them.
+            let turn = linux_timed_wait_run_others(
+                output,
+                caller,
+                number,
+                WaitOn::NOTHING.until(deadline),
+            );
             if let LinuxWaitTurn::Done(result) = turn {
-                // Yielded to start again: still asleep until then.
-                if result != LINUX_RETURN_TO_KERNEL && result != number {
-                    linux_process::set_live_process_futex_sleep(pid, None);
-                }
                 return result;
             }
             if let Some(target) = ready_linux_thread_handle() {
-                linux_process::set_live_process_futex_sleep(pid, None);
                 break 'target target;
             }
             // Wake at the deadline, not on the next tick after it, whether
@@ -1126,9 +1122,6 @@ fn linux_sleep_live_return(
                 linux_wait_for_interrupt();
             }
         }
-        // Its deadline has passed: a mark left would count as a sleeper
-        // due for its next wait of another kind.
-        linux_process::set_live_process_futex_sleep(current_linux_process_pid(), None);
         return 0;
     };
     let Some(tls) = linux_thread_context(current) else {

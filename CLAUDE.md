@@ -50,11 +50,14 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    (`run_linux_runtime_loop`) owns the run queue and runs every process,
    init included, round-robin, so none runs nested inside another's system
    call; forks run the parent first (a vfork parent waits for its child's
-   exec or exit), and every process can be preempted by the timer. Next:
-   step 5, real wakeups (wait queues that hand the woken task its result
-   instead of resuming every parked call to look again) and an activation
-   per thread; then step 6, per-CPU loops with IPI wakeups and load
-   balancing, and splitting `kernel_entry_lock`.
+   exec or exit), and every process can be preempted by the timer. Step 5's
+   wakeups are done too: a waiting call blocks on what it waits for
+   (`linux_wait_queue`: futex, children, socket and pipe slots, state
+   changes, ticks, its deadline, signals) and leaves the run queue until a
+   waker makes it ready, instead of being resumed to look again. Next: an
+   activation per thread and cheaper switches (the rest of step 5); then
+   step 6, per-CPU loops with IPI wakeups and load balancing, and
+   splitting `kernel_entry_lock`.
 3. **A real task and memory model:** per-process memory-area tracking (VMAs),
    a shared page cache, and dynamically sized tables in place of the fixed
    arrays (32 threads per process, kept in per-thread arrays that the
@@ -64,10 +67,9 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    up to `linux_process::PROCESS_LIMIT` (4096) processes (u16 slots, a
    pid index, signal queues, records and kernel stacks allocated as slots
    are first used; records of slots above 256 are freed with their
-   process). Waits still recheck by being resumed; a single-threaded
-   process asleep in a futex wait is skipped until woken, signalled or
-   due (`linux_process_asleep`), and real wakeups for the other waits are
-   step 5 of docs/SCHEDULER.md. Pages have a map count in the frame allocator
+   process). Waits block until woken (`Process::block`, docs/SCHEDULER.md
+   "Wait queues"); a multithreaded process blocks as a whole until its
+   threads get activations of their own. Pages have a map count in the frame allocator
    (`memory::share_frames`): every address space that maps another's frame
    takes a count, and releasing drops one. Anonymous MAP_SHARED memory is
    an unnamed overlay shmem node, freed with its last mapping. Move large

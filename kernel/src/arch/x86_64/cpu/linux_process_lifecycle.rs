@@ -2253,7 +2253,8 @@ pub(super) fn linux_init_exit_kill_others_live_return(
     for pid in living.0[..living.1].iter().copied() {
         let _ = linux_queue_process_signal(pid, LINUX_SIGKILL, LINUX_SI_KERNEL, None);
     }
-    let ran = run_other_linux_processes(output, caller, number);
+    // Blocked until the killed processes' exits change something.
+    let ran = run_other_linux_processes(output, caller, number, WaitOn::of(wait_events::STATE));
     if ran.is_none() && rounds >= LINUX_INIT_EXIT_FORCE_ROUND {
         // The scheduler keeps failing to switch to the killed processes, so
         // they cannot run their own exits; end them from here.
@@ -2391,7 +2392,7 @@ pub(super) fn linux_exit_child_to_parent(
             return LINUX_RETURN_TO_KERNEL;
         }
         if let Some(LinuxBlockedWait::Return(result)) =
-            run_other_linux_processes(output, caller, LINUX_EXIT_SYSCALL)
+            run_other_linux_processes(output, caller, LINUX_EXIT_SYSCALL, WaitOn::ANYTHING)
         {
             return result;
         }
@@ -2555,7 +2556,7 @@ pub(in crate::arch::x86_64) fn linux_wait_for_interrupt() {
     let mut sleeper_due = false;
     if let Some((deadline, now)) = linux_elapsed_nanoseconds()
         .filter(|_| current_cpu_index_checked() == Some(0))
-        .and_then(|now| Some((linux_process::next_live_futex_sleep_deadline()?, now)))
+        .and_then(|now| Some((linux_process::next_live_block_deadline()?, now)))
     {
         if deadline <= now {
             sleeper_due = true;
@@ -2919,29 +2920,26 @@ pub(super) fn linux_waitid_live(
         return LINUX_ECHILD;
     }
     loop {
-        // Asleep until a child changes state or a signal comes (see
+        // Blocked until a child changes state or a signal comes (see
         // linux_wait4_live).
-        mark_linux_process_asleep(pid, 0, 0);
-        let turn = run_other_linux_processes(output, caller, LINUX_WAITID_SYSCALL);
+        let turn = run_other_linux_processes(
+            output,
+            caller,
+            LINUX_WAITID_SYSCALL,
+            WaitOn::of(wait_events::CHILD),
+        );
         match turn {
             Some(LinuxBlockedWait::Recheck) => {}
-            // Yielded to start again from user mode: still waiting, so the
-            // mark stays until a wake or the dispatch that restarts it.
+            // Yielded to start again from user mode: still blocked until a
+            // wake or the dispatch that restarts it.
             Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {
                 return LINUX_RETURN_TO_KERNEL;
             }
-            Some(LinuxBlockedWait::Return(result)) => {
-                linux_process::set_live_process_futex_sleep(pid, None);
-                return result;
-            }
-            None => {
-                linux_process::set_live_process_futex_sleep(pid, None);
-                return LINUX_ECHILD;
-            }
+            Some(LinuxBlockedWait::Return(result)) => return result,
+            None => return LINUX_ECHILD,
         }
         let result = linux_waitid(id_type, id, information, options, rusage);
         if result != LINUX_ENOSYS {
-            linux_process::set_live_process_futex_sleep(pid, None);
             return result;
         }
     }
@@ -2969,37 +2967,33 @@ pub(super) fn linux_wait4_live(
             result
         }
     };
-    let waiter = current_linux_process_pid();
     loop {
         let result = linux_wait4(pid, status_address, options, rusage);
         if options as u32 as u64 & LINUX_WNOHANG != 0 {
             return seen(linux_wait_nohang_live_return(result, caller));
         }
         if result != LINUX_ENOSYS {
-            linux_process::set_live_process_futex_sleep(waiter, None);
             return seen(result);
         }
-        // Asleep until a child (or tracee) changes state, which clears
+        // Blocked until a child (or tracee) changes state, which clears
         // `waiting` (linux_process's child wakes), or a signal it takes:
         // resumed in every scheduling round to look again, an LTP harness
         // waiting for its test was dispatched some twenty times for each
         // of futex_cmp_requeue01's thousand forks, which then took longer
         // than the children's five-second waits.
-        mark_linux_process_asleep(waiter, 0, 0);
-        match run_other_linux_processes(output, caller, LINUX_WAIT4_SYSCALL) {
+        match run_other_linux_processes(
+            output,
+            caller,
+            LINUX_WAIT4_SYSCALL,
+            WaitOn::of(wait_events::CHILD),
+        ) {
             Some(LinuxBlockedWait::Recheck) => {}
             // Yielded to start again from user mode: still waiting.
             Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL)) => {
                 return LINUX_RETURN_TO_KERNEL;
             }
-            Some(LinuxBlockedWait::Return(result)) => {
-                linux_process::set_live_process_futex_sleep(waiter, None);
-                return result;
-            }
-            None => {
-                linux_process::set_live_process_futex_sleep(waiter, None);
-                return LINUX_ECHILD;
-            }
+            Some(LinuxBlockedWait::Return(result)) => return result,
+            None => return LINUX_ECHILD,
         }
     }
 }

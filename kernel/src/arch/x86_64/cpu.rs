@@ -164,6 +164,7 @@ use linux_user_memory::*;
 use linux_userfaultfd::*;
 pub(crate) use native_services::*;
 
+use crate::linux_wait_queue::{events as wait_events, WaitOn};
 use crate::{
     address_space,
     capability::Rights,
