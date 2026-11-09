@@ -29,16 +29,21 @@
 //! - [`entry`]: the entry stubs of the device, timer and inter-processor
 //!   interrupt vectors.
 //! - [`ap_start`]: the application processors' start-up trampoline.
-//! - [`tsc`]: the timestamp counter.
+//! - [`tsc`]: the timestamp counter, and the processor id beside it.
 //! - [`boot`]: the kernel's entry from the loader and the boot information
 //!   it hands over.
-//! - [`control`]: control registers, the stack pointer, CR0.WP.
+//! - [`control`]: control registers, the stack pointer, CR0.WP, the task
+//!   register.
+//! - [`cpu_tables`]: each CPU's GDT, TSS, IDT, entry-state record and
+//!   stacks.
 //! - [`crash`]: the bring-up exception table, the live page-table walk and
 //!   the reads crash reports make.
 //! - [`take_once`]: a static handed out as `&'static mut` once.
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
 //! - [`owned_state`]: set-once owners for long-lived kernel objects.
+//! - [`user_copy`]: copies to and from the loaded address space's user
+//!   pages, recovering from faults.
 //!
 //! Each module says who may construct its types; the constructors from a
 //! bare physical address are confined to the memory layer by
@@ -48,6 +53,7 @@ pub(crate) mod ap_start;
 pub(crate) mod boot;
 pub(crate) mod claim;
 pub(crate) mod control;
+pub(crate) mod cpu_tables;
 pub(crate) mod crash;
 pub(crate) mod dma;
 pub(crate) mod entry;
@@ -67,3 +73,4 @@ pub(crate) mod port;
 pub(crate) mod root;
 pub(crate) mod take_once;
 pub(crate) mod tsc;
+pub(crate) mod user_copy;

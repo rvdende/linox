@@ -2476,9 +2476,8 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         hardware_user_range_is_zero(execution.heap as u64, PAGE_SIZE)
     } else {
         let mut value = [0_u8; size_of::<u64>()];
-        (unsafe {
-            raw_copy_from_user(value.as_mut_ptr(), execution.heap as *const u8, value.len()) == 0
-        }) && u64::from_ne_bytes(value) == 0x4845_4150_4252_4b21
+        crate::trusted::user_copy::copy_from_user(execution.heap as u64, &mut value) == value.len()
+            && u64::from_ne_bytes(value) == 0x4845_4150_4252_4b21
     };
     let observed_stack = X86_RUNTIME.ELF_PROBE_STACK.swap(0, Ordering::SeqCst);
     let observed_stack_low = X86_RUNTIME.ELF_PROBE_STACK_LOW.swap(0, Ordering::SeqCst);

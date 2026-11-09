@@ -4,20 +4,21 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 kernel_source="${repo_root}/kernel/src"
 
-unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' ')"
-safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
-static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
+# rg exits 1 when nothing matches, which is the goal for each of these.
+unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc -l | tr -d ' ')"
+safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
+static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 410 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 410 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 367 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 367 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 179 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 179 to ${undocumented}" >&2
+if (( undocumented > 125 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 125 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 3 )); then
@@ -31,12 +32,17 @@ fi
 # sites; a file may not grow.
 per_file_limits=(
     "address_space.rs 80"
+    "arch/x86_64/cpu/boot_verify.rs 1"
+    "arch/x86_64/cpu/boot_verify_elf.rs 3"
+    "arch/x86_64/cpu/linux_user_memory.rs 1"
+    "arch/x86_64/cpu/native_services.rs 2"
     "framebuffer.rs 1"
     "image_store.rs 1"
     "lib.rs 0"
     "linux_overlay.rs 6"
     "trusted/boot.rs 9"
     "trusted/claim.rs 4"
+    "trusted/cpu_tables.rs 12"
     "trusted/dma.rs 3"
     "trusted/firmware.rs 2"
     "trusted/frame.rs 9"
@@ -52,10 +58,11 @@ per_file_limits=(
     "trusted/interrupts.rs 7"
     "trusted/lock.rs 3"
     "trusted/owned_state.rs 4"
-    "trusted/tsc.rs 1"
-    "trusted/control.rs 6"
+    "trusted/tsc.rs 3"
+    "trusted/control.rs 8"
     "trusted/crash.rs 6"
     "trusted/take_once.rs 2"
+    "trusted/user_copy.rs 2"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"
@@ -73,6 +80,7 @@ done
 forbidding_files=(
     "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
+    "arch/x86_64/cpu/architecture.rs"
     "arch/x86_64/iommu.rs"
     "arch/x86_64/paging.rs"
     "arch/x86_64/pci.rs"

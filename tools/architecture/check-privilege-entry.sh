@@ -5,6 +5,7 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cpu="$root/kernel/src/arch/x86_64/cpu.rs"
 architecture="$root/kernel/src/arch/x86_64/cpu/architecture.rs"
+cpu_tables="$root/kernel/src/trusted/cpu_tables.rs"
 address_space="$root/kernel/src/address_space.rs"
 
 fail() {
@@ -29,11 +30,17 @@ for required in \
     rg -Fq "$required" "$cpu" || fail "missing required invariant: $required"
 done
 
+# The trusted core installs each CPU's entry state and exception gates.
 for required in \
     'write_msr(GS_BASE_MSR, entry_state as u64)' \
     '2 => NMI_IST' \
     '8 => DOUBLE_FAULT_IST' \
-    '18 => MACHINE_CHECK_IST' \
+    '18 => MACHINE_CHECK_IST'; do
+    rg -Fq "$required" "$cpu_tables" || fail "missing required invariant: $required"
+done
+
+for required in \
+    'cpu_tables::exception_ist(vector)' \
     'nmi_guard_page()' \
     'nmi_upper_guard_page()' \
     'machine_check_guard_page()' \

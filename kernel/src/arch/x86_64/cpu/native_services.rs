@@ -26,6 +26,11 @@ pub(super) fn dispatch_charged_call(
     caller_domain: u64,
     frame: *mut UserTrapFrame,
 ) -> u64 {
+    // SAFETY: `frame` is null or the trap frame `cpu.rs`'s native system-call
+    // stub pushed on this CPU's kernel stack and handed to its dispatcher,
+    // this function's only caller, which uses it no more until this returns:
+    // this is the one reference to it meanwhile.
+    let frame = unsafe { frame.as_mut() };
     match number {
         0 => {
             if CONTROL_DISCOVERY_OVERRIDE_DOMAIN
@@ -48,7 +53,7 @@ pub(super) fn dispatch_charged_call(
         }
         3 => runtime_result(frame),
         4 => {
-            let Some(frame) = (unsafe { frame.as_ref() }) else {
+            let Some(frame) = frame else {
                 return u64::MAX;
             };
             let message = frame.first_argument();
@@ -74,7 +79,7 @@ pub(super) fn dispatch_charged_call(
                 u64::MAX - 2
             }
         }
-        6 => console_write(caller_domain, capability, frame),
+        6 => console_write(caller_domain, capability, frame.as_deref()),
         7 => {
             if domain::handle_permits(caller_domain, capability, 1, Rights::MANAGE) {
                 domain::take_lifecycle_event().unwrap_or(u64::MAX - 2)
@@ -83,65 +88,69 @@ pub(super) fn dispatch_charged_call(
             }
         }
         8 => blocking_receive(caller_domain, capability, frame),
-        9 => console_write_buffer(caller_domain, capability, frame),
-        10 => write_abi_descriptor(caller_domain, frame),
-        11 => write_fault_descriptor(caller_domain, capability, frame),
-        12 => write_lifecycle_descriptor(caller_domain, capability, frame),
-        13 => write_ipc_delivery_descriptor(caller_domain, capability, frame),
-        14 => write_lifecycle_identity_descriptor(caller_domain, capability, frame),
-        15 => create_auxiliary_service(caller_domain, capability, frame),
+        9 => console_write_buffer(caller_domain, capability, frame.as_deref()),
+        10 => write_abi_descriptor(caller_domain, frame.as_deref()),
+        11 => write_fault_descriptor(caller_domain, capability, frame.as_deref()),
+        12 => write_lifecycle_descriptor(caller_domain, capability, frame.as_deref()),
+        13 => write_ipc_delivery_descriptor(caller_domain, capability, frame.as_deref()),
+        14 => write_lifecycle_identity_descriptor(caller_domain, capability, frame.as_deref()),
+        15 => create_auxiliary_service(caller_domain, capability, frame.as_deref()),
         16 => network_device_call(caller_domain, capability, frame),
-        17 => root_device_call(caller_domain, capability, frame),
-        18 => volume_device_call(caller_domain, capability, frame),
+        17 => root_device_call(caller_domain, capability, frame.as_deref()),
+        18 => volume_device_call(caller_domain, capability, frame.as_deref()),
         19 => block_device_call(caller_domain, capability, frame),
         20 => network_wait_call(caller_domain, capability, frame),
         control_abi::CONSOLE_READ_LINE_OPERATION => {
-            console_read_line(caller_domain, capability, frame)
+            console_read_line(caller_domain, capability, frame.as_deref())
         }
         linox_native_abi::NATIVE_CONSOLE_READ_BYTE_OPERATION => {
             console_read_byte(caller_domain, capability, frame)
         }
-        control_abi::HOST_INSPECT_OPERATION => host_inspect(caller_domain, capability, frame),
-        control_abi::DOMAIN_CONTROL_OPERATION => {
-            container_control(caller_domain, capability, frame)
+        control_abi::HOST_INSPECT_OPERATION => {
+            host_inspect(caller_domain, capability, frame.as_deref())
         }
+        control_abi::DOMAIN_CONTROL_OPERATION => container_control(
+            caller_domain,
+            capability,
+            frame.map_or(core::ptr::null_mut(), core::ptr::from_mut),
+        ),
         control_abi::LINUX_ABI_TEST_OPERATION => {
-            linux_abi_test_results(caller_domain, capability, frame)
+            linux_abi_test_results(caller_domain, capability, frame.as_deref())
         }
         linox_native_abi::NATIVE_IMAGE_STORE_OPERATION => {
-            image_store_call(caller_domain, capability, frame)
+            image_store_call(caller_domain, capability, frame.as_deref())
         }
         linox_native_abi::NATIVE_PROGRESS_OPERATION => {
-            native_progress_call(caller_domain, capability, frame)
+            native_progress_call(caller_domain, capability, frame.as_deref())
         }
         linox_native_abi::NATIVE_NETWORK_INVENTORY_OPERATION => {
-            network_inventory_call(caller_domain, capability, frame)
+            network_inventory_call(caller_domain, capability, frame.as_deref())
         }
         // The frequency is the one the Linux clock profile already trusts; it
         // grants no authority, so no capability is required.
         linox_native_abi::NATIVE_TIMESTAMP_FREQUENCY_OPERATION => timer::monotonic_frequency()
             .unwrap_or(linox_native_abi::NATIVE_TIMESTAMP_FREQUENCY_UNAVAILABLE),
         control_abi::PACKET_PUBLISH_OPERATION => {
-            packet_publish_call(caller_domain, capability, frame)
+            packet_publish_call(caller_domain, capability, frame.as_deref())
         }
         control_abi::PACKET_CONSUME_OPERATION => {
-            packet_consume_call(caller_domain, capability, frame)
+            packet_consume_call(caller_domain, capability, frame.as_deref())
         }
         control_abi::PACKET_WAIT_OPERATION => {
             packet_wait_call(caller_domain, capability, frame, None)
         }
         control_abi::PACKET_WAIT_TIMEOUT_OPERATION => {
-            let timeout_ms = unsafe { frame.as_ref() }.map(UserTrapFrame::second_argument);
+            let timeout_ms = frame.as_deref().map(UserTrapFrame::second_argument);
             packet_wait_call(caller_domain, capability, frame, timeout_ms)
         }
         control_abi::PACKET_SPACE_WAIT_OPERATION => {
             packet_space_wait_call(caller_domain, capability, frame)
         }
         control_abi::PACKET_EGRESS_CLAIM_OPERATION => {
-            packet_egress_claim_call(caller_domain, capability, frame)
+            packet_egress_claim_call(caller_domain, capability, frame.as_deref())
         }
         control_abi::PACKET_EGRESS_ACK_OPERATION => {
-            packet_egress_ack_call(caller_domain, capability, frame)
+            packet_egress_ack_call(caller_domain, capability, frame.as_deref())
         }
         control_abi::PACKET_EGRESS_WAIT_OPERATION => packet_wait_call_for_object(
             caller_domain,
@@ -163,7 +172,7 @@ pub(super) fn dispatch_charged_call(
     }
 }
 
-fn native_progress_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
+fn native_progress_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
     if !domain::handle_permits(
         caller_domain,
         capability,
@@ -172,7 +181,7 @@ fn native_progress_call(caller_domain: u64, capability: u64, frame: *const UserT
     ) {
         return u64::MAX - 2;
     }
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Ok(size) = usize::try_from(frame.second_argument()) else {
@@ -221,9 +230,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-fn image_store_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
+fn image_store_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
     let failed = linox_native_abi::NATIVE_IMAGE_STORE_RESULT_FAILED;
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return failed;
     };
     if !domain::handle_permits(
@@ -338,8 +347,8 @@ fn packet_request(address: u64) -> Option<PacketRequest> {
     })
 }
 
-fn packet_publish_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn packet_publish_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Some(request) = packet_request(frame.first_argument()) else {
@@ -391,8 +400,8 @@ fn packet_publish_call(caller_domain: u64, capability: u64, frame: *const UserTr
     }
 }
 
-fn packet_consume_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn packet_consume_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Some(request) = packet_request(frame.first_argument()) else {
@@ -449,9 +458,9 @@ fn packet_consume_call(caller_domain: u64, capability: u64, frame: *const UserTr
 fn packet_egress_claim_call(
     caller_domain: u64,
     capability: u64,
-    frame: *const UserTrapFrame,
+    frame: Option<&UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Some(request) = packet_request(frame.first_argument()) else {
@@ -480,8 +489,12 @@ fn packet_egress_claim_call(
     }
 }
 
-fn packet_egress_ack_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn packet_egress_ack_call(
+    caller_domain: u64,
+    capability: u64,
+    frame: Option<&UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Some(request) = packet_request(frame.first_argument()) else {
@@ -523,7 +536,7 @@ fn packet_egress_ack_call(caller_domain: u64, capability: u64, frame: *const Use
 fn packet_wait_call(
     caller_domain: u64,
     capability: u64,
-    frame: *mut UserTrapFrame,
+    frame: Option<&mut UserTrapFrame>,
     timeout_ms: Option<u64>,
 ) -> u64 {
     packet_wait_call_for_object(
@@ -538,11 +551,11 @@ fn packet_wait_call(
 fn packet_wait_call_for_object(
     caller_domain: u64,
     capability: u64,
-    frame: *mut UserTrapFrame,
+    frame: Option<&mut UserTrapFrame>,
     timeout_ms: Option<u64>,
     object: u64,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let Some(request) = packet_request(frame.first_argument()) else {
@@ -635,17 +648,21 @@ fn packet_wait_call_for_object(
     }
 }
 
-fn packet_space_wait_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
+fn packet_space_wait_call(
+    caller_domain: u64,
+    capability: u64,
+    frame: Option<&mut UserTrapFrame>,
+) -> u64 {
     packet_space_wait_call_for_object(caller_domain, capability, frame, control_abi::PACKET_OBJECT)
 }
 
 fn packet_space_wait_call_for_object(
     caller_domain: u64,
     capability: u64,
-    frame: *mut UserTrapFrame,
+    frame: Option<&mut UserTrapFrame>,
     object: u64,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if frame.first_argument() != 0
@@ -693,9 +710,9 @@ fn packet_space_wait_call_for_object(
 fn packet_egress_drain_wait_call(
     caller_domain: u64,
     capability: u64,
-    frame: *mut UserTrapFrame,
+    frame: Option<&mut UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if frame.first_argument() != 0
@@ -731,8 +748,12 @@ fn packet_egress_drain_wait_call(
     }
 }
 
-fn network_wait_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+fn network_wait_call(
+    caller_domain: u64,
+    capability: u64,
+    frame: Option<&mut UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let command = frame.first_argument();
@@ -789,8 +810,12 @@ fn network_wait_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFr
     }
 }
 
-fn block_device_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+fn block_device_call(
+    caller_domain: u64,
+    capability: u64,
+    frame: Option<&mut UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let command = frame.first_argument();
@@ -843,8 +868,8 @@ fn block_device_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFr
     }
 }
 
-fn volume_device_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn volume_device_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let command = frame.first_argument();
@@ -963,8 +988,8 @@ fn volume_request(address: u64) -> Option<VolumeRequest> {
     })
 }
 
-fn root_device_call(caller_domain: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn root_device_call(caller_domain: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(
@@ -1148,8 +1173,12 @@ fn root_request_word(request: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(request[offset..offset + 8].try_into().unwrap())
 }
 
-fn network_device_call(caller_domain: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+fn network_device_call(
+    caller_domain: u64,
+    capability: u64,
+    frame: Option<&mut UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let command = frame.first_argument();
@@ -1566,9 +1595,9 @@ fn query_network_snapshot(address: u64) -> u64 {
 fn create_auxiliary_service(
     caller_domain: u64,
     capability: u64,
-    frame: *const UserTrapFrame,
+    frame: Option<&UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(caller_domain, capability, 1, Rights::MANAGE)
@@ -1653,7 +1682,7 @@ fn create_auxiliary_service(
     }
 }
 
-fn blocking_receive(domain_id: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
+fn blocking_receive(domain_id: u64, capability: u64, frame: Option<&mut UserTrapFrame>) -> u64 {
     if !domain::handle_permits(domain_id, capability, 3, Rights::READ) {
         return u64::MAX - 2;
     }
@@ -1668,7 +1697,7 @@ fn blocking_receive(domain_id: u64, capability: u64, frame: *mut UserTrapFrame) 
     let Some(peer_domain) = ipc::peer_domain(domain_id) else {
         return u64::MAX - 2;
     };
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+    let Some(frame) = frame else {
         return u64::MAX;
     };
     let action = scheduler::block_runtime(
@@ -1696,8 +1725,8 @@ fn blocking_receive(domain_id: u64, capability: u64, frame: *mut UserTrapFrame) 
     }
 }
 
-fn console_write(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn console_write(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 2, Rights::WRITE) {
@@ -1724,8 +1753,8 @@ fn console_write(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -
     length as u64
 }
 
-fn console_write_buffer(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn console_write_buffer(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 2, Rights::WRITE) {
@@ -1753,8 +1782,8 @@ fn console_write_buffer(domain_id: u64, capability: u64, frame: *const UserTrapF
     length as u64
 }
 
-fn console_read_line(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn console_read_line(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 2, Rights::READ) {
@@ -1794,8 +1823,8 @@ fn console_read_line(domain_id: u64, capability: u64, frame: *const UserTrapFram
     length as u64
 }
 
-fn console_read_byte(domain_id: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+fn console_read_byte(domain_id: u64, capability: u64, frame: Option<&mut UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 2, Rights::READ)
@@ -1820,8 +1849,8 @@ fn console_read_byte(domain_id: u64, capability: u64, frame: *mut UserTrapFrame)
     u64::from(crate::serial_read_byte_blocking())
 }
 
-fn host_inspect(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn host_inspect(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::READ)
@@ -1943,8 +1972,8 @@ fn host_inspect(domain_id: u64, capability: u64, frame: *const UserTrapFrame) ->
     }
 }
 
-fn network_inventory_call(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn network_inventory_call(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::MANAGE)
@@ -2066,9 +2095,9 @@ pub(super) fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-fn write_abi_descriptor(caller_domain: u64, frame: *const UserTrapFrame) -> u64 {
+fn write_abi_descriptor(caller_domain: u64, frame: Option<&UserTrapFrame>) -> u64 {
     let mut descriptor = control_abi::descriptor();
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if CONTROL_DESCRIPTOR_OVERRIDE_DOMAIN
@@ -2086,8 +2115,8 @@ fn write_abi_descriptor(caller_domain: u64, frame: *const UserTrapFrame) -> u64 
     descriptor.len() as u64
 }
 
-fn write_fault_descriptor(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn write_fault_descriptor(domain_id: u64, capability: u64, frame: Option<&UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::MANAGE)
@@ -2104,8 +2133,12 @@ fn write_fault_descriptor(domain_id: u64, capability: u64, frame: *const UserTra
     descriptor.len() as u64
 }
 
-fn write_lifecycle_descriptor(domain_id: u64, capability: u64, frame: *const UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+fn write_lifecycle_descriptor(
+    domain_id: u64,
+    capability: u64,
+    frame: Option<&UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::MANAGE)
@@ -2125,9 +2158,9 @@ fn write_lifecycle_descriptor(domain_id: u64, capability: u64, frame: *const Use
 fn write_ipc_delivery_descriptor(
     domain_id: u64,
     capability: u64,
-    frame: *const UserTrapFrame,
+    frame: Option<&UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 3, Rights::READ)
@@ -2147,9 +2180,9 @@ fn write_ipc_delivery_descriptor(
 fn write_lifecycle_identity_descriptor(
     domain_id: u64,
     capability: u64,
-    frame: *const UserTrapFrame,
+    frame: Option<&UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::MANAGE)
@@ -2166,8 +2199,8 @@ fn write_lifecycle_identity_descriptor(
     descriptor.len() as u64
 }
 
-fn runtime_result(frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+fn runtime_result(frame: Option<&mut UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX;
     };
     let action = scheduler::yield_runtime(
@@ -2180,6 +2213,8 @@ fn runtime_result(frame: *mut UserTrapFrame) -> u64 {
 }
 
 pub(super) fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
+    // SAFETY: as in `dispatch_charged_call`, whose caller calls this for the
+    // exit call instead.
     let Some(frame) = (unsafe { frame.as_mut() }) else {
         return u64::MAX;
     };

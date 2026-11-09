@@ -297,25 +297,23 @@ pub(super) fn verify_linux_thread_interrupt_resume_context(
     ];
     let saved = save_linux_interrupt_context(handle, interrupted, original.fs_base);
     let interrupted_context = linux_thread_return_context(handle);
-    // SAFETY: verification runs with serialized ownership of this CPU's entry
-    // state and restores the complete record before returning.
-    let saved_entry_state = unsafe { current_entry_state().read() };
+    // The live return writes this CPU's entry state; the record is put back
+    // as it was once the check has read it.
     let mut exact_frame = LinuxSyscallFrame::ZERO;
-    let exact_return_prepared = interrupted_context.is_some_and(|context| {
-        write_linux_thread_live_return(&mut exact_frame, handle, context)
-            && exact_frame == context.registers
-            && unsafe {
-                let entry_state = &*current_entry_state();
-                entry_state.user_rsp == context.rsp
-                    && entry_state.user_rip == context.rip
-                    && entry_state.user_rflags == context.rflags
-                    && entry_state.signal_rax == expected[0]
-                    && entry_state.signal_rcx == expected[2]
-                    && entry_state.signal_r11 == expected[10]
-            }
+    let exact_return_prepared = architecture::with_entry_state_restored(|| {
+        interrupted_context.is_some_and(|context| {
+            write_linux_thread_live_return(&mut exact_frame, handle, context)
+                && exact_frame == context.registers
+                && architecture::current_entry_state_copy().is_some_and(|entry_state| {
+                    entry_state.user_rsp == context.rsp
+                        && entry_state.user_rip == context.rip
+                        && entry_state.user_rflags == context.rflags
+                        && entry_state.signal_rax == expected[0]
+                        && entry_state.signal_rcx == expected[2]
+                        && entry_state.signal_r11 == expected[10]
+                })
+        })
     });
-    // SAFETY: restore the serialized per-CPU record captured above.
-    unsafe { current_entry_state().write(saved_entry_state) };
     let exact = saved
         && exact_return_prepared
         && interrupted_context.is_some_and(|context| {
@@ -2439,18 +2437,9 @@ fn verify_linux_memfd_secret_syscall() -> bool {
     let secret_value = 0x5345_4352_4554_4d45_u64.to_ne_bytes();
     let mut secret_observed = [0_u8; size_of::<u64>()];
     let userspace_accessible = mapped
-        && unsafe {
-            raw_copy_to_user(
-                mapping as *mut u8,
-                secret_value.as_ptr(),
-                secret_value.len(),
-            ) == 0
-                && raw_copy_from_user(
-                    secret_observed.as_mut_ptr(),
-                    mapping as *const u8,
-                    secret_observed.len(),
-                ) == 0
-        }
+        && crate::trusted::user_copy::copy_to_user(mapping, &secret_value) == secret_value.len()
+        && crate::trusted::user_copy::copy_from_user(mapping, &mut secret_observed)
+            == secret_observed.len()
         && secret_observed == secret_value;
     let kernel_copy_denied = userspace_accessible
         && !copy_from_linux_user(mapping, &mut [0_u8; 8])
@@ -4334,9 +4323,9 @@ pub(crate) fn publish_linux_abi_test_results() -> bool {
 pub(super) fn linux_abi_test_results(
     domain_id: u64,
     capability: u64,
-    frame: *const UserTrapFrame,
+    frame: Option<&UserTrapFrame>,
 ) -> u64 {
-    let Some(frame) = (unsafe { frame.as_ref() }) else {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     let results = LINUX_ABI_TEST_RESULTS.load(Ordering::Acquire);

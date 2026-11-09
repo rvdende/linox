@@ -338,7 +338,7 @@ pub(super) fn copy_from_linux_user(address: u64, output: &mut [u8]) -> bool {
     if !linux_readable_user_range_contains(address, output.len()) {
         return false;
     }
-    unsafe { raw_copy_from_user(output.as_mut_ptr(), address as *const u8, output.len()) == 0 }
+    crate::trusted::user_copy::copy_from_user(address, output) == output.len()
 }
 
 pub(super) fn hardware_user_range_is_zero(address: u64, length: usize) -> bool {
@@ -346,13 +346,11 @@ pub(super) fn hardware_user_range_is_zero(address: u64, length: usize) -> bool {
     let mut offset = 0_usize;
     while offset < length {
         let count = core::cmp::min(bytes.len(), length - offset);
-        if unsafe {
-            raw_copy_from_user(
-                bytes.as_mut_ptr(),
-                (address + offset as u64) as *const u8,
-                count,
-            ) != 0
-        } || bytes[..count].iter().any(|byte| *byte != 0)
+        let Some(start) = address.checked_add(offset as u64) else {
+            return false;
+        };
+        if crate::trusted::user_copy::copy_from_user(start, &mut bytes[..count]) != count
+            || bytes[..count].iter().any(|byte| *byte != 0)
         {
             return false;
         }
@@ -382,13 +380,17 @@ pub(super) fn copy_to_linux_user(address: u64, input: &[u8]) -> bool {
     {
         return false;
     }
-    unsafe { raw_copy_to_user(address as *mut u8, input.as_ptr(), input.len()) == 0 }
+    crate::trusted::user_copy::copy_to_user(address, input) == input.len()
 }
 
 pub(super) fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
     let _kernel_entry = crate::sync::kernel_entry_lock();
     // A refusal recorded before this fault is not this fault's.
     let _ = memory::take_user_frames_refused();
+    // SAFETY: `frame` is null or the frame `cpu.rs`'s user-fault entry stub
+    // pushed on this CPU's kernel stack and handed to `user_fault_handler`,
+    // its only caller; the stub reads it back only after this returns, so
+    // this is the one reference to it meanwhile.
     let Some(frame) = (unsafe { frame.as_mut() }) else {
         return u64::MAX;
     };
@@ -396,11 +398,7 @@ pub(super) fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
     let failure_policy = fault_domain.and_then(domain::service_failure_policy);
     let service_fault = failure_policy == Some(domain::ServiceFailurePolicy::RestartManaged);
     let fault_address = if frame.is_page_fault() {
-        let address: u64;
-        unsafe {
-            asm!("mov {}, cr2", out(reg) address, options(nomem, nostack, preserves_flags));
-        }
-        address
+        crate::trusted::control::fault_address()
     } else {
         0
     };
@@ -1074,9 +1072,7 @@ fn linux_retry_resolved_write_fault(fault: domain::FaultMetadata) -> bool {
     if !address_space::current_linux_range_mapped(page, 1, true) {
         return false;
     }
-    unsafe {
-        asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags));
-    }
+    crate::trusted::page_table::invalidate_page(page);
     true
 }
 
