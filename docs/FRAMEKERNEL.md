@@ -560,6 +560,29 @@ changing them), xHCI's sub-allocated DMA pool and AMD-Vi's tables
 (both still `static mut` pages), and the virtio DMA pages `pci.rs` and
 `address_space.rs` share as raw direct-map addresses.
 
+**Step 7 in progress (2026-11-09): kernel-private pages onto the heap.**
+AIO contexts (`linux_aio`), the in-kernel file store (`linux_tmpfs`) and
+System V and POSIX IPC (`linux_sysv_ipc`) keep their records on the heap
+(`Vec`/`VecDeque`, data as `heap::zeroed_page` pages) under one ranked
+`SpinLock` per instance (`AIO_CONTEXTS`, `TMPFS_FILES`, `SYSV_IPC`, which
+ranks just above system-call level because msgsnd and msgrcv copy user
+memory under it); a shared memory segment's pages stay frames, copied only
+through `Frame`. The image store's objects are heap buffers under
+`IMAGE_STORE`; the overlay's extended attributes and shared-mapping
+registrations are heap vectors. Among the mutable globals, `linux_input`'s
+three `static mut`s became a try-locked `SpinLock` (`INPUT_EVENTS`, above
+every other rank, since drivers queue from interrupts) and a set-once
+`OwnedState`; the live volume is a ranked `SpinLock` and the initramfs
+root a set-once `OwnedState`. `linux_aio.rs`, `linux_tmpfs.rs`,
+`linux_sysv_ipc.rs`, `linux_input.rs` and `volume.rs` carry
+`#![forbid(unsafe_code)]`, which `check-kernel-unsafe.sh` keeps. Still to
+do in step 7: the overlay's node pages, data chains and page-cache index
+(the data frames carry memory cgroup charges, so they stay frames and move
+to `Frame` copies with a heap index), the signal queues (`linux_signal`:
+senders hold locks up to the heap's rank, so its lock needs a rank audit
+first) and the file cache table (`linux_file_cache`, consulted from
+copy-on-write faults under arbitrary locks).
+
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
 operations of eight `unsafe fn`s in `cpu.rs` and step 4 adds one line at the
