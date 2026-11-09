@@ -144,15 +144,18 @@ pub(super) fn linux_process_thread_count(pid: u32) -> usize {
 pub(super) fn linux_leader_thread_blocked(pid: u32) -> bool {
     if pid == current_linux_process_pid() {
         return linux_thread_handle_by_tid(u64::from(pid)).is_some_and(|leader| {
-            X86_RUNTIME.LINUX_THREAD_STATES[usize::from(leader.slot)].load(Ordering::SeqCst)
-                == LINUX_THREAD_BLOCKED
+            matches!(
+                X86_RUNTIME.LINUX_THREAD_STATES[usize::from(leader.slot)].load(Ordering::SeqCst),
+                LINUX_THREAD_BLOCKED | LINUX_THREAD_PARKED
+            )
         });
     }
     linux_process_runtime_state(pid).is_some_and(|state| state.valid)
         && linux_process_thread_runtime_state(pid).is_some_and(|threads| {
-            threads
-                .iter()
-                .any(|thread| thread.tid == pid && thread.state == LINUX_THREAD_BLOCKED)
+            threads.iter().any(|thread| {
+                thread.tid == pid
+                    && matches!(thread.state, LINUX_THREAD_BLOCKED | LINUX_THREAD_PARKED)
+            })
         })
 }
 
@@ -257,6 +260,7 @@ pub(super) fn stage_linux_fork_parent_runtime_state(
     share_descriptors: bool,
 ) -> Option<LinuxForkParentRuntime> {
     assign_linux_open_file_ids();
+    current_linux_thread_slot()?;
     let mut state = capture_linux_process_runtime_state()?;
     state.active = true;
     state.completed = false;
@@ -650,8 +654,12 @@ fn restore_linux_thread_runtime_state(
     }
 }
 
+/// The current process's runtime state; no thread may be current (all of
+/// them parked in calls, ready, or the current one just ended).
 fn capture_linux_process_runtime_state() -> Option<LinuxProcessRuntimeState> {
-    capture_linux_process_runtime_state_for(current_linux_thread_slot()? as u8)
+    capture_linux_process_runtime_state_for(
+        current_linux_thread_slot().map_or(LINUX_THREAD_SLOT_NONE, |slot| slot as u8),
+    )
 }
 
 /// `capture_linux_process_runtime_state` with `thread_slot` as the thread

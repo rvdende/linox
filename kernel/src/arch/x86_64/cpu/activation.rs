@@ -1,13 +1,13 @@
-//! Kernel stacks for Linux process activations.
+//! Kernel stacks for Linux thread activations.
 //!
-//! Entering a Linux process starts an activation: the process runs in ring 3
-//! and makes its system calls, until one of them returns to the kernel. Each
-//! activation gets a kernel stack of its own instead of continuing below the
-//! frames of whoever entered the process. A process that runs others from
-//! inside a system call (today's nested scheduling) therefore only holds its
-//! own frames on its stack, and the entering CPU's stack only holds the
-//! runtime's. This is step 2 of docs/SCHEDULER.md; switching between parked
-//! activations follows.
+//! Entering a thread of a Linux process starts an activation: the thread
+//! runs in ring 3 and makes its system calls, until one of them returns to
+//! the kernel. Each activation gets a kernel stack of its own instead of
+//! continuing below the frames of whoever entered it. A call that must
+//! wait parks its activation, which then belongs to the thread whose call
+//! waits there (its [`Owner`]); each thread of a process waits on its own
+//! activation, so threads block and wake independently while a sibling
+//! runs on another (docs/SCHEDULER.md, steps 2 and 5).
 //!
 //! Stacks live in the kernel stack window (`paging::KERNEL_STACK_WINDOW_BASE`),
 //! one per 512 KiB slot: the stack's pages at the top of its slot and the
@@ -194,6 +194,36 @@ extern "sysv64" {
     fn linox_context_start();
 }
 
+/// Whose an activation is: thread `tid` of process `pid` in domain instance
+/// `instance` (pids repeat across domains). An activation runs whichever
+/// thread of its process is current on its CPU; it is keyed by the thread
+/// whose system call parks on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Owner {
+    pub(super) instance: u32,
+    pub(super) pid: u32,
+    pub(super) tid: u32,
+}
+
+impl Owner {
+    /// Whether the activation is of process `pid` in domain instance
+    /// `instance`, whichever thread.
+    const fn of_process(self, instance: u32, pid: u32) -> bool {
+        self.instance == instance && self.pid == pid
+    }
+}
+
+/// How a parked system call goes on when resumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Wake {
+    /// Its wait may be over: it looks again.
+    Continue,
+    /// Its thread is ending (exit_group, exec, a fatal signal): the call
+    /// unwinds at once, returning to the kernel, so the activation
+    /// finishes and its stack is freed.
+    Unwind,
+}
+
 /// What had become of an activation when control came back to the context
 /// that entered or resumed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,9 +247,9 @@ enum State {
 /// enters user mode and runs the process's system calls, and the context
 /// that entered (or last resumed) it.
 struct Activation {
-    /// The process: its domain instance in the high half, its pid in the
-    /// low half (pids repeat across domains).
-    owner: u64,
+    owner: Owner,
+    /// Resumed to unwind (see [`Wake::Unwind`]).
+    unwind: bool,
     stack: KernelStack,
     entry: usize,
     user_stack: usize,
@@ -308,7 +338,7 @@ unsafe fn run(activation: *mut Activation) -> Outcome {
 /// address space and validated the complete user context in `general`
 /// (fifteen registers).
 pub(super) unsafe fn enter_on_own_stack(
-    owner: u64,
+    owner: Owner,
     entry: usize,
     stack: usize,
     general: *const u64,
@@ -332,6 +362,7 @@ pub(super) unsafe fn enter_on_own_stack(
     let top = kernel_stack.top;
     let mut record = Box::new(Activation {
         owner,
+        unwind: false,
         stack: kernel_stack,
         entry,
         user_stack: stack,
@@ -349,10 +380,10 @@ pub(super) unsafe fn enter_on_own_stack(
     unsafe { (*activation).context = new_context(top, run_activation, activation.cast()) };
     {
         let mut activations = ACTIVATIONS.lock();
-        if activations
-            .iter()
-            .any(|candidate| candidate.owner == owner && candidate.state == State::Running)
-        {
+        if activations.iter().any(|candidate| {
+            candidate.owner.of_process(owner.instance, owner.pid)
+                && candidate.state == State::Running
+        }) {
             report_reentry(owner, &activations);
         }
         activations.push(record);
@@ -361,23 +392,36 @@ pub(super) unsafe fn enter_on_own_stack(
     Some(unsafe { run(activation) })
 }
 
-/// Parks the running activation of process `owner`: the system call it is in
-/// waits on the activation's stack while the context that entered or
-/// resumed it runs, and continues from here when `resume` switches back.
-/// Returns false, without parking, when this is not that activation's
-/// stack (a process run below another's frames cannot park).
-pub(super) fn park(owner: u64) -> bool {
+/// Parks the running activation of `owner`'s process for thread
+/// `owner.tid`, whose system call waits on the activation's stack while the
+/// context that entered or resumed it runs; the call continues from here
+/// when `resume` switches back, and is told how. Returns None, without
+/// parking, when this is not that activation's stack (a process run below
+/// another's frames cannot park) or the thread already waits on another.
+pub(super) fn park(owner: Owner) -> Option<Wake> {
     let here = 0_u8;
     let here = &raw const here as usize;
-    let activation = ACTIVATIONS
-        .lock()
-        .iter_mut()
-        .rev()
-        .find(|candidate| candidate.owner == owner && candidate.state == State::Running)
-        .filter(|candidate| (candidate.stack.top - STACK_SIZE..candidate.stack.top).contains(&here))
-        .map(|candidate| &raw mut **candidate);
-    let Some(activation) = activation else {
-        return false;
+    let activation = {
+        let mut activations = ACTIVATIONS.lock();
+        if activations
+            .iter()
+            .any(|candidate| candidate.owner == owner && candidate.state == State::Parked)
+        {
+            return None;
+        }
+        activations
+            .iter_mut()
+            .rev()
+            .find(|candidate| {
+                candidate.owner.of_process(owner.instance, owner.pid)
+                    && candidate.state == State::Running
+                    && (candidate.stack.top - STACK_SIZE..candidate.stack.top).contains(&here)
+            })
+            .map(|candidate| {
+                candidate.owner = owner;
+                candidate.unwind = false;
+                &raw mut **candidate
+            })?
     };
     // SAFETY: this is the running activation, on its own stack; its record
     // stays in ACTIVATIONS while it is parked. The CPU's entry state belongs
@@ -391,47 +435,96 @@ pub(super) fn park(owner: u64) -> bool {
         (*activation).parked_depth = own;
         linox_switch_stack(&raw mut (*activation).context, (*activation).caller);
         *super::current_entry_state() = (*activation).entry_state;
+        Some(if (*activation).unwind {
+            Wake::Unwind
+        } else {
+            Wake::Continue
+        })
     }
-    true
 }
 
-/// Resumes the parked activation of process `owner` until it parks again or
-/// finishes; `None` when it has none.
+/// Resumes the parked activation of thread `owner` until it parks again or
+/// finishes; `None` when it has none. With `unwind`, its call is told to
+/// unwind ([`Wake::Unwind`]) rather than look at its wait again. The
+/// resumed call installs its own CPU entry state while it runs; the
+/// resumer's is put back after.
 ///
 /// # Safety
 ///
-/// The caller made the process current again (its address space,
-/// thread pointer and per-process kernel state), as for entering it.
-pub(super) unsafe fn resume(owner: u64) -> Option<Outcome> {
+/// The caller made the process current again (its address space and
+/// per-process kernel state), as for entering it; the resumed call puts
+/// back its own thread pointer and address space.
+pub(super) unsafe fn resume(owner: Owner, unwind: bool) -> Option<Outcome> {
     let activation = ACTIVATIONS
         .lock()
         .iter_mut()
         .find(|candidate| candidate.owner == owner && candidate.state == State::Parked)
-        .map(|candidate| &raw mut **candidate)?;
+        .map(|candidate| {
+            candidate.state = State::Running;
+            candidate.unwind = unwind;
+            &raw mut **candidate
+        })?;
     // SAFETY: a parked record stays in ACTIVATIONS until its context runs
-    // again and finishes.
+    // again and finishes; it is marked running, so nobody else resumes it.
+    // The entry state is this CPU's, used with interrupts off under the
+    // kernel-entry lock.
     unsafe {
-        (*activation).state = State::Running;
-        Some(run(activation))
+        let saved = *super::current_entry_state();
+        let outcome = run(activation);
+        *super::current_entry_state() = saved;
+        Some(outcome)
     }
 }
 
-/// Process `owner` has an activation running on some CPU: its system call
-/// is in progress there (or it runs user code), so no other CPU may enter
-/// or resume it.
-pub(super) fn is_running(owner: u64) -> bool {
-    ACTIVATIONS
-        .lock()
-        .iter()
-        .any(|candidate| candidate.owner == owner && candidate.state == State::Running)
+/// Resumes parked thread `owner`'s call to unwind (see [`Wake::Unwind`])
+/// until its activation finishes, from the scheduler or from inside
+/// another system call of its process (an exec): the CPU's entry state,
+/// which the resumed call replaces with its own, is kept across. False
+/// when it has no parked activation or did not finish.
+pub(super) fn unwind(owner: Owner) -> bool {
+    // SAFETY: the caller's process is current on this CPU (its address
+    // space and kernel state); the unwinding call only returns to the
+    // kernel, and `resume` puts back the entry state it replaces.
+    let outcome = unsafe { resume(owner, true) };
+    outcome == Some(Outcome::Finished)
 }
 
-/// Process `owner` has a parked activation.
-pub(super) fn is_parked(owner: u64) -> bool {
+/// Drops thread `owner`'s parked activation without running it again: its
+/// stack goes back to the pool and its frames are abandoned (anything they
+/// own leaks). For a thread that ends when its call cannot be unwound.
+pub(super) fn discard(owner: Owner) {
+    let discarded = {
+        let mut activations = ACTIVATIONS.lock();
+        activations
+            .iter()
+            .position(|candidate| candidate.owner == owner && candidate.state == State::Parked)
+            .map(|index| activations.remove(index))
+    };
+    if let Some(activation) = discarded {
+        STACK_POOL.lock().free.push(activation.stack);
+    }
+}
+
+/// Process `pid` of domain instance `instance` has an activation running
+/// on some CPU: a system call of it is in progress there (or it runs user
+/// code), so no other CPU may enter or resume it.
+pub(super) fn is_running(instance: u32, pid: u32) -> bool {
+    ACTIVATIONS.lock().iter().any(|candidate| {
+        candidate.owner.of_process(instance, pid) && candidate.state == State::Running
+    })
+}
+
+/// The threads of process `pid` of domain instance `instance` parked in a
+/// system call, in the order they were entered.
+pub(super) fn parked_threads(instance: u32, pid: u32) -> Vec<u32> {
     ACTIVATIONS
         .lock()
         .iter()
-        .any(|candidate| candidate.owner == owner && candidate.state == State::Parked)
+        .filter(|candidate| {
+            candidate.owner.of_process(instance, pid) && candidate.state == State::Parked
+        })
+        .map(|candidate| candidate.owner.tid)
+        .collect()
 }
 
 /// Drops the parked activations of domain instance `instance` when its
@@ -444,7 +537,7 @@ pub(super) fn discard_parked(instance: u32) {
         let mut index = 0;
         while index < activations.len() {
             let candidate = &activations[index];
-            if candidate.state == State::Parked && (candidate.owner >> 32) as u32 == instance {
+            if candidate.state == State::Parked && candidate.owner.instance == instance {
                 discarded.push(activations.remove(index));
             } else {
                 index += 1;
@@ -566,16 +659,16 @@ pub(super) fn verify_stack_switching() -> bool {
 /// A process entered while an earlier activation of it is still running
 /// inside a system call: it now runs twice, which the scheduler rework
 /// removes.
-fn report_reentry(owner: u64, activations: &[Box<Activation>]) {
+fn report_reentry(owner: Owner, activations: &[Box<Activation>]) {
     crate::serial_write_raw(b"linox: process re-entered during its own system call; pid ");
-    crate::serial_write_u64(owner & u64::from(u32::MAX));
+    crate::serial_write_u64(u64::from(owner.pid));
     crate::serial_write_raw(b" active");
     for activation in activations
         .iter()
         .filter(|activation| activation.state == State::Running)
     {
         crate::serial_write_raw(b" ");
-        crate::serial_write_u64(activation.owner & u64::from(u32::MAX));
+        crate::serial_write_u64(u64::from(activation.owner.pid));
     }
     crate::serial_write_raw(b"\r\n");
 }

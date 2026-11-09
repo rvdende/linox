@@ -2352,6 +2352,13 @@ pub(super) fn linux_exit_child_to_parent(
     if !set_current_linux_clear_child_tid(0) || !set_current_linux_robust_list(0) {
         return LINUX_ESRCH;
     }
+    // Where threads park in their calls, the thread just ends: its
+    // activation finishes, and the scheduler runs its siblings, each on an
+    // activation of its own, or blocks the process on what they wait for.
+    // The last thread's exit ends the process, as exit_group would.
+    if linux_threads_park_here() {
+        return linux_exit_thread_live_return(caller, woken);
+    }
     // Another thread of this process takes over the CPU. While all of them
     // wait, such as a main thread polling a child's pipes, this thread stays
     // current and other processes run. A yield restarts this exit, which has
@@ -2442,6 +2449,59 @@ pub(super) fn linux_exit_child_to_parent(
         return LINUX_EINVAL;
     }
     LINUX_RETURN_FROM_IRET
+}
+
+/// Thread exit (`linux_exit_child_to_parent`) where threads park in their
+/// calls: the calling thread's slot is freed and the process's registry
+/// context becomes a sibling's (an exited thread's stack may be gone), or
+/// the process exits with it when it was the last.
+fn linux_exit_thread_live_return(caller: LinuxUserContext, woken: u32) -> u64 {
+    let Some(current) = current_linux_thread_slot() else {
+        return LINUX_ESRCH;
+    };
+    let siblings = || {
+        (0..LINUX_THREAD_LIMIT).filter(|slot| {
+            *slot != current
+                && X86_RUNTIME.LINUX_THREAD_STATES[*slot].load(Ordering::SeqCst)
+                    != LINUX_THREAD_FREE
+        })
+    };
+    let pid = current_linux_process_pid();
+    if siblings().next().is_none() {
+        // Its siblings all ended: the process ends with this thread.
+        if !clear_current_linux_process_signal_queues() {
+            return LINUX_EIO;
+        }
+        X86_RUNTIME
+            .LINUX_PROCESS_CHILD_STATUS
+            .store(caller.registers.rdi as u8, Ordering::SeqCst);
+        X86_RUNTIME
+            .LINUX_PROCESS_CHILD_EXIT_PID
+            .store(pid, Ordering::SeqCst);
+        X86_RUNTIME
+            .LINUX_PROCESS_CHILD_EXITED
+            .store(true, Ordering::SeqCst);
+        return LINUX_RETURN_TO_KERNEL;
+    }
+    if !retire_current_linux_thread() {
+        return LINUX_ESRCH;
+    }
+    if let Some((general, rip, rsp, rflags, fs_base)) = siblings()
+        .filter_map(linux_thread_handle)
+        .find_map(linux_thread_entry_context)
+    {
+        let _ =
+            linux_process::set_live_process_thread_context(pid, general, rip, rsp, rflags, fs_base);
+    }
+    if woken == 1 {
+        X86_RUNTIME
+            .LINUX_FUTEX_EXIT_WAKE_COUNT
+            .fetch_add(1, Ordering::SeqCst);
+    }
+    X86_RUNTIME
+        .LINUX_CHILD_EXIT_COUNT
+        .fetch_add(1, Ordering::SeqCst);
+    LINUX_RETURN_TO_KERNEL
 }
 
 pub(super) fn current_linux_process_pid() -> u32 {

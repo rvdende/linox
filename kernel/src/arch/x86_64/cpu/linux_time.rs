@@ -1077,7 +1077,7 @@ fn linux_sleep_live_return(
         return LINUX_ESRCH;
     };
     let target = 'target: {
-        if let Some(target) = ready_linux_thread_handle() {
+        if let Some(target) = linux_thread_wait_handoff() {
             break 'target target;
         }
         // With no runnable thread here, other processes (such as a child this
@@ -1110,7 +1110,7 @@ fn linux_sleep_live_return(
             if let LinuxWaitTurn::Done(result) = turn {
                 return result;
             }
-            if let Some(target) = ready_linux_thread_handle() {
+            if let Some(target) = linux_thread_wait_handoff() {
                 break 'target target;
             }
             // Wake at the deadline, not on the next tick after it, whether

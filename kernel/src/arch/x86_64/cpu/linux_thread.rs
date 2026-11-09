@@ -294,6 +294,162 @@ pub(super) fn install_linux_thread_return(
     true
 }
 
+/// The current thread leaves the CPU to wait in its system call, parked on
+/// its own activation (docs/SCHEDULER.md, "Activations per thread"): its
+/// signal mask and vector state are kept in its slot, with `restart`, the
+/// call set to be issued again, as its saved user context, and no thread
+/// is current until the scheduler makes one so. None when no thread is
+/// current here.
+pub(super) fn park_current_linux_thread(restart: LinuxUserContext) -> Option<LinuxThreadHandle> {
+    let handle = current_linux_thread_handle()?;
+    let slot = usize::from(handle.slot);
+    X86_RUNTIME.LINUX_THREAD_SIGNAL_MASKS[slot].store(
+        X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    // Its call goes on in its activation; the slot holds where it would
+    // go on from user mode, for the process's registry when it is the
+    // thread the process is next entered at.
+    if restart.is_valid() {
+        store_linux_thread_context(slot, restart, restart.rip, restart.rflags);
+    }
+    if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
+        let _ = save_linux_thread_extended_state(current_linux_process_pid(), slot);
+    }
+    linux_charge_thread_cpu(slot);
+    X86_RUNTIME.LINUX_THREAD_STATES[slot].store(LINUX_THREAD_PARKED, Ordering::SeqCst);
+    X86_RUNTIME
+        .LINUX_CURRENT_THREAD_SLOT
+        .store(LINUX_THREAD_SLOT_NONE, Ordering::SeqCst);
+    Some(handle)
+}
+
+/// Makes parked thread `handle` current again, for its call to go on (or
+/// unwind) when its activation is resumed: its vector state, thread
+/// pointer and signal mask come back. No other thread may be current.
+pub(super) fn unpark_linux_thread(handle: LinuxThreadHandle) -> bool {
+    let slot = usize::from(handle.slot);
+    let Some(context) = linux_thread_context(handle) else {
+        return false;
+    };
+    if X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) != LINUX_THREAD_PARKED
+        || current_linux_thread_slot().is_some()
+        || X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
+            && !restore_linux_thread_extended_state(current_linux_process_pid(), slot)
+        || !install_linux_tls_context(context)
+    {
+        return false;
+    }
+    if linux_light_thread_here().is_none() {
+        X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.store(
+            X86_RUNTIME.LINUX_THREAD_SIGNAL_MASKS[slot].load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+    }
+    X86_RUNTIME.LINUX_THREAD_OWNER_ONLY[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_STATES[slot].store(LINUX_THREAD_RUNNING, Ordering::SeqCst);
+    linux_mark_thread_cpu();
+    X86_RUNTIME
+        .LINUX_CURRENT_THREAD_SLOT
+        .store(handle.slot, Ordering::SeqCst);
+    true
+}
+
+/// The current thread, which the process's registry context (`general`,
+/// `rip`, `rsp`, `rflags`: where it was preempted or yielded) holds, gives
+/// the CPU to another thread of its process: that context goes to its slot
+/// with its exact rcx and r11, it is ready for any CPU, and no thread is
+/// current. True too when no thread is current.
+pub(super) fn ready_current_linux_thread(
+    general: [u64; 15],
+    rip: u64,
+    rsp: u64,
+    rflags: u64,
+) -> bool {
+    let Some(handle) = current_linux_thread_handle() else {
+        return true;
+    };
+    let slot = usize::from(handle.slot);
+    let registers = LinuxSyscallFrame {
+        r15: general[14],
+        r14: general[13],
+        r13: general[12],
+        r12: general[11],
+        rbp: general[6],
+        rbx: general[1],
+        r10: general[9],
+        r9: general[8],
+        r8: general[7],
+        rdx: general[3],
+        rsi: general[4],
+        rdi: general[5],
+    };
+    let context = LinuxUserContext {
+        registers,
+        rip,
+        rsp,
+        rflags,
+        rax: general[0],
+        fs_base: X86_RUNTIME.LINUX_THREAD_POINTERS[slot].load(Ordering::SeqCst),
+    };
+    if !context.is_valid() {
+        return false;
+    }
+    store_linux_thread_context(slot, context, general[2], general[10]);
+    X86_RUNTIME.LINUX_THREAD_SIGNAL_MASKS[slot].store(
+        X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
+        let _ = save_linux_thread_extended_state(current_linux_process_pid(), slot);
+    }
+    linux_charge_thread_cpu(slot);
+    X86_RUNTIME.LINUX_THREAD_STATES[slot].store(LINUX_THREAD_READY, Ordering::SeqCst);
+    X86_RUNTIME
+        .LINUX_CURRENT_THREAD_SLOT
+        .store(LINUX_THREAD_SLOT_NONE, Ordering::SeqCst);
+    true
+}
+
+/// Saves `context` as thread slot `slot`'s user context, with the exact
+/// rcx and r11 it resumes with.
+fn store_linux_thread_context(slot: usize, context: LinuxUserContext, rcx: u64, r11: u64) {
+    for (saved, value) in X86_RUNTIME.LINUX_THREAD_REGISTERS[slot]
+        .iter()
+        .zip(context.registers.into_array())
+    {
+        saved.store(value, Ordering::SeqCst);
+    }
+    X86_RUNTIME.LINUX_THREAD_RIPS[slot].store(context.rip, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_RSPS[slot].store(context.rsp, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_RFLAGS[slot].store(context.rflags, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_RAXS[slot].store(context.rax, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_RCXS[slot].store(rcx, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_R11S[slot].store(r11, Ordering::SeqCst);
+}
+
+/// Thread `handle`'s saved user context as the registers a process entry
+/// takes (`process_general` order, with its exact rcx and r11), with its
+/// rip, rsp, rflags and thread pointer.
+pub(super) fn linux_thread_entry_context(
+    handle: LinuxThreadHandle,
+) -> Option<([u64; 15], u64, u64, u64, u64)> {
+    let slot = usize::from(handle.slot);
+    let context = linux_thread_return_context(handle)?;
+    let general = context.registers.process_general(
+        context.rax,
+        X86_RUNTIME.LINUX_THREAD_RCXS[slot].load(Ordering::SeqCst),
+        X86_RUNTIME.LINUX_THREAD_R11S[slot].load(Ordering::SeqCst),
+    );
+    Some((
+        general,
+        context.rip,
+        context.rsp,
+        context.rflags,
+        context.fs_base,
+    ))
+}
+
 pub(super) fn retire_linux_thread(handle: LinuxThreadHandle) -> bool {
     let slot = usize::from(handle.slot);
     if linux_thread_context(handle).is_none()
@@ -314,10 +470,19 @@ pub(super) fn end_other_linux_threads_for_exec() {
         return;
     };
     // Threads on other CPUs leave them first: their slots are cleared
-    // below, and the image they run in is about to go.
+    // below, and the image they run in is about to go. Threads parked in
+    // calls unwind out of them first, and their activations end.
     evict_linux_light_threads();
+    let pid = current_linux_process_pid();
     for slot in (0..LINUX_THREAD_LIMIT).filter(|slot| *slot != current) {
-        if X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) != LINUX_THREAD_FREE {
+        let state = X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst);
+        if state == LINUX_THREAD_PARKED {
+            unwind_parked_linux_thread(
+                pid,
+                X86_RUNTIME.LINUX_THREAD_TIDS[slot].load(Ordering::SeqCst),
+            );
+        }
+        if state != LINUX_THREAD_FREE {
             clear_linux_thread_slot(slot);
         }
     }
@@ -793,8 +958,7 @@ pub(super) fn install_linux_tls_context(context: LinuxTlsContext) -> bool {
     if !context.is_valid() {
         return false;
     }
-    unsafe { write_msr(FS_BASE_MSR, context.thread_pointer as u64) };
-    if unsafe { read_msr(FS_BASE_MSR) } != context.thread_pointer as u64 {
+    if !install_user_fs_base(context.thread_pointer as u64) {
         return false;
     }
     if context.extent_size == 0 {
@@ -856,8 +1020,7 @@ pub(super) fn update_current_linux_fs_base(thread_pointer: u64) -> bool {
     let Some(slot) = current_linux_thread_slot() else {
         return false;
     };
-    unsafe { write_msr(FS_BASE_MSR, thread_pointer) };
-    if active_fs_base() != thread_pointer {
+    if !install_user_fs_base(thread_pointer) {
         return false;
     }
     X86_RUNTIME.LINUX_THREAD_POINTERS[slot].store(thread_pointer, Ordering::SeqCst);

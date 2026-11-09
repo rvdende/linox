@@ -2001,6 +2001,10 @@ const LINUX_THREAD_FREE: u8 = 0;
 const LINUX_THREAD_READY: u8 = 1;
 const LINUX_THREAD_RUNNING: u8 = 2;
 const LINUX_THREAD_BLOCKED: u8 = 3;
+/// Waiting in a system call parked on the thread's own activation, until
+/// the scheduler resumes it there (docs/SCHEDULER.md, "Activations per
+/// thread"); what it waits for is its block in the process registry.
+const LINUX_THREAD_PARKED: u8 = 4;
 const LINUX_THREAD_SLOT_NONE: u8 = u8::MAX;
 const LINUX_THREAD_WAIT_NONE: u8 = 0;
 const LINUX_THREAD_WAIT_FUTEX: u8 = 1;
@@ -3214,7 +3218,10 @@ unsafe fn enter_linux_runtime_process(
     let entered = X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && current_linux_runtime_cpu_index() == 0
         && activation::enter_on_own_stack(
-            linux_activation_owner(current_linux_process_pid()),
+            linux_thread_activation_owner(
+                current_linux_process_pid(),
+                current_linux_tid().unwrap_or(0),
+            ),
             entry,
             stack,
             general,

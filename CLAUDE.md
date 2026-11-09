@@ -56,22 +56,28 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    changes, ticks, its deadline, signals) and leaves the run queue until a
    waker makes it ready, instead of being resumed to look again; a process
    with nothing else ready goes on in place after a yield or preemption,
-   its state left in the CPU's bank. Next: an activation per thread (the
-   rest of step 5, planned in docs/SCHEDULER.md); then step 6, per-CPU
-   loops with IPI wakeups and load balancing, and splitting
+   its state left in the CPU's bank. Step 5 is done: every thread waits on
+   an activation of its own (keyed by domain, pid and tid), blocked in the
+   registry on its own wait (`ThreadBlock`) while its siblings run; the
+   loop resumes a woken thread or enters a ready one, a thread's exit ends
+   only its activation, and exit_group, fatal signals and exec unwind the
+   threads parked in calls. Next: step 6, per-CPU loops over threads with
+   IPI wakeups and load balancing (the application processors still enter
+   processes without activations and wait the old way), and splitting
    `kernel_entry_lock`.
 3. **A real task and memory model:** per-process memory-area tracking (VMAs),
    a shared page cache, and dynamically sized tables in place of the fixed
-   arrays (32 threads per process, kept in per-thread arrays that the
-   scheduler's task struct should replace). The socket table (which pipes
+   arrays (128 threads per process, kept in per-thread arrays in the
+   process's bank and record that a per-thread task struct should
+   replace). The socket table (which pipes
    share), the scheduler's thread table, each process's address-space
    lists and the per-process-slot tables grow on demand: a domain holds
    up to `linux_process::PROCESS_LIMIT` (4096) processes (u16 slots, a
    pid index, signal queues, records and kernel stacks allocated as slots
    are first used; records of slots above 256 are freed with their
    process). Waits block until woken (`Process::block`, docs/SCHEDULER.md
-   "Wait queues"); a multithreaded process blocks as a whole until its
-   threads get activations of their own. Pages have a map count in the frame allocator
+   "Wait queues"), each thread on its own (`linux_process::block_live_thread`,
+   "Activations per thread"). Pages have a map count in the frame allocator
    (`memory::share_frames`): every address space that maps another's frame
    takes a count, and releasing drops one. Anonymous MAP_SHARED memory is
    an unnamed overlay shmem node, freed with its last mapping. Move large

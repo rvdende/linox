@@ -546,7 +546,7 @@ pub(super) fn linux_select_live_return(
     // With no other thread of this process to switch to, wait here and let
     // other processes run; one of them, or the network, may make a
     // descriptor ready.
-    if current_linux_runtime_cpu_index() == 0 && ready_linux_thread_handle().is_none() {
+    if current_linux_runtime_cpu_index() == 0 && linux_thread_wait_handoff().is_none() {
         let deadline = parsed.duration.and_then(|duration| {
             linux_elapsed_nanoseconds().and_then(|now| now.checked_add(duration))
         });
@@ -580,7 +580,7 @@ pub(super) fn linux_select_live_return(
                     _ => result,
                 };
             }
-            if ready_linux_thread_handle().is_some() {
+            if linux_thread_wait_handoff().is_some() {
                 break;
             }
             // A yield restarts the call; select restarts with the time it
@@ -604,7 +604,7 @@ pub(super) fn linux_select_live_return(
     let Some(current) = current_linux_thread_handle() else {
         return LINUX_ESRCH;
     };
-    let Some(target) = ready_linux_thread_handle() else {
+    let Some(target) = linux_thread_wait_handoff() else {
         return LINUX_ENOSYS;
     };
     let Some(tls) = linux_thread_context(current) else {
@@ -795,7 +795,7 @@ fn linux_poll_run_others_live_return(
         if let LinuxWaitTurn::Done(result) = turn {
             return Ok(result);
         }
-        if let Some(target) = ready_linux_thread_handle() {
+        if let Some(target) = linux_thread_wait_handoff() {
             return Err((target, deadline));
         }
         if let Some((deadline, now)) = deadline.zip(linux_elapsed_nanoseconds()) {
@@ -945,7 +945,7 @@ pub(super) fn linux_poll_wait_live_return(
             // blocks below. Without one, another process, such as a spawned
             // child writing to a pipe, may be the only one that can make a
             // descriptor ready.
-            if ready_linux_thread_handle().is_some() {
+            if linux_thread_wait_handoff().is_some() {
                 break;
             }
             let wait = linux_pollfd_wait(active).until_some(deadline);
@@ -964,7 +964,7 @@ pub(super) fn linux_poll_wait_live_return(
     // wait because a sibling thread became ready meanwhile.
     let mut continued_deadline = None;
     let target = 'target: {
-        if let Some(target) = ready_linux_thread_handle() {
+        if let Some(target) = linux_thread_wait_handoff() {
             break 'target target;
         }
         // pause and sigsuspend wait in the call, as a timed wait with no
@@ -991,7 +991,7 @@ pub(super) fn linux_poll_wait_live_return(
                 if let LinuxWaitTurn::Done(result) = turn {
                     break Ok(result);
                 }
-                if let Some(target) = ready_linux_thread_handle() {
+                if let Some(target) = linux_thread_wait_handoff() {
                     break Err(target);
                 }
                 if let LinuxWaitTurn::Idle = turn {

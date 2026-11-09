@@ -641,7 +641,7 @@ pub(super) fn linux_rt_sigtimedwait_live_return(
         return LINUX_RETURN_TO_KERNEL;
     }
     let target = 'target: {
-        if let Some(target) = ready_linux_thread_handle() {
+        if let Some(target) = linux_thread_wait_handoff() {
             break 'target target;
         }
         // A lone thread waits in the call as pause does: other processes
@@ -680,7 +680,7 @@ pub(super) fn linux_rt_sigtimedwait_live_return(
             if let LinuxWaitTurn::Done(result) = turn {
                 break Ok(result);
             }
-            if let Some(target) = ready_linux_thread_handle() {
+            if let Some(target) = linux_thread_wait_handoff() {
                 break Err(target);
             }
             if let Some((deadline, now)) = deadline.zip(linux_elapsed_nanoseconds()) {
@@ -1692,10 +1692,10 @@ pub(super) fn linux_target_signal_ignored(target: u32, signal: u64) -> bool {
         linux_process_runtime_state(target)
             .filter(|state| state.valid)
             .map_or((0, 0), |state| {
-                let mask = linux_process_thread_runtime_state(target)
-                    .and_then(|threads| threads.get(usize::from(state.current_thread_slot)))
-                    .map_or(0, |thread| thread.signal_mask);
-                (state.signal_handlers[index], mask)
+                (
+                    state.signal_handlers[index],
+                    linux_saved_target_signal_mask(target),
+                )
             })
     };
     // A blocked signal is never discarded as ignored (rt_sigtimedwait01).
@@ -1804,14 +1804,30 @@ fn linux_target_signal_mask(target: u32) -> u64 {
     if target == current_linux_process_pid() {
         return X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.load(Ordering::SeqCst);
     }
-    linux_process_runtime_state(target)
-        .filter(|state| state.valid)
-        .and_then(|state| {
-            linux_process_thread_runtime_state(target)
-                .and_then(|threads| threads.get(usize::from(state.current_thread_slot)))
-                .map(|thread| thread.signal_mask)
-        })
-        .unwrap_or(0)
+    linux_saved_target_signal_mask(target)
+}
+
+/// The signal mask process `target`, not the current one, blocks with as
+/// its saved state has it: its current thread's, or with no thread
+/// current (all of them parked in calls or ready), what any of its
+/// threads blocks, so a signal one of them waits for (sigtimedwait) is not
+/// discarded as ignored.
+fn linux_saved_target_signal_mask(target: u32) -> u64 {
+    let Some(state) = linux_process_runtime_state(target).filter(|state| state.valid) else {
+        return 0;
+    };
+    let current = usize::from(state.current_thread_slot);
+    linux_process_thread_runtime_state(target).map_or(0, |threads| {
+        threads.get(current).map_or_else(
+            || {
+                threads
+                    .iter()
+                    .filter(|thread| thread.state != LINUX_THREAD_FREE)
+                    .fold(0, |mask, thread| mask | thread.signal_mask)
+            },
+            |thread| thread.signal_mask,
+        )
+    })
 }
 
 pub(super) fn linux_kill(
@@ -3382,10 +3398,15 @@ fn linux_enqueue_signal(
     // there (a blocked one only by a wait for it, sigtimedwait), and the
     // call waits on: the process makes the run queue again either way.
     if queued.is_ok() && instance == linux_signal_instance() {
-        linux_process::wake_live_process_at_slot(match scope {
-            crate::linux_signal::Scope::Process => slot,
-            crate::linux_signal::Scope::Thread => slot / crate::linux_signal::THREAD_LIMIT,
-        });
+        match scope {
+            crate::linux_signal::Scope::Process => {
+                linux_process::wake_live_process_at_slot(slot, None);
+            }
+            crate::linux_signal::Scope::Thread => linux_process::wake_live_process_at_slot(
+                slot / crate::linux_signal::THREAD_LIMIT,
+                Some((slot % crate::linux_signal::THREAD_LIMIT) as u8),
+            ),
+        }
     }
     queued
 }

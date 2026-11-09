@@ -191,6 +191,27 @@ pub(super) fn ready_linux_thread_handle() -> Option<LinuxThreadHandle> {
     })
 }
 
+/// Whether a thread that must wait in a system call here parks on its own
+/// activation (docs/SCHEDULER.md, "Activations per thread"): on the boot
+/// CPU of a runtime. Its siblings run meanwhile, each entered on an
+/// activation of its own. Elsewhere (an application processor, the boot
+/// probe) it waits as a thread wait, handing the CPU to a ready sibling.
+pub(super) fn linux_threads_park_here() -> bool {
+    X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
+        && current_linux_runtime_cpu_index() == 0
+        && linux_light_thread_here().is_none()
+}
+
+/// The ready sibling a thread that must wait hands the CPU to, waiting as
+/// a thread wait: none where threads park instead
+/// (`linux_threads_park_here`).
+pub(super) fn linux_thread_wait_handoff() -> Option<LinuxThreadHandle> {
+    if linux_threads_park_here() {
+        return None;
+    }
+    ready_linux_thread_handle()
+}
+
 pub(super) fn yield_ready_linux_thread_handle() -> Option<LinuxThreadHandle> {
     if linux_light_thread_here().is_some() {
         return None;
@@ -331,13 +352,15 @@ pub(super) enum LinuxBlockedWait {
     Return(u64),
 }
 
-/// Blocks the current process in syscall `number` until `wait` ends: the
-/// process, init included, parks in the call, leaves the run queue until a
-/// waker for what it waits on, a signal or its deadline makes it ready
-/// (docs/SCHEDULER.md, step 5), and then looks at its wait once more
-/// (`Recheck`). Where it cannot park it yields with the call set to
-/// restart. Returns `None` when it cannot wait here (a ready sibling
-/// thread runs instead, or an application processor's caller restarts).
+/// Blocks the current thread in syscall `number` until `wait` ends: the
+/// thread, of init too, parks in the call on its own activation and stays
+/// parked until a waker for what it waits on, a signal or its deadline
+/// ends its block (docs/SCHEDULER.md, step 5), and then looks at its wait
+/// once more (`Recheck`). Its process runs on meanwhile while another of
+/// its threads can, and leaves the run queue when none can. Where it
+/// cannot park it yields with the call set to restart. Returns `None` when
+/// it cannot wait here (an application processor's caller restarts or
+/// waits as a thread wait).
 pub(super) fn run_other_linux_processes(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
@@ -347,9 +370,10 @@ pub(super) fn run_other_linux_processes(
     run_other_linux_processes_deferring(output, caller, number, wait, true)
 }
 
-/// `run_other_linux_processes`; with `defer_to_siblings` false, the other
-/// processes run even while a sibling thread is ready, which may itself be
-/// only waiting to retry its call.
+/// `run_other_linux_processes`; with `defer_to_siblings` false, on an
+/// application processor, the other processes run even while a sibling
+/// thread is ready, which may itself be only waiting to retry its call.
+/// On the boot CPU a thread always parks: its siblings run meanwhile.
 pub(super) fn run_other_linux_processes_deferring(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
@@ -357,6 +381,7 @@ pub(super) fn run_other_linux_processes_deferring(
     wait: WaitOn,
     defer_to_siblings: bool,
 ) -> Option<LinuxBlockedWait> {
+    let _ = defer_to_siblings;
     // The boot verification probe has no scheduler loop to wait in.
     if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return None;
@@ -373,12 +398,10 @@ pub(super) fn run_other_linux_processes_deferring(
     if current_linux_runtime_cpu_index() != 0 {
         return None;
     }
-    // Descriptor waits made ready while another process ran complete here,
-    // in this process's address space; a woken sibling thread runs instead.
+    // Descriptor waits of threads that waited the old way (on an
+    // application processor) made ready while another process ran complete
+    // here, in this process's address space.
     let _ = wake_linux_descriptor_waits();
-    if defer_to_siblings && ready_linux_thread_handle().is_some() {
-        return None;
-    }
     let pid = current_linux_process_pid();
     // A signal that arrived while this call waited interrupts it (EINTR,
     // or a restart after an SA_RESTART handler), as in Linux, instead of
@@ -406,28 +429,32 @@ pub(super) fn run_other_linux_processes_deferring(
     if !yield_current_linux_process(restart, number) {
         return None;
     }
-    // Waiting in the call: /proc shows it sleeping until dispatched. It
-    // is blocked until what it waits for comes, unless a thread of it has
-    // work meanwhile.
-    match linux_process_block(wait) {
-        Some(block) => linux_process::block_live_process(pid, block),
-        None => linux_process::set_live_process_waiting(pid, true),
-    }
-    if !park_linux_process(pid) {
-        if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
-            serial_write("linox: process cannot park pid/cpu/call/activation: ");
-            for value in [
-                u64::from(pid),
-                current_cpu_index_checked().unwrap_or(99) as u64,
-                number,
-                u64::from(activation::is_running(linux_activation_owner(pid))),
-            ] {
-                serial_write_u64(value);
-                serial_write(" ");
-            }
-            serial_write("\r\n");
+    // Waiting in the call, on the thread's own activation: blocked until
+    // what it waits for comes. Its process waits as a whole (and /proc
+    // shows it sleeping) only when none of its threads can run.
+    match block_and_park_linux_thread(pid, restart, wait) {
+        Some(activation::Wake::Continue) => {}
+        // Its thread is ending: the call unwinds, back to the kernel.
+        Some(activation::Wake::Unwind) => {
+            return Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL));
         }
-        return Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL));
+        None => {
+            if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
+                serial_write("linox: thread cannot park pid/tid/cpu/call/activation: ");
+                for value in [
+                    u64::from(pid),
+                    u64::from(current_linux_tid().unwrap_or(0)),
+                    current_cpu_index_checked().unwrap_or(99) as u64,
+                    number,
+                    u64::from(linux_process_activation_running(pid)),
+                ] {
+                    serial_write_u64(value);
+                    serial_write(" ");
+                }
+                serial_write("\r\n");
+            }
+            return Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL));
+        }
     }
     // Resumed to be killed: SIGKILL ends the process from inside its
     // wait, as Linux's fatal signals wake a sleeping task to exit.
@@ -471,14 +498,30 @@ pub(super) fn run_other_linux_processes_deferring(
     })
 }
 
-/// What blocks the current process, waiting in a call for `wait`: that,
-/// until its own real or POSIX timer is due if sooner (only its call
-/// notices those), and whatever its other threads wait for, which only it
-/// switches to. None when another thread of it is ready or runs on another
-/// CPU: the process has work, and is passed over by no one.
-fn linux_process_block(wait: WaitOn) -> Option<WaitOn> {
-    let current = current_linux_thread_slot();
-    let mut block = wait
+/// Blocks the current thread of process `pid` in its call for `wait`
+/// (until its process's real or POSIX timer is due if sooner: only its
+/// call notices those) and parks it on its activation; `restart` is the
+/// call set to be issued again. The process blocks as a whole when none
+/// of its other threads can run, on what all its threads wait for. None
+/// when it could not park: the thread is current again, unblocked.
+fn block_and_park_linux_thread(
+    pid: u32,
+    restart: LinuxUserContext,
+    wait: WaitOn,
+) -> Option<activation::Wake> {
+    // A call never waits holding a spin lock: whoever runs meanwhile would
+    // deadlock on it, and the call may continue on another CPU.
+    if crate::sync::spin_lock_held() {
+        serial_write("linox: a system call tried to park holding a spin lock; pid ");
+        serial_write_u64(u64::from(pid));
+        serial_write(" rank ");
+        serial_write_u64(u64::from(crate::sync::held_rank()));
+        serial_write("\r\n");
+        return None;
+    }
+    let tid = current_linux_tid()?;
+    let slot = current_linux_thread_slot()?;
+    let block = wait
         .until(
             X86_RUNTIME
                 .ELF_PROBE_REAL_TIMER_DEADLINE
@@ -489,9 +532,42 @@ fn linux_process_block(wait: WaitOn) -> Option<WaitOn> {
                 .ELF_PROBE_POSIX_TIMER_DEADLINE
                 .load(Ordering::SeqCst),
         );
+    if !linux_process::block_live_thread(pid, tid, slot as u8, block) {
+        return None;
+    }
+    if let Some(others) = linux_other_threads_wait() {
+        let now = linux_elapsed_nanoseconds().unwrap_or(0);
+        linux_process::block_live_process_threads(pid, others, now);
+    }
+    let Some(handle) = park_current_linux_thread(restart) else {
+        let _ = linux_process::take_live_thread_block(pid, tid);
+        linux_process::set_live_process_waiting(pid, false);
+        return None;
+    };
+    let wake = park_linux_thread(pid, tid);
+    if wake.is_none() {
+        // It goes on as the current thread, with the call set to restart.
+        let _ = linux_process::take_live_thread_block(pid, tid);
+        linux_process::set_live_process_waiting(pid, false);
+        let _ = unpark_linux_thread(handle);
+    }
+    wake
+}
+
+/// What the current process's threads other than the current one wait
+/// for that only this process looks at (threads blocked the old way, on an
+/// application processor: anything but a futex word only this process's
+/// threads wake, a sleep and a signal wait is looked at again whenever
+/// anything may have changed), with their deadlines. Threads parked in
+/// calls of their own wait in the registry. None when another thread is
+/// ready or runs on another CPU: the process has work, and is passed over
+/// by no one.
+pub(super) fn linux_other_threads_wait() -> Option<WaitOn> {
+    let current = current_linux_thread_slot();
+    let mut block = WaitOn::NOTHING;
     for slot in (0..LINUX_THREAD_LIMIT).filter(|slot| Some(*slot) != current) {
         match X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) {
-            LINUX_THREAD_FREE => {}
+            LINUX_THREAD_FREE | LINUX_THREAD_PARKED => {}
             LINUX_THREAD_BLOCKED if !linux_thread_runs_elsewhere(slot) => {
                 block = block
                     .until(X86_RUNTIME.LINUX_THREAD_WAIT_DEADLINES[slot].load(Ordering::SeqCst));
@@ -560,68 +636,97 @@ pub(in crate::arch::x86_64) fn deliver_linux_wakeups() {
     }
 }
 
-/// The key activations of process `pid` in the running domain have: the
-/// domain's instance in the high half, since pids repeat across domains.
-pub(super) fn linux_activation_owner(pid: u32) -> u64 {
-    ((linux_execution_instance() as u64) << 32) | u64::from(pid)
+/// The key of thread `tid` of process `pid` of the running domain for its
+/// activation.
+pub(super) fn linux_thread_activation_owner(pid: u32, tid: u32) -> activation::Owner {
+    activation::Owner {
+        instance: linux_execution_instance() as u32,
+        pid,
+        tid,
+    }
 }
 
-/// Parks the current process `pid` inside its system call (see
-/// `activation::park`) and, once resumed, makes its thread pointer and
-/// address space current again, which whatever ran meanwhile replaced.
-/// False when it cannot park.
-fn park_linux_process(pid: u32) -> bool {
-    // A call never waits holding a spin lock: whoever runs meanwhile would
-    // deadlock on it, and the call may continue on another CPU.
-    if crate::sync::spin_lock_held() {
-        serial_write("linox: a system call tried to park holding a spin lock; pid ");
-        serial_write_u64(u64::from(pid));
-        serial_write(" rank ");
-        serial_write_u64(u64::from(crate::sync::held_rank()));
-        serial_write("\r\n");
-        return false;
-    }
+/// Whether an activation of process `pid` of the running domain (any
+/// thread's) runs on some CPU.
+pub(super) fn linux_process_activation_running(pid: u32) -> bool {
+    activation::is_running(linux_execution_instance() as u32, pid)
+}
+
+/// The threads of process `pid` of the running domain parked in calls on
+/// their activations.
+pub(super) fn linux_parked_threads(pid: u32) -> Vec<u32> {
+    activation::parked_threads(linux_execution_instance() as u32, pid)
+}
+
+/// Parks thread `tid` of the current process `pid` inside its system call
+/// (see `activation::park`; the thread already left the CPU,
+/// `park_current_linux_thread`) and, once resumed, makes its thread
+/// pointer and address space current again, which whatever ran meanwhile
+/// replaced. None when it cannot park; an unwinding call goes back to the
+/// kernel as it is.
+fn park_linux_thread(pid: u32, tid: u32) -> Option<activation::Wake> {
     let fs_base = active_fs_base();
     let root = address_space::current_root_address();
     // Others sharing its state run while it waits, and it sees what they
     // changed when it wakes.
     push_linux_shared_runtime_state();
-    if !activation::park(linux_activation_owner(pid)) {
-        return false;
+    let wake = activation::park(linux_thread_activation_owner(pid, tid))?;
+    if wake == activation::Wake::Unwind {
+        return Some(wake);
     }
     pull_linux_shared_runtime_state();
-    // SAFETY: both are this process's, saved on its own stack before it
-    // parked; the process is current again.
-    unsafe {
-        write_msr(FS_BASE_MSR, fs_base);
-        address_space::activate_root(root);
-    }
+    // Both are this process's, saved on its own stack before it parked;
+    // the process is current again.
+    let _ = install_user_fs_base(fs_base);
+    let _ = address_space::restore_root_after_resume(root);
     // What a system call entry checks, the parked call checks on waking:
     // expired waits, and an expired real timer raising SIGALRM, which then
     // interrupts the wait.
     expire_linux_waits();
     let _ = refresh_linux_real_timer();
     let _ = refresh_linux_posix_timers();
-    true
+    Some(wake)
 }
 
-/// Resumes process `pid`'s parked system call until it parks again or its
+/// Resumes thread `tid` of process `pid`, parked in a system call and
+/// made current again (`unpark_linux_thread`), until it parks again or its
 /// activation finishes; false when it has none. The parked call restores
 /// its own thread pointer and address space.
-fn resume_parked_linux_process(pid: u32) -> bool {
+pub(super) fn resume_parked_linux_thread(pid: u32, tid: u32) -> bool {
     X86_RUNTIME
         .LINUX_CURRENT_PROCESS_PID
         .store(pid, Ordering::SeqCst);
-    let entry_state = current_entry_state();
-    // SAFETY: the entry state is this CPU's; the resumed call installs its
-    // own while it runs, and the runtime's is put back after.
-    let previous_return_stack = unsafe { (*entry_state).return_stack };
     LINUX_PROCESS_SLICE[linux_cpu_slot()].store(0, Ordering::SeqCst);
     // SAFETY: `pid` is current again: the scheduler loop restored its
-    // kernel state before resuming it.
-    let resumed = unsafe { activation::resume(linux_activation_owner(pid)) }.is_some();
-    unsafe { (*entry_state).return_stack = previous_return_stack };
-    resumed
+    // kernel state before resuming it; the resumed call installs its own
+    // entry state while it runs, and the runtime's is put back after.
+    unsafe { activation::resume(linux_thread_activation_owner(pid, tid), false) }.is_some()
+}
+
+/// Ends thread `tid` of the current process `pid`, parked in a system
+/// call, because its process exits or executes: its call unwinds back to
+/// the kernel, and its activation finishes and its stack goes back. With
+/// a spin lock held (none may be held while another call runs) the
+/// activation is dropped as it is instead. Its block and futex record go.
+pub(super) fn unwind_parked_linux_thread(pid: u32, tid: u32) {
+    linux_process::drop_live_thread_blocks(pid, Some(tid));
+    drop_linux_thread_futex_waits(pid, tid);
+    let owner = linux_thread_activation_owner(pid, tid);
+    let root = address_space::current_root_address();
+    let unwound = !crate::sync::spin_lock_held() && activation::unwind(owner);
+    if !unwound {
+        activation::discard(owner);
+    }
+    let _ = address_space::restore_root_after_resume(root);
+}
+
+/// Ends every thread of the current process `pid` still parked in a
+/// system call (`unwind_parked_linux_thread`): the process exited.
+pub(super) fn unwind_parked_linux_threads(pid: u32) {
+    for tid in linux_parked_threads(pid) {
+        unwind_parked_linux_thread(pid, tid);
+    }
+    linux_process::drop_live_thread_blocks(pid, None);
 }
 
 /// How often, at most, sched_yield lets other processes run.
@@ -1030,34 +1135,38 @@ pub(super) fn write_linux_thread_live_return(
     true
 }
 
-/// Enters `process` in user mode, as the registry dispatched it, until it
-/// returns to the kernel: by a system call that leaves it (an exit, a
-/// yield, a fork that runs the child), a fault or a preemption. Every
-/// process the kernel runs is entered here.
-pub(super) fn run_dispatched_linux_process(process: &linux_process::LiveProcessDispatch) -> bool {
-    // A process parked in a system call continues there; it puts back its
-    // own address space and thread pointer, and the caller's root is put
-    // back after.
-    if activation::is_parked(linux_activation_owner(process.pid)) {
-        let previous_root = address_space::current_root_address();
-        let resumed = resume_parked_linux_process(process.pid);
-        let restored = address_space::restore_root_after_resume(previous_root);
-        if !(resumed && restored) {
-            serial_write("linox: parked process resume failed pid/cpu/resumed/restored: ");
-            for value in [
-                u64::from(process.pid),
-                current_cpu_index_checked().unwrap_or(99) as u64,
-                u64::from(resumed),
-                u64::from(restored),
-            ] {
-                serial_write_u64(value);
-                serial_write(" ");
-            }
-            serial_write("\r\n");
+/// Resumes thread `tid` of process `pid`, parked in a system call and made
+/// current again, until it parks again or returns to the kernel; the
+/// caller's root is put back after.
+pub(super) fn run_parked_linux_thread(pid: u32, tid: u32) -> bool {
+    let previous_root = address_space::current_root_address();
+    let resumed = resume_parked_linux_thread(pid, tid);
+    let restored = address_space::restore_root_after_resume(previous_root);
+    if !(resumed && restored) {
+        serial_write("linox: parked thread resume failed pid/tid/cpu/resumed/restored: ");
+        for value in [
+            u64::from(pid),
+            u64::from(tid),
+            current_cpu_index_checked().unwrap_or(99) as u64,
+            u64::from(resumed),
+            u64::from(restored),
+        ] {
+            serial_write_u64(value);
+            serial_write(" ");
         }
-        return restored && resumed;
+        serial_write("\r\n");
     }
-    if activation::is_running(linux_activation_owner(process.pid)) {
+    restored && resumed
+}
+
+/// Enters `process` in user mode, as the registry dispatched it (its
+/// current thread at the registry's context), until it returns to the
+/// kernel or parks: by a system call that leaves it (an exit, a yield, a
+/// fork that runs the child) or waits, a fault or a preemption. Every
+/// process the kernel runs is entered here; a thread parked in a call is
+/// resumed by `run_parked_linux_thread`.
+pub(super) fn run_dispatched_linux_process(process: &linux_process::LiveProcessDispatch) -> bool {
+    if linux_process_activation_running(process.pid) {
         serial_write("linox: entering a process whose activation runs pid/cpu: ");
         serial_write_u64(u64::from(process.pid));
         serial_write(" ");
@@ -1493,7 +1602,7 @@ fn run_linux_runtime_loop(mut first: Option<u32>) -> bool {
 /// Whether the boot CPU's loop may run process `pid`, ready in the run
 /// queue: one whose kernel activation another CPU runs is that CPU's.
 fn linux_runtime_loop_may_run(pid: u32) -> bool {
-    !activation::is_running(linux_activation_owner(pid))
+    !linux_process_activation_running(pid)
 }
 
 /// Whether the domain's console belongs to a `domain exec` command that is
@@ -1521,7 +1630,7 @@ pub(super) fn linux_console_held_by_domain_exec() -> bool {
 }
 
 /// Whether process `pid` has SIGKILL pending.
-fn linux_process_killed(pid: u32) -> bool {
+pub(super) fn linux_process_killed(pid: u32) -> bool {
     linux_process::live_process_slot(pid)
         .and_then(|slot| {
             crate::linux_signal::pending_mask(

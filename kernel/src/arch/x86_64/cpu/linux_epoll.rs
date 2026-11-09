@@ -782,7 +782,7 @@ pub(super) fn linux_epoll_wait_duration_live_return(
     // wait because a sibling thread became ready meanwhile.
     let mut continued_deadline = None;
     let target = 'target: {
-        if let Some(target) = ready_linux_thread_handle() {
+        if let Some(target) = linux_thread_wait_handoff() {
             break 'target target;
         }
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
@@ -816,7 +816,7 @@ pub(super) fn linux_epoll_wait_duration_live_return(
                     if let LinuxWaitTurn::Done(result) = turn {
                         break Ok(result);
                     }
-                    if let Some(target) = ready_linux_thread_handle() {
+                    if let Some(target) = linux_thread_wait_handoff() {
                         break Err((target, deadline));
                     }
                     match linux_epoll_collect(input.epoll, input.address, input.maximum) {

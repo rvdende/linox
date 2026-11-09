@@ -286,7 +286,9 @@ pub(super) fn restore_linux_process_extended_state(pid: u32) -> bool {
         return true;
     }
     let Some(thread) = current_linux_thread_slot() else {
-        return false;
+        // No thread is current (they wait parked in calls, or are ready):
+        // each gets its own state back as it is made current.
+        return true;
     };
     restore_linux_thread_extended_state(pid, thread)
 }

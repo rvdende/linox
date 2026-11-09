@@ -782,6 +782,33 @@ struct ProcessTable {
     /// Some process may be blocked (`Process::block`): wakers look only
     /// then.
     blocked: bool,
+    /// The threads blocked in calls of their own, each parked on its own
+    /// activation (docs/SCHEDULER.md, "Activations per thread"). A process
+    /// runs while any of its threads can; it blocks as a whole only when
+    /// all of them wait, on what any of them waits for.
+    thread_blocks: Vec<ThreadBlock>,
+}
+
+/// A thread of a live process blocked in a system call, parked on its own
+/// activation until a waker for what it waits on, a signal or its deadline
+/// ends the block.
+#[derive(Clone, Copy, Debug)]
+struct ThreadBlock {
+    pid: u32,
+    tid: u32,
+    /// Its slot in the process's thread table (its signal queue's).
+    slot: u8,
+    wait: crate::linux_wait_queue::WaitOn,
+    /// Still blocked: a wake clears it, and the scheduler resumes the
+    /// thread to look at its wait again.
+    waiting: bool,
+}
+
+impl ThreadBlock {
+    /// Its wait is over by `now`: woken, or its deadline passed.
+    fn due(&self, now: u64) -> bool {
+        !self.waiting || self.wait.deadline() != 0 && self.wait.deadline() <= now
+    }
 }
 
 /// One installed seccomp program and the filter before it in its chain.
@@ -815,6 +842,20 @@ impl ProcessTable {
             sleepers: linox_deadline_heap::DeadlineHeap::new(),
             sleepers_lossy: false,
             blocked: false,
+            thread_blocks: Vec::new(),
+        }
+    }
+
+    /// Ends the blocks of `pid`'s threads (all of them, or the one in
+    /// thread slot `slot`): each looks at its wait again when it runs, as
+    /// for a signal, which any of them may take.
+    fn wake_threads(&mut self, pid: u32, slot: Option<u8>) {
+        for block in self
+            .thread_blocks
+            .iter_mut()
+            .filter(|block| block.pid == pid && slot.is_none_or(|slot| block.slot == slot))
+        {
+            block.waiting = false;
         }
     }
 
@@ -1512,6 +1553,7 @@ impl ProcessTable {
             if let Some(process) = self.process_mut(waiter) {
                 process.waiting = false;
             }
+            self.wake_threads(waiter.pid, None);
         }
     }
 
@@ -1589,6 +1631,7 @@ impl ProcessTable {
             if let Some(init) = self.process_mut(init) {
                 init.waiting = false;
             }
+            self.wake_threads(init.pid, None);
         }
     }
 
@@ -1608,6 +1651,7 @@ impl ProcessTable {
         process.context = None;
         process.wait_event = None;
         process.state = ProcessState::Zombie { status };
+        self.thread_blocks.retain(|block| block.pid != handle.pid);
         self.wake_state_waiters(handle);
         self.reparent_children_to_init(handle);
         true
@@ -3085,9 +3129,34 @@ pub(crate) fn refresh_live_process_context_for_wait(
             .checked_sub(1)
             .and_then(address_space::current_linux_active_mapping)
             .is_some_and(|page| page.writable);
-    if !mapped {
-        return false;
-    }
+    mapped && set_live_process_context(pid, context)
+}
+
+/// Records the saved user context of the thread the current process `pid`
+/// is next entered at (one that waited ready, its stack perhaps not mapped
+/// in yet: its first touch faults it in), checking only that the registers
+/// are a user context; the registered mapping list is marked stale.
+pub(crate) fn set_live_process_thread_context(
+    pid: u32,
+    general: [u64; 15],
+    rip: u64,
+    rsp: u64,
+    rflags: u64,
+    fs_base: u64,
+) -> bool {
+    let context = ProcessExecutionContext {
+        general,
+        rip,
+        rsp,
+        rflags,
+        fs_base,
+    };
+    context.registers_valid() && set_live_process_context(pid, context)
+}
+
+/// Makes `context` running process `pid`'s registry context, its mapping
+/// list stale.
+fn set_live_process_context(pid: u32, context: ProcessExecutionContext) -> bool {
     let Some(table) = live_process_table_mut() else {
         return false;
     };
@@ -3275,6 +3344,7 @@ pub(crate) fn force_stop_runtime_process_registry() -> bool {
         return false;
     };
     run_queue.retire_all();
+    table.thread_blocks.clear();
     for process in table.processes.iter_mut().flatten() {
         process.scheduler_thread = None;
     }
@@ -3723,7 +3793,133 @@ pub(crate) fn set_live_process_waiting(pid: u32, waiting: bool) {
         }
         if waiting {
             table.note_sleeper(pid);
+        } else {
+            table.wake_threads(pid, None);
         }
+    }
+}
+
+/// Blocks thread `tid` (in thread slot `slot`) of process `pid` in its
+/// system call until `wait` ends, its activation parked meanwhile
+/// (docs/SCHEDULER.md, "Activations per thread"): a waker for what it
+/// waits on, a signal for it or its process, or its deadline makes it due
+/// to run again. The process runs on while another of its threads can.
+pub(crate) fn block_live_thread(
+    pid: u32,
+    tid: u32,
+    slot: u8,
+    wait: crate::linux_wait_queue::WaitOn,
+) -> bool {
+    let Some(table) = live_process_table_mut() else {
+        return false;
+    };
+    if table.handle_by_pid(pid).is_none() {
+        return false;
+    }
+    let block = ThreadBlock {
+        pid,
+        tid,
+        slot,
+        wait,
+        waiting: true,
+    };
+    match table
+        .thread_blocks
+        .iter_mut()
+        .find(|block| block.pid == pid && block.tid == tid)
+    {
+        Some(existing) => *existing = block,
+        None => {
+            if table.thread_blocks.try_reserve(1).is_err() {
+                return false;
+            }
+            table.thread_blocks.push(block);
+        }
+    }
+    table.blocked = true;
+    table.push_sleeper(pid, wait.deadline());
+    true
+}
+
+/// Ends the block of thread `tid` of process `pid`, which runs again;
+/// false when it had none.
+pub(crate) fn take_live_thread_block(pid: u32, tid: u32) -> bool {
+    let Some(table) = live_process_table_mut() else {
+        return false;
+    };
+    let Some(index) = table
+        .thread_blocks
+        .iter()
+        .position(|block| block.pid == pid && block.tid == tid)
+    else {
+        return false;
+    };
+    table.thread_blocks.remove(index);
+    true
+}
+
+/// Drops the blocks of process `pid`'s threads: thread `tid`'s, or with
+/// None all of them (the threads ended).
+pub(crate) fn drop_live_thread_blocks(pid: u32, tid: Option<u32>) {
+    if let Some(table) = live_process_table_mut() {
+        table
+            .thread_blocks
+            .retain(|block| block.pid != pid || tid.is_some_and(|tid| block.tid != tid));
+    }
+}
+
+/// The thread of process `pid` blocked in a call whose wait is over by
+/// `now` (woken, or its deadline passed), the longest blocked first.
+pub(crate) fn due_live_thread(pid: u32, now: u64) -> Option<u32> {
+    let table = live_process_table_mut()?;
+    table
+        .thread_blocks
+        .iter()
+        .find(|block| block.pid == pid && block.due(now))
+        .map(|block| block.tid)
+}
+
+/// Blocks process `pid`, none of whose threads can run, as a whole: on
+/// what its threads blocked in calls wait for and `others` (what its
+/// threads that waited the old way wait for). Unless one of those blocked
+/// threads is due by `now` already (woken while its sibling ran, or past
+/// its deadline): the process then stays ready, to resume it.
+pub(crate) fn block_live_process_threads(
+    pid: u32,
+    others: crate::linux_wait_queue::WaitOn,
+    now: u64,
+) {
+    let Some(table) = live_process_table_mut() else {
+        return;
+    };
+    let mut wait = others;
+    for block in table.thread_blocks.iter().filter(|block| block.pid == pid) {
+        if block.due(now) {
+            return;
+        }
+        wait = wait.and(block.wait);
+    }
+    block_live_process(pid, wait);
+}
+
+/// Makes thread `tid` of process `pid` due to run if it is blocked, and
+/// its process ready: a futex wake of its record.
+pub(crate) fn wake_live_thread(pid: u32, tid: u32) {
+    let Some(table) = live_process_table_mut() else {
+        return;
+    };
+    for block in table
+        .thread_blocks
+        .iter_mut()
+        .filter(|block| block.pid == pid && block.tid == tid)
+    {
+        block.waiting = false;
+    }
+    if let Some(process) = table
+        .handle_by_pid(pid)
+        .and_then(|handle| table.process_mut(handle))
+    {
+        process.waiting = false;
     }
 }
 
@@ -3764,6 +3960,24 @@ pub(crate) fn wake_live_processes(events: u16, key: Option<u64>) -> u32 {
     }
     let mut woken = 0;
     let mut blocked = false;
+    for index in 0..table.thread_blocks.len() {
+        let block = table.thread_blocks[index];
+        if !block.waiting {
+            continue;
+        }
+        if block.wait.woken_by(events, key) {
+            table.thread_blocks[index].waiting = false;
+            if let Some(process) = table
+                .handle_by_pid(block.pid)
+                .and_then(|handle| table.process_mut(handle))
+            {
+                process.waiting = false;
+            }
+            woken += 1;
+        } else {
+            blocked = true;
+        }
+    }
     for process in table.processes.iter_mut().flatten() {
         let Some(block) = process.block.filter(|_| process.waiting) else {
             continue;
@@ -3814,6 +4028,12 @@ pub(crate) fn next_live_block_deadline() -> Option<u64> {
             .iter()
             .flatten()
             .filter_map(|process| process.marked_asleep_until())
+            .chain(
+                table
+                    .thread_blocks
+                    .iter()
+                    .filter_map(ThreadBlock::marked_until),
+            )
             .min();
     }
     let mut sleepers = core::mem::take(&mut table.sleepers);
@@ -3834,10 +4054,16 @@ impl ProcessTable {
         else {
             return;
         };
-        if self.sleepers_lossy {
+        self.push_sleeper(pid, deadline);
+    }
+
+    /// Records deadline `deadline` (0: none) of a block of `pid`'s or of
+    /// one of its threads'.
+    fn push_sleeper(&mut self, pid: u32, deadline: u64) {
+        if self.sleepers_lossy || deadline == 0 {
             return;
         }
-        if self.sleepers.len() >= 2 * self.pid_slots.len() + 64 {
+        if self.sleepers.len() >= 2 * self.pid_slots.len() + self.thread_blocks.len() + 64 {
             let mut sleepers = core::mem::take(&mut self.sleepers);
             sleepers.retain(|pid, deadline| self.sleeper_holds(pid, deadline));
             self.sleepers = sleepers;
@@ -3848,12 +4074,17 @@ impl ProcessTable {
         }
     }
 
-    /// Whether `pid` is still marked asleep until `deadline`.
+    /// Whether `pid`, or a thread of it, is still marked asleep until
+    /// `deadline`.
     fn sleeper_holds(&self, pid: u32, deadline: u64) -> bool {
         self.handle_by_pid(pid)
             .and_then(|handle| self.process(handle))
             .and_then(Process::marked_asleep_until)
             == Some(deadline)
+            || self
+                .thread_blocks
+                .iter()
+                .any(|block| block.pid == pid && block.marked_until() == Some(deadline))
     }
 
     /// Puts every current mark back after an allocation failure lost some.
@@ -3866,8 +4097,22 @@ impl ProcessTable {
                 }
             }
         }
+        for block in &self.thread_blocks {
+            if let Some(deadline) = block.marked_until() {
+                if sleepers.push(deadline, block.pid).is_err() {
+                    return;
+                }
+            }
+        }
         self.sleepers = sleepers;
         self.sleepers_lossy = false;
+    }
+}
+
+impl ThreadBlock {
+    /// The deadline the thread is blocked until, if it is.
+    fn marked_until(&self) -> Option<u64> {
+        Some(self.wait.deadline()).filter(|deadline| self.waiting && *deadline != 0)
     }
 }
 
@@ -4776,15 +5021,20 @@ pub(crate) fn set_live_process_exec_context(pid: u32, rip: u64, rsp: u64) -> boo
 }
 
 /// Makes the process in table slot `slot` ready if it waits in a call: a
-/// signal was queued for it, which ends any wait (or is looked at and the
-/// call waits on).
-pub(crate) fn wake_live_process_at_slot(slot: usize) {
-    if let Some(process) = live_process_table_mut()
-        .and_then(|table| table.processes.get_mut(slot))
-        .and_then(Option::as_mut)
-    {
-        process.waiting = false;
-    }
+/// signal was queued for it (for its thread in thread slot `thread`),
+/// which ends any wait (or is looked at and the call waits on). A signal
+/// for the process ends every thread's block, since any thread that does
+/// not block it may take it.
+pub(crate) fn wake_live_process_at_slot(slot: usize, thread: Option<u8>) {
+    let Some(table) = live_process_table_mut() else {
+        return;
+    };
+    let Some(process) = table.processes.get_mut(slot).and_then(Option::as_mut) else {
+        return;
+    };
+    process.waiting = false;
+    let pid = process.handle.pid;
+    table.wake_threads(pid, thread);
 }
 
 pub(crate) fn live_process_slot(pid: u32) -> Option<usize> {

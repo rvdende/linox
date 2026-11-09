@@ -1283,7 +1283,7 @@ pub(super) fn linux_descriptor_read_live_return(
         // would hand the CPU to each other and starve the writer.
         if descriptor <= 0xff
             && linux_socket_pipe_descriptor(descriptor, LINUX_DESCRIPTOR_INPUT)
-            && ready_linux_thread_handle().is_some()
+            && linux_thread_wait_handoff().is_some()
         {
             X86_RUNTIME
                 .LINUX_SOCKET_SINGLE_ATTEMPT
@@ -1345,7 +1345,7 @@ pub(super) fn linux_descriptor_read_live_return(
         while console_attached()
             && (!crate::serial_input_ready() || linux_console_held_by_domain_exec())
         {
-            if ready_linux_thread_handle().is_some() || current_linux_runtime_cpu_index() != 0 {
+            if linux_thread_wait_handoff().is_some() || current_linux_runtime_cpu_index() != 0 {
                 return linux_retry_later_live_return(
                     output,
                     caller,
@@ -1707,7 +1707,7 @@ fn linux_blocking_descriptor_io_live_return(
     let Some(current) = current_linux_thread_handle() else {
         return LINUX_ESRCH;
     };
-    let Some(target) = ready_linux_thread_handle() else {
+    let Some(target) = linux_thread_wait_handoff() else {
         let wait = WaitOn::ANYTHING.until(deadline);
         return match run_other_linux_processes(output, caller, number, wait) {
             Some(LinuxBlockedWait::Return(result)) => result,
@@ -1906,7 +1906,7 @@ pub(super) fn linux_retry_later_live_return(
     // row, the other processes get their turn.
     let handoffs = LINUX_RETRY_SIBLING_HANDOFFS.fetch_add(1, Ordering::Relaxed);
     let others_first = handoffs >= LINUX_RETRY_SIBLING_HANDOFF_LIMIT;
-    let sibling = if others_first {
+    let sibling = if others_first || linux_threads_park_here() {
         None
     } else {
         yield_ready_linux_thread_handle()

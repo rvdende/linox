@@ -1,10 +1,10 @@
 # Kernel stacks and scheduling: design
 
-Status: steps 1-4 below are done (2026-11-09: the scheduler loop owns the
-run queue and nothing runs nested); of step 5, real wakeups (wait queues,
-"Wait queues" below) and the first cheap switches are done; activations
-per thread are next, then step 6 (per-CPU loops, splitting the
-kernel-entry lock). Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
+Status: steps 1-5 below are done (2026-11-09: the scheduler loop owns the
+run queue and nothing runs nested; waits block on wait queues, "Wait
+queues" below; every thread waits on an activation of its own,
+"Activations per thread" below); step 6 (per-CPU loops, splitting the
+kernel-entry lock) is next. Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
 execution model with Linux's: every thread has its own kernel stack,
 blocking switches stacks, and a scheduler decides who runs next on each CPU.
 
@@ -115,13 +115,14 @@ a fork transaction's exec'd child); the scheduler loop makes that everyone.
    parking in its call or returning to the kernel; forks, exits, domain
    exec and suspension are handled by the loop, and every process can be
    preempted by the timer.
-5. Real blocking: an activation that must wait parks (switches to the loop)
-   instead of returning to the kernel with a restart, and the loop resumes
-   parked activations by switching to them; threads get activations of their
-   own; per-process globals become task fields so a switch no longer copies
-   them in and out. Done (2026-11-09): wakeups. A parked call is blocked on
-   what it waits for and leaves the run queue until a waker, a signal or
-   its deadline makes it ready ("Wait queues" below).
+5. Done (2026-11-09): real blocking. An activation that must wait parks
+   (switches to the loop) instead of returning to the kernel with a
+   restart, and the loop resumes parked activations by switching to them.
+   A parked call is blocked on what it waits for and leaves the run queue
+   until a waker, a signal or its deadline makes it ready ("Wait queues"
+   below), and each thread waits on an activation of its own, blocking
+   and waking independently of its siblings ("Activations per thread"
+   below).
 6. Per-CPU scheduler loops with load balancing and wakeups by IPI, then
    splitting `kernel_entry_lock` into per-subsystem locks so CPUs run kernel
    code in parallel (lock ranks from
@@ -215,10 +216,10 @@ How the old init-only assumptions were resolved:
   CPUs' live banks (`sync_live_linux_open_file_offset`), not only the
   saved records, which the parent's next save overwrote (fork07).
 
-Kept for M2/M3: the application processors still leave a parked
+Kept for M3: the application processors still leave a parked
 (Sleeping) process to the boot CPU unless it is due or pinned elsewhere,
 and never run init; they enter processes without activations, so a call
-there cannot park (it restarts or yields). The fork transaction's
+there cannot park (it restarts, yields or waits as a thread wait). The fork transaction's
 child-first path remains only for the boot verification probe.
 
 ### What step 5 (M2) must do
@@ -226,8 +227,8 @@ child-first path remains only for the boot verification probe.
 - **Wakeups instead of rechecks.** Done (2026-11-09, "Wait queues"
   below): every parked call is blocked on what it waits for, and the
   idle-round heuristic and `mark_linux_process_asleep` are gone.
-- **Activations per thread.** Not done: see "Activations per thread:
-  what is left of step 5" below.
+- **Activations per thread.** Done (2026-11-09): see "Activations per
+  thread" below.
 - **Per-process globals as task fields.** Partly done (2026-11-09): a
   process that comes back to the kernel (a yield, a preemption) with
   nothing else ready goes on in place, its state staying in the CPU's bank
@@ -235,9 +236,14 @@ child-first path remains only for the boot verification probe.
   (`linux_process_continues_in_place` in `run_linux_process_here`); a
   preemption with nothing else ready carries on without even leaving its
   call, and sched_yield gives the CPU away only to a ready process
-  (`linux_process::other_live_process_ready`). Moving the per-process
-  globals into task fields is left for the per-thread activations, which
-  change what a task is.
+  (`linux_process::other_live_process_ready`). With activations per
+  thread, a switch between threads of one process on a CPU never saves or
+  restores the process: its bank stays, and only the thread's own state
+  moves (its slot's saved context, signal mask, thread pointer and vector
+  state; `park_current_linux_thread`, `unpark_linux_thread`,
+  `ready_current_linux_thread`). The process-wide copy of the current
+  thread's signal mask and the bank's thread table remain until M3 gives
+  each CPU its own current task.
 - **Yields.** Done (2026-11-09): `yield_current_linux_process` and the
   timer preemption no longer record the CHILD_YIELDED flags (only the boot
   probe's child-first fork transaction reads them), and a returned
@@ -245,41 +251,97 @@ child-first path remains only for the boot verification probe.
   context a wait writes stays: it is the registry's context of the parked
   process, which the dispatch validates and a failed park re-enters.
 
-### Activations per thread: what is left of step 5
+### Activations per thread (step 5, done 2026-11-09)
 
-Not done yet. Today a process has one activation
-(`linux_activation_owner(pid)`) and its threads switch in user mode inside
-it: a thread that must wait either blocks as a *thread wait*
-(`block_current_linux_thread`, the `LINUX_THREAD_WAIT_*` kinds, which save
-its user context and return into a ready sibling's) or, with no sibling
-ready, parks the whole process in `run_other_linux_processes`. Only one
-thread of a process can be inside a parked call, a thread that must wait
-while a sibling is ready restarts its call later
-(`linux_retry_later_live_return`), and a blocked multithreaded process
-also waits for its threads' waits, which for a descriptor means every
-state change and tick (`linux_process_block`). What it takes:
+Every Linux thread waits in the kernel on an activation of its own
+(`cpu/activation.rs`). An activation runs whichever thread of its process
+is current on its CPU; when a call must wait, the activation parks for
+the thread whose call it is: `activation::Owner` is the domain instance,
+pid *and* tid. On the boot CPU (`linux_threads_park_here`) every wait
+parks this way, whether or not a sibling is ready:
 
-1. Key activations by domain instance, pid *and* tid, and let
-   `run_dispatched_linux_process` choose per thread: resume a woken
-   thread's parked call, or enter a ready thread at its saved user context
-   in a new activation. The per-thread kernel state a switch between them
-   moves (current thread slot, signal mask, FS base, extended state) is
-   what `switch_linux_thread` switches today.
-2. Blocks per thread: `Process::block` moves to the thread (the registry
-   gains thread records, or the thread table carries it), wakers wake a
-   thread, and a process is ready while any of its threads is. The
-   registry's single `ProcessExecutionContext` per process becomes one per
-   thread (the thread slots' saved contexts are most of it already).
-3. Thread waits become parks: `run_other_linux_processes` stops returning
-   `None` for a ready sibling, and the `LINUX_THREAD_WAIT_*` machinery,
-   `linux_retry_later_live_return`'s sibling hand-offs and
-   `LINUX_RETRY_SIBLING_HANDOFFS` go.
-4. exit_group, exec and fatal signals end the threads parked in the kernel
-   by resuming each with SIGKILL pending so its call unwinds
-   (`discard_parked` drops parked frames only when a runtime ends).
-5. The application processors' light path runs threads without
-   activations and migrates a thread that must wait to the owner; with
-   activations per thread it runs them like any thread and lets them park.
+- **Parking a thread.** `run_other_linux_processes` records the thread's
+  wait in the process registry (`linux_process::block_live_thread`: a
+  `ThreadBlock` with the thread's `WaitOn`, its deadline in the deadline
+  heap), takes the thread off the CPU (`park_current_linux_thread`: state
+  `LINUX_THREAD_PARKED`, its signal mask, vector state and restart context
+  kept in its slot, no thread current) and parks the activation. Only when
+  none of the process's other threads can run does the process block as a
+  whole, on what all its blocked threads wait for together
+  (`block_live_process_threads`), and never while one of them is already
+  due.
+- **Waking a thread.** The wakers end thread blocks as they end process
+  blocks: the queued events (`wake_live_processes` matches each thread's
+  wait), a futex record's wake (`wake_live_thread`, for exactly the
+  waiting thread), a child's change of state (the parent's threads), and
+  signals: one for a thread ends that thread's block, one for the process
+  every thread's, since any thread that does not block it may take it
+  (the others look at their waits again and park again). A woken thread
+  makes its process ready.
+- **Picking a thread.** When the loop runs a process
+  (`run_linux_process_here`, `linux_thread_turn`), a parked thread whose
+  wait is over (woken or past its deadline; with SIGKILL pending, any
+  parked thread, whose wait then ends the process) is resumed first, the
+  current thread being made ready with its exact context; else the current
+  thread is entered at the registry's context; else a ready thread is made
+  current and entered at its slot's context on a new activation; else the
+  process blocks. A process none of whose threads can run here leaves the
+  CPU; one with another thread to run goes on in place, its bank kept. A
+  thread made due while a sibling runs ends that sibling's slice within a
+  few ticks (`linux_thread_woken_from_timer`, and the preemption entry
+  yields when a thread of the process is due).
+- **The registry's context** is the context the process's current thread
+  is entered at; each thread's own lives in its slot (the registry gains
+  no per-thread copy: the slots were most of one already). When the
+  current thread parks or exits, a ready sibling's slot context becomes
+  the registry's (`set_live_process_thread_context`, which does not need
+  the sibling's stack mapped in yet). A process saved with no thread
+  current (all parked or ready) keeps that in its record, and each thread
+  gets its own vector state back as it is made current.
+- **Thread exit.** A thread's exit clears and wakes its tid word (futex
+  records match a word of the waker's own process by address as well as
+  by frame, since copy-on-write after a fork may have moved the page),
+  frees its slot and finishes its activation; its siblings run on. The
+  last thread's exit ends the process.
+- **exit_group, fatal signals, exec.** The threads still parked in calls
+  are unwound (`unwind_parked_linux_threads` once the exit is taken, and
+  `end_other_linux_threads_for_exec` at an exec's point of no return,
+  from inside the exec's own call): each is resumed with
+  `activation::Wake::Unwind`, its call returns to the kernel at once,
+  its activation finishes and its stack goes back to the pool; its block
+  and futex records go with it. `activation::discard` drops one that
+  cannot be resumed (a spin lock held) without running it.
+- **Threads that waited the old way.** The `LINUX_THREAD_WAIT_*` thread
+  waits, which save a thread's user context and hand the CPU to a ready
+  sibling in user mode, remain for the application processors, whose
+  calls cannot park (below), and the boot probe. `linux_thread_wait_handoff`
+  is where a waiting call chooses between the two.
+
+What the application processors do: they still enter processes without
+activations, and a call made there that must wait restarts, yields or
+waits as a thread wait (or, on the light path, migrates to the owner).
+They may resume a parked thread's activation (one due, or pinned off the
+boot CPU), and a ready thread of a process they run is entered there as
+on the boot CPU. Activations are not tied to a CPU: one parked on one CPU
+is resumed on whichever takes its process.
+
+Measured (2026-11-09, same host and method as "Wait queues" below): an
+idle all-Rust domain cost QEMU 13-16% of a host CPU before and 13%
+after (brush's input thread polls the console every tick either way); a
+serde `cargo build -j1` in rust:alpine took 1m04s before and 1m00-1m04s
+after (three runs).
+
+What M3 (step 6) must do with them: give each CPU its own loop and run
+queue of *threads* (today the run queue holds processes and a process's
+threads are picked inside it, on one CPU at a time but for the light
+path); let the application processors enter threads on activations so
+their calls park like the boot CPU's, which retires the
+`LINUX_THREAD_WAIT_*` machinery, `linux_retry_later_live_return`'s
+sibling hand-offs and the light path's migrations; move the current
+thread's signal mask and thread slot out of the per-process bank into a
+per-CPU current task; send a woken thread's CPU an IPI instead of waiting
+for its sibling's slice to end; and split `kernel_entry_lock`, which every
+one of these paths still holds.
 
 
 ## Wait queues (step 5, done 2026-11-09)
@@ -306,7 +368,7 @@ The events (`kernel/src/linux_wait_queue.rs`) and their wakers:
 | `CHILD` | wait4, waitid, the vfork wait | a child's stop, continue, exit, exec (`wake_state_waiters`; exec through `mark_executed` and `set_exec_context`) and adoption by init |
 | `SOCKET` + slot | read, write, recv on pipes and local (Unix, netlink, loopback TCP) sockets; poll, select and epoll on them | every data, room, hangup, shutdown, connect and accept change of the slot (`Slot::wake`, from `note_input`/`note_output` and the listener queue), queued with `linux_wait_queue::notify` under the sockets' lock |
 | `STATE` | SysV semaphores and messages, POSIX queues, eventfd, signalfd, pidfd, timerfd (with its expiry as deadline), file locks, a stopped process's wait for SIGCONT, init's exit rounds | any system call outside a short list of calls that read only their own state or the clock (`linux_syscall_may_change_waits`), and every exit settled by the loop |
-| `TICK` | the console, network sockets (smoltcp is polled), devices, leases, futex2 waits with no record, and the descriptor waits of a multithreaded process's other threads | every tick of the boot CPU (`note_tick` in `expire_linux_waits_from_timer`) |
+| `TICK` | the console, network sockets (smoltcp is polled), devices, leases, futex2 waits with no record, and the descriptor waits of threads that waited the old way (on an application processor) | every tick of the boot CPU (`note_tick` in `expire_linux_waits_from_timer`) |
 
 poll, select and epoll fold the wait of each descriptor (`linux_descriptor_wait`;
 epoll over its watches, `linux_epoll_wait_on`); a wait that names more than
@@ -325,11 +387,11 @@ while other domains ran. No call parks while holding a spin lock: the
 waits block in `run_other_linux_processes` after their locks are released
 (SysV IPC records its waiter, then drops `SYSV_IPC` before blocking).
 
-A multithreaded process blocks only when none of its other threads is
-ready or runs on another CPU; it then also waits for its blocked threads'
-deadlines and, when one of them waits on a descriptor, for every state
-change and tick (a thread's own wait has no waker of its own until
-threads have activations of their own, the next part of step 5).
+Each thread blocks on its own wait ("Activations per thread" above); a
+multithreaded process blocks as a whole only when none of its threads is
+ready or runs on another CPU, on what they all wait for. Threads that
+waited the old way (on an application processor) add their deadlines and,
+when one waits on a descriptor, every state change and tick.
 
 The loop itself no longer counts idle rounds: with nothing ready it halts
 until an interrupt, at the latest the tick at the earliest deadline.
@@ -340,8 +402,7 @@ Measured (2026-11-09): an idle all-Rust domain (brush at its prompt)
 cost QEMU 27-28% of a host CPU on the step 4 kernel and 13-14% with wait
 queues (QEMU's user and system time over 20 s). What is left is mostly
 the 1 kHz tick and brush's input thread, whose console read is looked at
-on every tick (the console is polled, and a multithreaded process blocks
-as a whole until threads have activations of their own). A serde `cargo
+on every tick (the console is polled). A serde `cargo
 build -j1` in rust:alpine took 1m02s before and 1m00-1m02s after: one
 rustc at a time, whose waits the old idle-round shortcut already kept
 cheap.

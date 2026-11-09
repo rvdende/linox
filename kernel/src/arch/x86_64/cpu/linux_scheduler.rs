@@ -401,19 +401,18 @@ pub(super) fn linux_report_process_banks() {
 /// whose threads run on other CPUs is stale), with the process's activation
 /// state, and whether each CPU's light thread yielded.
 pub(super) fn linux_report_live_bank_threads() {
-    serial_write("linox: sysrq: live banks bank/pid/parked/running-activation:\r\n");
+    serial_write("linox: sysrq: live banks bank/pid/parked-threads/running-activation:\r\n");
     for bank in 0..LINUX_CPU_BANK_LIMIT {
         let pid = LINUX_BANK_PID[bank].load(Ordering::Acquire);
         if LINUX_BANK_USERS[bank].load(Ordering::Acquire) == 0 || pid == 0 {
             continue;
         }
         serial_write("linox: bank ");
-        let owner = linux_activation_owner(pid);
         for value in [
             bank as u64,
             u64::from(pid),
-            u64::from(activation::is_parked(owner)),
-            u64::from(activation::is_running(owner)),
+            linux_parked_threads(pid).len() as u64,
+            u64::from(linux_process_activation_running(pid)),
         ] {
             serial_write_u64(value);
             serial_write(" ");
@@ -1261,7 +1260,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
                                 .is_some_and(|mask| mask & 1 == 0)
                                 || linux_process::live_process_sleep_due(pid, now))
                 })
-                && !activation::is_running(linux_activation_owner(pid))
+                && !linux_process_activation_running(pid)
         });
         if let Some(pid) = picked {
             after = pid;
@@ -1426,15 +1425,27 @@ pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
         .LINUX_CURRENT_PROCESS_PID
         .store(pid, Ordering::SeqCst);
     let resumed = loop {
-        // A parked process is resumed even when killed: its wait sees the
-        // signal and ends the process from its own stack.
-        let pending_sigkill = linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
-            .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
-            && !activation::is_parked(linux_activation_owner(pid));
-        let resumed = if pending_sigkill {
-            linux_terminate_by_default_signal(LINUX_SIGKILL) == LINUX_RETURN_TO_KERNEL
-        } else {
-            sync_live_linux_process_address_space(pid) && run_dispatched_linux_process(&selected)
+        let resumed = match linux_thread_turn(pid, &selected) {
+            LinuxThreadTurn::Resume(tid) => {
+                sync_live_linux_process_address_space(pid) && run_parked_linux_thread(pid, tid)
+            }
+            LinuxThreadTurn::Enter(dispatch) => {
+                // With no thread parked in a call to end the process from
+                // its wait, SIGKILL ends it here.
+                let pending_sigkill = linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
+                    .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL);
+                if pending_sigkill {
+                    linux_terminate_by_default_signal(LINUX_SIGKILL) == LINUX_RETURN_TO_KERNEL
+                } else {
+                    sync_live_linux_process_address_space(pid)
+                        && run_dispatched_linux_process(&dispatch)
+                }
+            }
+            LinuxThreadTurn::Blocked => {
+                block_linux_process_threads(pid);
+                break true;
+            }
+            LinuxThreadTurn::Failed => false,
         };
         if !resumed {
             break resumed;
@@ -1463,6 +1474,11 @@ pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
             LinuxRunOutcome::Failed
         };
     }
+    // An exit (exit_group, a fatal signal) ends the threads still parked in
+    // calls: each unwinds out of its call, and its activation ends.
+    if linux_child_exited(pid) {
+        unwind_parked_linux_threads(pid);
+    }
     save_current_linux_process_runtime_state(pid);
     let saved = save_linux_process_extended_state(pid);
     let settled = match take_linux_child_exit(pid) {
@@ -1480,12 +1496,102 @@ pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
     }
 }
 
+/// What of process `pid`, current on this CPU, runs next.
+enum LinuxThreadTurn {
+    /// Thread `tid`'s system call, parked on its activation, goes on: its
+    /// wait is over (woken, its deadline passed) or SIGKILL ends it there.
+    Resume(u32),
+    /// The process is entered at its registry context: its current thread,
+    /// or a ready one made current.
+    Enter(linux_process::LiveProcessDispatch),
+    /// None of its threads can run here: they all wait.
+    Blocked,
+    Failed,
+}
+
+/// Picks what of process `pid`, current on this CPU, dispatched with
+/// `selected` (its registry context, its current thread's), runs next: a
+/// thread parked in a call whose wait is over first (the longest blocked;
+/// the current thread, if any, is ready for later), then the current
+/// thread, then a ready one in turn (docs/SCHEDULER.md, "Activations per
+/// thread").
+fn linux_thread_turn(pid: u32, selected: &linux_process::LiveProcessDispatch) -> LinuxThreadTurn {
+    // Threads that waited the old way (on an application processor) are
+    // looked at in their process's own bank.
+    let _ = wake_linux_descriptor_waits();
+    let _ = expire_linux_waits();
+    let parked = linux_parked_threads(pid);
+    if !parked.is_empty() {
+        let now = linux_elapsed_nanoseconds().unwrap_or(0);
+        let due = linux_process::due_live_thread(pid, now)
+            .filter(|tid| parked.contains(tid))
+            .or_else(|| linux_process_killed(pid).then(|| parked[0]));
+        if let Some(tid) = due {
+            let Some(handle) = linux_thread_handle_by_tid(u64::from(tid)) else {
+                return LinuxThreadTurn::Failed;
+            };
+            if !ready_current_linux_thread(
+                selected.general,
+                selected.rip,
+                selected.rsp,
+                selected.rflags,
+            ) || !unpark_linux_thread(handle)
+            {
+                return LinuxThreadTurn::Failed;
+            }
+            let _ = linux_process::take_live_thread_block(pid, tid);
+            return LinuxThreadTurn::Resume(tid);
+        }
+    }
+    if current_linux_thread_slot().is_some() {
+        return LinuxThreadTurn::Enter(*selected);
+    }
+    let Some((ready, (general, rip, rsp, rflags, fs_base))) = ready_linux_thread_handle()
+        .and_then(|ready| Some((ready, linux_thread_entry_context(ready)?)))
+    else {
+        // A process with no thread table yet is entered as dispatched; one
+        // whose threads all wait, or run on other CPUs, has nothing to run
+        // here (entering its registry's context with no thread current
+        // would run a thread that is not this CPU's).
+        let threads = (0..LINUX_THREAD_LIMIT).any(|slot| {
+            X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) != LINUX_THREAD_FREE
+        });
+        return if threads {
+            LinuxThreadTurn::Blocked
+        } else {
+            LinuxThreadTurn::Enter(*selected)
+        };
+    };
+    if !linux_process::set_live_process_thread_context(pid, general, rip, rsp, rflags, fs_base)
+        || !switch_linux_thread(ready)
+    {
+        return LinuxThreadTurn::Failed;
+    }
+    linux_process::dispatch_live_process(pid)
+        .map_or(LinuxThreadTurn::Failed, LinuxThreadTurn::Enter)
+}
+
+/// Process `pid`, current on this CPU, none of whose threads can run here,
+/// waits as a whole: on what its parked threads and those that waited the
+/// old way wait for. With a thread running on another CPU it has work,
+/// and is passed over by no one.
+fn block_linux_process_threads(pid: u32) {
+    match linux_other_threads_wait() {
+        Some(others) => {
+            let now = linux_elapsed_nanoseconds().unwrap_or(0);
+            linux_process::block_live_process_threads(pid, others, now);
+        }
+        None => linux_process::set_live_process_waiting(pid, true),
+    }
+}
+
 /// Whether process `pid`, which came back to the kernel from this CPU (a
-/// yield, a preemption) and is ready, goes on in place: nothing else is
-/// ready to take the CPU, so its kernel state stays in this CPU's bank
-/// rather than being saved and restored again at once (docs/SCHEDULER.md,
-/// step 5). It does not when it exited, waits, stopped, ends the runtime
-/// (init), or the runtime is to suspend.
+/// yield, a preemption, a thread that parked or ended) and is ready, goes
+/// on in place: nothing else is ready to take the CPU, so its kernel state
+/// stays in this CPU's bank rather than being saved and restored again at
+/// once (docs/SCHEDULER.md, step 5), and its next thread runs. It does not
+/// when it exited, waits, stopped, ends the runtime (init), or the runtime
+/// is to suspend.
 fn linux_process_continues_in_place(pid: u32) -> bool {
     if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
         || X86_RUNTIME
@@ -1495,7 +1601,6 @@ fn linux_process_continues_in_place(pid: u32) -> bool {
         || pid == 1
             && (X86_RUNTIME.ELF_PROBE_COMPLETED.load(Ordering::SeqCst)
                 || !X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst))
-        || activation::is_parked(linux_activation_owner(pid))
         || linux_process::live_process_status(pid)
             .is_none_or(|status| status.state != linux_process::LiveProcessState::Running)
     {
@@ -1800,6 +1905,26 @@ fn linux_sleeper_due_from_timer() -> bool {
     LINUX_WAKEUP_PREEMPTED_DEADLINE[linux_cpu_slot()].swap(deadline, Ordering::SeqCst) != deadline
 }
 
+/// Ticks between looks, from the timer, for a thread of the running
+/// process that a waker made due while it ran (a futex wake of a sibling).
+const LINUX_THREAD_WAKE_CHECK_TICKS: u32 = 4;
+
+/// Whether a thread of the process this CPU runs, parked in a call, was
+/// woken (or its deadline passed) while another thread of it runs: the
+/// slice ends early so the scheduler resumes it, as Linux preempts for a
+/// woken task, instead of after a whole slice. Looked at every few ticks.
+fn linux_thread_woken_from_timer(ticks: u32) -> bool {
+    if !ticks.is_multiple_of(LINUX_THREAD_WAKE_CHECK_TICKS) {
+        return false;
+    }
+    let Some(_guard) = crate::sync::kernel_entry_try_lock() else {
+        return false;
+    };
+    let pid = current_linux_process_pid();
+    pid != 0
+        && linux_process::due_live_thread(pid, linux_elapsed_nanoseconds().unwrap_or(0)).is_some()
+}
+
 /// This CPU's entry in a per-CPU table.
 pub(super) fn linux_cpu_slot() -> usize {
     current_cpu_index_checked()
@@ -1862,7 +1987,11 @@ pub(super) fn linux_preempt_process_from_timer(frame: &mut UserInterruptFrame) {
     let ticks = LINUX_PROCESS_SLICE[linux_cpu_slot()].fetch_add(1, Ordering::SeqCst) + 1;
     let signal_due = !X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst)
         && linux_signal_due_from_timer(ticks.is_multiple_of(LINUX_SIGNAL_QUEUE_CHECK_TICKS));
-    if ticks < linux_thread_slice_ticks() && !signal_due && !linux_sleeper_due_from_timer() {
+    if ticks < linux_thread_slice_ticks()
+        && !signal_due
+        && !linux_sleeper_due_from_timer()
+        && !linux_thread_woken_from_timer(ticks)
+    {
         return;
     }
     let pid = current_linux_process_pid();
@@ -1974,19 +2103,20 @@ pub(super) fn linux_complete_timer_preemption(
     let recorded = linux_preemption_yield_taken(pid)
         && {
             deliver_linux_wakeups();
-            linux_process::other_live_process_ready(pid, linux_elapsed_nanoseconds().unwrap_or(0))
+            let now = linux_elapsed_nanoseconds().unwrap_or(0);
+            // Another process to run, or a thread of this one parked in a
+            // call whose wait is over.
+            linux_process::other_live_process_ready(pid, now)
+                || linux_process::due_live_thread(pid, now).is_some()
         }
-        && live_runtime_linux_process_address_space_snapshot().is_some_and(|snapshot| {
-            linux_process::refresh_validated_runtime_process_registry(
-                pid,
-                snapshot,
-                preempted.general,
-                preempted.rip,
-                preempted.rsp,
-                preempted.rflags,
-                active_fs_base(),
-            )
-        });
+        && linux_process::set_live_process_thread_context(
+            pid,
+            preempted.general,
+            preempted.rip,
+            preempted.rsp,
+            preempted.rflags,
+            active_fs_base(),
+        );
     if !recorded {
         // Carry on where the tick interrupted the process instead.
         return Some(

@@ -230,7 +230,7 @@ pub(super) fn linux_lease_live_return(
         match run_other_linux_processes(output, caller, number, WaitOn::ANYTHING) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => return result,
-            None => match ready_linux_thread_handle() {
+            None => match linux_thread_wait_handoff() {
                 Some(target) => {
                     return linux_retry_after_thread_live_return(output, caller, number, target)
                 }
@@ -822,7 +822,7 @@ pub(super) fn linux_flock_live_return(
         ) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => return result,
-            None => match ready_linux_thread_handle() {
+            None => match linux_thread_wait_handoff() {
                 Some(target) => {
                     return linux_retry_after_thread_live_return(
                         output,
@@ -1029,7 +1029,7 @@ pub(super) fn linux_fcntl_setlkw_live_return(
             // A sibling thread, which may hold the lock, is ready: it runs
             // while this one waits a tick and takes the lock again. With
             // nothing else to run, the holder is on another CPU.
-            None => match ready_linux_thread_handle() {
+            None => match linux_thread_wait_handoff() {
                 Some(target) => {
                     return linux_retry_after_thread_live_return(
                         output,
