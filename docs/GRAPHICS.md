@@ -111,7 +111,7 @@ this machine).
 | 3D commands | `crates/virtio-gpu` | Context, capset, blob (create, map, unmap), fenced `SUBMIT_3D` with a ring index, the shared-memory capability. |
 | Device | `kernel/src/drivers/virtio_gpu.rs` | Negotiates `VIRGL`, `RESOURCE_BLOB` and `CONTEXT_INIT`, reads the capsets, places blobs in the host-visible region, keeps fenced submissions in flight (out-of-order completion), and reports a busy queue or fence as `EAGAIN` rather than spinning. |
 | Render node | `crates/drm` (`linox-drm`), `kernel/src/linux_drm.rs` | `/dev/dri/renderD128` (226:128) with the virtgpu ioctls Mesa uses, sync-file fences, dma-buf export and import, and the sysfs entries libdrm's `drmGetDevices2` reads. An ioctl that must wait for the GPU lets the domain run and is issued again. |
-| Mappings | `kernel/src/arch/x86_64/cpu.rs` (`linux_object_mmap`) | Blob pages are mapped with the caching the host gives in `RESOURCE_MAP_BLOB` (write-back, write-combining or uncached, through the page attribute table every CPU programs). A write-back mapping of memory the GPU writes without snooping never sees fence feedback change. |
+| Mappings | `kernel/src/arch/x86_64/cpu/linux_devices.rs` (`linux_object_mmap`) | Blob pages are mapped with the caching the host gives in `RESOURCE_MAP_BLOB` (write-back, write-combining or uncached, through the page attribute table every CPU programs). A write-back mapping of memory the GPU writes without snooping never sees fence feedback change. |
 
 Mesa presents through `wl_shm` (`MESA_VK_WSI_DEBUG=sw`), since linox-wm has
 no linux-dmabuf yet: the Venus WSI copies each rendered frame into a shared

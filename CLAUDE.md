@@ -20,7 +20,7 @@ through a Linux ABI personality. It is not a rewrite of Linux:
   (`linux_user::user_switching_allowed`), so it is the single point to secure.
   Two more single-point flags, both off by default: `write-execute=true`
   lets programs map memory writable and executable (JITs), each page still
-  flipping between the two (`linux_write_execute_allowed` in cpu.rs), and
+  flipping between the two (`linux_write_execute_allowed` in cpu/linux_memory_protection.rs), and
   `privileged=true` gives the domain's root machine-level authority
   (reboot resets the machine, syslog reads the machine's kernel log) but
   never raw I/O ports (`linux_user::domain_privileged`). The LTP domain
@@ -136,7 +136,7 @@ kernel work done with interrupts off; sample CPU 0 from the host instead
 (monitor `info registers`, symbolized as above). A domain that has run
 sixty seconds writes one stall diagnostic to the kernel log (from the
 timer, or the runtime loop when CPU 0 only halts): the newest entries of
-the futex trace ring (`linux_trace_futex` in cpu.rs: per CPU, who waited
+the futex trace ring (`linux_trace_futex` in cpu/linux_diagnostics.rs: per CPU, who waited
 at the thread or process level, who woke, with addresses and results),
 the live banks, and the task states. That trace found a thread exit
 whose tid-word wake never reached a joiner parked at the process level.

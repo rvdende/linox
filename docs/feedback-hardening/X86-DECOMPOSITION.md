@@ -99,3 +99,42 @@ measurements record progress only; `cpu/linux_futex.rs` contains 359 lines.
 `cpu/linux_poll.rs` contains 939 lines and `cpu/linux_signal.rs` contains 2,517
 lines. Cohesive responsibility and dependency direction remain the gate
 criteria.
+
+## Subsystem split (2026-11-09)
+
+A pure move split the remaining 69,325-line `cpu.rs` by subsystem: items
+moved with their comments and attributes, private items used elsewhere
+became `pub(super)`, and nothing else changed. `cpu.rs` keeps the shared
+core: module declarations, the `X86RuntimeOwner` and
+`X86MutableRuntimeOwner` runtime owners and their backings, the banked
+per-CPU cells, the entry and user-copy assembly, the SMEP/SMAP/UMIP setup,
+the syscall and fault entry handlers, and the process state structs. The
+architecture checks that read `cpu.rs` (user access, runtime owner) also
+cover `cpu/*.rs`.
+
+- Scheduling: `linux_scheduler.rs` (process banks, light threads, the SMP
+  and application-processor runtime, cross-CPU operations, timer
+  preemption, thread switching) and `linux_runtime_loop.rs` (dispatch,
+  parking, yield, live returns, the suspended runtime and the runtime loop).
+- Processes: `linux_thread.rs`, `linux_process_state.rs`,
+  `linux_process_lifecycle.rs` (snapshots, fork, clone, exit, wait),
+  `linux_exec.rs`.
+- Memory: `linux_mmap.rs`, `linux_memory_protection.rs`,
+  `linux_process_vm.rs`, `linux_user_memory.rs` (user ranges, copies, user
+  faults, stack growth, copy-on-write).
+- Files: `linux_path_walk.rs`, `linux_directories.rs`, `linux_file_open.rs`,
+  `linux_file_ops.rs`, `linux_descriptors.rs`, `linux_fcntl.rs`,
+  `linux_read_write.rs`, `linux_procfs.rs`, `linux_mounts.rs`,
+  `linux_inotify.rs`.
+- I/O and IPC: `linux_sockets.rs`, `linux_pipes.rs`, `linux_epoll.rs`,
+  `linux_event_fds.rs`, `linux_timers.rs`, `linux_ipc.rs`, `linux_aio.rs`,
+  `linux_devices.rs`; poll waits joined `linux_poll.rs`, robust futex lists
+  `linux_futex.rs`, seccomp `linux_security.rs`.
+- System: `linux_domain_runtime.rs`, `native_services.rs`,
+  `linux_controller.rs`, `linux_namespaces.rs`, `linux_system.rs`,
+  `linux_credentials.rs`, `linux_keys.rs`, `linux_prctl.rs`,
+  `linux_sched_syscalls.rs`, `linux_rlimit.rs`.
+- Verification and diagnostics: `boot_verify.rs`, `boot_verify_elf.rs`,
+  `linux_diagnostics.rs`.
+
+Afterwards `cpu.rs` has 4,719 lines and no module exceeds 4,400.

@@ -22,8 +22,8 @@ local fixup that closes SMAP and returns the number of bytes not copied.
 
 `tools/architecture/check-user-access.sh` enforces the presence of the fault
 regions and fixups, the public partial-copy API, the absence of direct
-SMAP-opening calls in `cpu.rs`, and the absence of direct scalar dereferences
-through cast userspace pointers there.
+SMAP-opening calls in `cpu.rs` and its `cpu/` submodules, and the absence of
+direct scalar dereferences through cast userspace pointers there.
 
 ## Negative behavior
 

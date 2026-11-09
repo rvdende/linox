@@ -266,7 +266,7 @@ These are about correctness under the framekernel rules, not just counts.
    the 108 are user-copy wrappers that are sound by design: they check the
    range against the user half (or the current user mappings) and copy
    through the fault-recovering stubs, so a bad address yields a short copy, not UB.
-   `hardware_user_range_is_zero` (`cpu.rs`) has no range check of its own
+   `hardware_user_range_is_zero` (`cpu/linux_user_memory.rs`) has no range check of its own
    and relies on its two (self-test) callers.
 2. **42 safe functions return `&'static mut`** (overlay 6, `cpu.rs` 5, sysv
    IPC 5, sockets 4, tmpfs 3, scheduler 3, ...). Two calls yield two
