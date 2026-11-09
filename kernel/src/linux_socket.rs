@@ -381,6 +381,10 @@ struct Slot {
     /// A local stream's peer closed: it reads end-of-file, where a socket
     /// that never had a peer cannot read at all (EINVAL).
     peer_closed: bool,
+    /// A local TCP connection whose peer closed was written to since: the
+    /// write went out, and the peer's reset makes the next one EPIPE, as
+    /// Linux's TCP in CLOSE_WAIT.
+    peer_reset: bool,
     read_shutdown: bool,
     write_shutdown: bool,
     options: Options,
@@ -483,6 +487,7 @@ impl Slot {
             pending: VecDeque::new(),
             peer: None,
             peer_closed: false,
+            peer_reset: false,
             read_shutdown: false,
             write_shutdown: false,
             options: Options::default(),
@@ -561,9 +566,10 @@ impl Slot {
     }
 
     /// Whether the socket's bytes go through local queues: a Unix socket,
-    /// or a TCP socket connected to one of the interface's own addresses.
+    /// or a TCP socket connected to one of the interface's own addresses
+    /// (still, once its peer closed: what is queued is read, then the end).
     fn is_local(&self) -> bool {
-        self.kind == Kind::Unix || self.peer.is_some() && !self.listening
+        self.kind == Kind::Unix || (self.peer.is_some() || self.peer_closed) && !self.listening
     }
 
     /// Whether this datagram socket takes a datagram sent to `destination`,
@@ -1685,6 +1691,18 @@ impl Sockets {
                 let _ = self.close(connection);
             }
         }
+        // The other end of a local connection sees this one gone (end of
+        // file, a hangup), as a Unix socket's does, rather than keeping its
+        // slot number, which the next socket may take: a server read the
+        // next test's client as its closed client's peer and waited on it
+        // (recvfrom01).
+        for other in self.slots.iter_mut().flatten() {
+            if other.peer == Some(id) && other.id != id {
+                other.peer = None;
+                other.peer_closed = true;
+                other.note_change();
+            }
+        }
         let Some(state) = slot_in(&self.slots, id) else {
             return false;
         };
@@ -2327,6 +2345,15 @@ impl Sockets {
                 return Err(Error::Invalid);
             }
             let kind = state.kind;
+            // A TCP peer that closed takes one more write (Linux sends it,
+            // and the reset that answers makes the next one EPIPE).
+            if kind == Kind::Tcp && state.peer.is_none() && state.peer_closed {
+                let state = self.slot_mut(id).ok_or(Error::Invalid)?;
+                if core::mem::replace(&mut state.peer_reset, true) {
+                    return Err(Error::BrokenPipe);
+                }
+                return Ok(input.len());
+            }
             let peer = state
                 .send_target
                 .or(state.peer)
@@ -3282,6 +3309,7 @@ impl Sockets {
                     let state = self.slot_mut(id).ok_or(Error::Invalid)?;
                     state.peer = None;
                     state.peer_closed = false;
+                    state.peer_reset = false;
                     state.remote = None;
                     state.listening = false;
                     state.read_shutdown = false;

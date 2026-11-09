@@ -1446,6 +1446,37 @@ pub(super) fn linux_socket_recvfrom(
     }
 }
 
+/// Whether the control messages at `control` (`length` bytes) are all
+/// well formed (CMSG_OK) and SOL_SOCKET's SCM_RIGHTS or SCM_CREDENTIALS,
+/// which only a Unix socket acts on.
+fn linux_control_only_unix_rights(control: u64, length: u64) -> bool {
+    const HEADER: u64 = 16;
+    const SOL_SOCKET: i32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    const SCM_CREDENTIALS: i32 = 2;
+    let mut offset = 0_u64;
+    let mut any = false;
+    while length.saturating_sub(offset) >= HEADER {
+        let mut header = [0_u8; HEADER as usize];
+        if !copy_from_linux_user(control.wrapping_add(offset), &mut header) {
+            return false;
+        }
+        let cmsg_length = u64::from_ne_bytes(header[..8].try_into().unwrap());
+        let level = i32::from_ne_bytes(header[8..12].try_into().unwrap());
+        let kind = i32::from_ne_bytes(header[12..16].try_into().unwrap());
+        if cmsg_length < HEADER
+            || cmsg_length > length - offset
+            || level != SOL_SOCKET
+            || !matches!(kind, SCM_RIGHTS | SCM_CREDENTIALS)
+        {
+            return false;
+        }
+        any = true;
+        offset = offset.saturating_add(cmsg_length.next_multiple_of(8));
+    }
+    any
+}
+
 pub(super) fn linux_socket_sendmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
     const MSG_OOB: u64 = 1;
     const SUPPORTED_FLAGS: u64 = 0x40 | 0x4000 | LINUX_MSG_MORE;
@@ -1536,7 +1567,14 @@ pub(super) fn linux_socket_sendmsg(descriptor: u64, message: u64, flags: u64) ->
             return error;
         }
     }
-    if control_length != 0 && !tls_sends {
+    // Descriptors and credentials are Unix sockets' to pass: any other
+    // socket ignores them, as Linux's sock_cmsg_send does (a TCP sendmsg
+    // with SCM_RIGHTS succeeds and passes nothing, recvmsg01's server).
+    let ignored_control = control_length != 0
+        && !tls_sends
+        && crate::linux_socket::kind(slot) != Some(crate::linux_socket::Kind::Unix)
+        && linux_control_only_unix_rights(control, control_length);
+    if control_length != 0 && !tls_sends && !ignored_control {
         if crate::linux_socket::kind(slot) != Some(crate::linux_socket::Kind::Unix) {
             return LINUX_EINVAL;
         }
