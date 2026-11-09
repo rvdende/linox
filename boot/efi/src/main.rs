@@ -10,13 +10,14 @@ use builtin_rootfs::BUILTIN_ROOTFS;
 use core::arch::asm;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use generated_boot::{
     BOOT_MANIFEST, BOOT_MANIFEST_SHA256, BOOT_MANIFEST_SIGNATURE, CONTROLLER_RUNTIME,
     CONTROL_PLANE_BUNDLE, ROOT_IMAGE,
 };
 use linox_kernel::{
-    kernel_entry, BootFramebuffer, BootInfo, ResetSystem, BOOT_INFO_MAGIC, BOOT_INFO_VERSION,
-    FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_NONE, FRAMEBUFFER_FORMAT_RGBX,
+    kernel_entry, report_panic, BootFramebuffer, BootInfo, ResetSystem, BOOT_INFO_MAGIC,
+    BOOT_INFO_VERSION, FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_NONE, FRAMEBUFFER_FORMAT_RGBX,
 };
 
 type EfiHandle = *mut c_void;
@@ -256,6 +257,15 @@ extern "C" {
     static __ImageBase: u8;
 }
 
+/// The system table while boot services last; null once they have ended,
+/// after which only the kernel's framebuffer console can show anything.
+static FIRMWARE_CONSOLE: AtomicPtr<EfiSystemTable> = AtomicPtr::new(core::ptr::null_mut());
+/// The wall-clock time used when the firmware's clock is unreadable or
+/// implausible (a flat CMOS battery): 2026-01-01T00:00:00Z.
+const FALLBACK_UNIX_TIME: u64 = 1_767_225_600;
+/// The kernel rejects wall-clock times before 2020.
+const EARLIEST_UNIX_TIME: u64 = 1_577_836_800;
+
 static mut MEMORY_MAP_STORAGE: MemoryMapStorage = MemoryMapStorage([0; MEMORY_MAP_CAPACITY]);
 // Kept in the image rather than on the firmware stack, which may lie above 4 GiB.
 static mut BOOT_INFO: core::mem::MaybeUninit<BootInfo> = core::mem::MaybeUninit::uninit();
@@ -267,37 +277,22 @@ type Continuation =
 extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable) -> EfiStatus {
     serial_init();
 
-    // Keep the firmware-console message as a convenience for UTM's graphical view.
-    // Serial is the authoritative interface used by automated tests.
-    let message = [
-        b'L' as u16,
-        b'i' as u16,
-        b'n' as u16,
-        b'o' as u16,
-        b'x' as u16,
-        b' ' as u16,
-        b'b' as u16,
-        b'o' as u16,
-        b'o' as u16,
-        b't' as u16,
-        b'e' as u16,
-        b'd' as u16,
-        b'\r' as u16,
-        b'\n' as u16,
-        0,
-    ];
-
     if !system_table.is_null() {
-        // SAFETY: UEFI supplies a valid system table for the lifetime of this entry call.
-        // The protocol and UTF-16 string layouts follow the UEFI ABI.
+        // SAFETY: UEFI supplies a valid system table for the lifetime of this
+        // entry call; the console protocol follows the UEFI ABI.
         unsafe {
             let console = (*system_table).console_out;
             if !console.is_null() {
                 let _ = ((*console).clear_screen)(console);
-                let _ = ((*console).output_string)(console, message.as_ptr());
             }
         }
+        FIRMWARE_CONSOLE.store(system_table, Ordering::Release);
     }
+    // Every loader step is also shown on the firmware console, so a photo of
+    // the screen tells how far a physical machine got before the kernel
+    // took over the display.
+    say("Linox booted\r\n");
+    say("linox loader: started; Secure Boot must be off for this unsigned image\r\n");
 
     if system_table.is_null() {
         panic!("UEFI did not provide a system table");
@@ -312,20 +307,20 @@ extern "efiapi" fn efi_main(image: EfiHandle, system_table: *mut EfiSystemTable)
         let (image_base, image_size) = loaded_image_bounds(image, boot_services);
         // tests/qemu/efi-load-above-4g.sh reads where the image was loaded
         // and where it continues.
-        serial_write("linox: EFI image loaded at ");
-        serial_write_hex(image_base as u64);
-        serial_write(" size ");
-        serial_write_hex(image_size as u64);
-        serial_write("\r\n");
+        serial_format(format_args!(
+            "linox: EFI image loaded at {:#x} size {:#x}\r\n",
+            image_base as u64, image_size
+        ));
         if (image_base as u64).saturating_add(image_size as u64) <= IMAGE_ADDRESS_LIMIT {
             return continue_boot(image, system_table, image_base, image_size);
         }
         // Firmware placed the image above 4 GiB, which the kernel's initial
         // identity map does not reach. Continue in a relocated copy.
         let relocated = relocate_below_limit(boot_services, image_base, image_size);
-        serial_write("linox: EFI image relocated below 4 GiB to ");
-        serial_write_hex(relocated as u64);
-        serial_write("\r\n");
+        serial_format(format_args!(
+            "linox: EFI image relocated below 4 GiB to {:#x}\r\n",
+            relocated as u64
+        ));
         let offset = continue_boot as *const () as usize - image_base as usize;
         let continuation: Continuation = core::mem::transmute(relocated.add(offset));
         continuation(image, system_table, relocated, image_size)
@@ -341,15 +336,19 @@ unsafe extern "efiapi" fn continue_boot(
     image_size: usize,
 ) -> EfiStatus {
     if loaded_image_bounds(image, (*system_table).boot_services).0 != image_base {
-        serial_write("linox: EFI image entered at relocated base ");
-        serial_write_hex(running_image_base() as u64);
-        serial_write("\r\n");
+        serial_format(format_args!(
+            "linox: EFI image entered at relocated base {:#x}\r\n",
+            running_image_base() as u64
+        ));
     }
     // The handoff function validates the required pointers before using them.
     let acpi_rsdp = find_acpi_rsdp(system_table);
     if acpi_rsdp.is_null() {
         panic!("UEFI did not provide an ACPI root pointer");
     }
+    say("linox loader: ACPI root pointer at ");
+    say_hex(acpi_rsdp as u64);
+    say("\r\n");
     let boot_info = exit_boot_services(image, system_table, acpi_rsdp, image_base, image_size);
     let stored = core::ptr::addr_of_mut!(BOOT_INFO);
     (*stored).write(boot_info);
@@ -447,11 +446,33 @@ unsafe fn exit_boot_services(
     if boot_services.is_null() || runtime_services.is_null() {
         panic!("UEFI service table is missing");
     }
-    let unix_time = read_unix_time(runtime_services);
+    let unix_time = match read_unix_time(runtime_services) {
+        Some(time) if time >= EARLIEST_UNIX_TIME => time,
+        _ => {
+            say("linox loader: the firmware clock is unreadable or before 2020; using 2026-01-01\r\n");
+            FALLBACK_UNIX_TIME
+        }
+    };
     let framebuffer = graphics_framebuffer(boot_services);
+    if framebuffer.base == 0 {
+        say("linox loader: no usable graphics framebuffer; after this line only a serial port shows output\r\n");
+    } else {
+        say("linox loader: display ");
+        say_decimal(u64::from(framebuffer.width));
+        say("x");
+        say_decimal(u64::from(framebuffer.height));
+        say(" (");
+        say_decimal(u64::from(framebuffer.stride));
+        say(" pixels per line), framebuffer at ");
+        say_hex(framebuffer.base);
+        say("\r\n");
+    }
+    say("linox loader: exiting UEFI boot services; the kernel takes over the screen next\r\n");
+    say("linox loader: if nothing follows this line, the kernel stopped before drawing\r\n");
 
     let memory_map = core::ptr::addr_of_mut!(MEMORY_MAP_STORAGE.0).cast::<u8>();
 
+    FIRMWARE_CONSOLE.store(core::ptr::null_mut(), Ordering::Release);
     // ExitBootServices may reject a stale map key if firmware changes its map
     // between the two calls. Reacquire once without invoking any other firmware
     // service, as required by the UEFI handoff protocol.
@@ -559,7 +580,7 @@ unsafe fn graphics_framebuffer(boot_services: *mut EfiBootServices) -> BootFrame
     }
 }
 
-unsafe fn read_unix_time(runtime_services: *mut EfiRuntimeServices) -> u64 {
+unsafe fn read_unix_time(runtime_services: *mut EfiRuntimeServices) -> Option<u64> {
     let mut time = EfiTime {
         year: 0,
         month: 0,
@@ -581,7 +602,7 @@ unsafe fn read_unix_time(runtime_services: *mut EfiRuntimeServices) -> u64 {
         || time.minute > 59
         || time.second > 60
     {
-        panic!("UEFI wall clock is unavailable");
+        return None;
     }
     let mut days = 0_u64;
     for year in 1970..time.year {
@@ -595,10 +616,12 @@ unsafe fn read_unix_time(runtime_services: *mut EfiRuntimeServices) -> u64 {
         }
     }
     days += u64::from(time.day - 1);
-    days * 86_400
-        + u64::from(time.hour) * 3_600
-        + u64::from(time.minute) * 60
-        + u64::from(time.second.min(59))
+    Some(
+        days * 86_400
+            + u64::from(time.hour) * 3_600
+            + u64::from(time.minute) * 60
+            + u64::from(time.second.min(59)),
+    )
 }
 
 const fn is_leap_year(year: u16) -> bool {
@@ -635,55 +658,94 @@ unsafe fn loaded_image_bounds(
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    serial_write("LINOX_BOOT_PANIC\r\n");
-    if let Some(location) = info.location() {
-        serial_write(location.file());
-        serial_write(":");
-        serial_write_u64(u64::from(location.line()));
-        serial_write(":");
-        serial_write_u64(u64::from(location.column()));
-        serial_write("\r\n");
+    if FIRMWARE_CONSOLE.load(Ordering::Acquire).is_null() {
+        // Boot services have ended (or never started): the kernel's report
+        // reaches the framebuffer as well as serial.
+        report_panic(info);
     }
+    serial_write("LINOX_BOOT_PANIC\r\n");
+    say("\r\nlinox loader PANIC: ");
+    let _ = core::fmt::Write::write_fmt(&mut Say, format_args!("{}", info.message()));
+    if let Some(location) = info.location() {
+        say("\r\n  at ");
+        say(location.file());
+        say(":");
+        say_decimal(u64::from(location.line()));
+        say(":");
+        say_decimal(u64::from(location.column()));
+    }
+    say("\r\nlinox loader: photograph this screen\r\n");
     loop {
         core::hint::spin_loop();
     }
 }
 
-fn serial_write_u64(mut value: u64) {
-    let mut digits = [0_u8; 20];
-    let mut index = digits.len();
-    loop {
-        index -= 1;
-        digits[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
+/// Writes to the firmware console while boot services last (firmware
+/// copies it to a serial console if it has one), and to serial after.
+fn say(message: &str) {
+    let table = FIRMWARE_CONSOLE.load(Ordering::Acquire);
+    if table.is_null() {
+        serial_write(message);
+        return;
     }
-    for byte in &digits[index..] {
-        while unsafe { inb(COM1 + 5) } & 0x20 == 0 {
-            core::hint::spin_loop();
+    // SAFETY: the pointer is the system table UEFI passed to efi_main, kept
+    // only until ExitBootServices; the console protocol follows the UEFI ABI.
+    unsafe {
+        let console = (*table).console_out;
+        if console.is_null() {
+            serial_write(message);
+            return;
         }
-        unsafe { outb(COM1, *byte) };
+        // UCS-2 in chunks, NUL-terminated, as OutputString takes it.
+        let mut buffer = [0_u16; 129];
+        let mut length = 0;
+        for character in message.chars() {
+            buffer[length] = if (character as u32) < 0x10000 {
+                character as u16
+            } else {
+                u16::from(b'?')
+            };
+            length += 1;
+            if length == buffer.len() - 1 {
+                buffer[length] = 0;
+                let _ = ((*console).output_string)(console, buffer.as_ptr());
+                length = 0;
+            }
+        }
+        buffer[length] = 0;
+        let _ = ((*console).output_string)(console, buffer.as_ptr());
     }
 }
 
-fn serial_write_hex(value: u64) {
-    let mut digits = [0_u8; 16];
-    let mut index = digits.len();
-    let mut rest = value;
-    loop {
-        index -= 1;
-        digits[index] = b"0123456789abcdef"[(rest & 0xf) as usize];
-        rest >>= 4;
-        if rest == 0 {
-            break;
-        }
+struct Say;
+
+impl core::fmt::Write for Say {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        say(text);
+        Ok(())
     }
-    serial_write("0x");
-    if let Ok(text) = core::str::from_utf8(&digits[index..]) {
+}
+
+struct Serial;
+
+impl core::fmt::Write for Serial {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
         serial_write(text);
+        Ok(())
     }
+}
+
+/// Formats straight to the serial port, for lines tests read there.
+fn serial_format(arguments: core::fmt::Arguments<'_>) {
+    let _ = core::fmt::Write::write_fmt(&mut Serial, arguments);
+}
+
+fn say_hex(value: u64) {
+    let _ = core::fmt::Write::write_fmt(&mut Say, format_args!("{value:#x}"));
+}
+
+fn say_decimal(value: u64) {
+    let _ = core::fmt::Write::write_fmt(&mut Say, format_args!("{value}"));
 }
 
 fn serial_init() {
@@ -702,7 +764,14 @@ fn serial_init() {
 
 fn serial_write(message: &str) {
     for byte in message.bytes() {
+        // An absent UART reads all ones (ready); a wedged one must not stop
+        // the boot, so give up on it after ~10 ms of polling.
+        let mut spins = 0_u32;
         while unsafe { inb(COM1 + 5) } & 0x20 == 0 {
+            spins += 1;
+            if spins == 10_000 {
+                return;
+            }
             core::hint::spin_loop();
         }
 

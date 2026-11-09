@@ -63,6 +63,17 @@ capture lspci-vvv.txt lspci -vvv -nn
 capture lspci-tree.txt lspci -tv
 capture lsusb.txt lsusb
 capture lsusb-tree.txt lsusb -t
+# Full descriptors (keyboard boot interfaces, audio class layouts) and the
+# complete configuration space of every function (capabilities, power
+# state, AMD-Vi and xHCI extended registers start there).
+capture lsusb-verbose.txt lsusb -v
+capture lspci-config.txt lspci -nn -xxxx
+# xHCI controller registers as Linux left them, where debugfs has them.
+if [[ -d /sys/kernel/debug/usb/xhci ]]; then
+    cp -r /sys/kernel/debug/usb/xhci "$out/xhci-debugfs" 2>/dev/null
+fi
+# AMD-Vi as Linux configured it (features, event log messages).
+grep -iE 'AMD-Vi|iommu|IVRS|IVHD|IVMD' "$out/dmesg.txt" >"$out/amd-vi.txt" 2>&1
 
 # Storage controllers and disks.
 capture lsblk.txt lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN,FSTYPE,PTTYPE,MOUNTPOINTS

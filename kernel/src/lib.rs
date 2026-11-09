@@ -92,6 +92,7 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
 
 const COM1: u16 = 0x3f8;
@@ -324,8 +325,21 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write_raw(b" size ");
     serial_write_hex(boot_info.image_size as u64);
     serial_write_raw(b"\r\n");
-    // UEFI's page tables identity-map the framebuffer until Linox installs its own.
-    if framebuffer::init(&boot_info.framebuffer, boot_info.framebuffer.base as usize) {
+    // UEFI's page tables identity-map the framebuffer until Linox installs its
+    // own. Check that they really do (a framebuffer in a 64-bit BAR far above
+    // RAM may not be mapped) before drawing on it.
+    let framebuffer_mapped =
+        framebuffer::mapped_length(&boot_info.framebuffer).is_some_and(|length| {
+            let base = boot_info.framebuffer.base;
+            bringup::firmware_maps(base, true)
+                && bringup::firmware_maps(base + length as u64 - 1, true)
+        });
+    if !framebuffer_mapped && boot_info.framebuffer.base != 0 {
+        serial_write_raw(b"linox: firmware page tables do not map the framebuffer\r\n");
+    }
+    if framebuffer_mapped
+        && framebuffer::init(&boot_info.framebuffer, boot_info.framebuffer.base as usize)
+    {
         serial_write_raw(b"linox: booting\r\n");
         serial_write_raw(b"linox: firmware framebuffer console active\r\n");
     }
@@ -447,6 +461,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         serial_write(" bytes)\r\n");
     }
 
+    bringup::set_stage("looking for the QEMU reference devices");
     let Some(virtio_block) = arch::x86_64::pci::discover_virtio_block() else {
         // Not the QEMU reference machine: report the hardware and run the
         // physical-device drivers instead of failing.
@@ -4773,7 +4788,17 @@ pub(crate) fn serial_write_raw(bytes: &[u8]) {
         return;
     }
     for byte in bytes.iter().copied() {
+        // A byte leaves a 38400-baud UART in 260 us, a few hundred port
+        // reads. A UART that never empties (present but wedged, as the
+        // scratch-register probe cannot rule out on a physical board) must
+        // not stop the framebuffer console: give it up after ~10 ms.
+        let mut spins = 0_u32;
         while unsafe { inb(COM1 + 5) } & 0x20 == 0 {
+            spins += 1;
+            if spins == 10_000 {
+                SERIAL_PRESENT.store(false, Ordering::Release);
+                return;
+            }
             core::hint::spin_loop();
         }
 

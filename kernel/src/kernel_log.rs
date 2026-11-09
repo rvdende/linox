@@ -38,6 +38,18 @@ pub(crate) fn record(bytes: &[u8]) {
     LINES.fetch_add(lines, Ordering::AcqRel);
 }
 
+/// The positions of the oldest byte the ring still holds and of the next
+/// byte to be written.
+pub(crate) fn extent() -> (u64, u64) {
+    (oldest(0), WRITTEN.load(Ordering::Acquire))
+}
+
+/// The byte at `position`, if the ring still holds it.
+pub(crate) fn byte(position: u64) -> Option<u8> {
+    let (start, end) = extent();
+    (start..end).contains(&position).then(|| byte_at(position))
+}
+
 /// The oldest position still in the ring at or after `from`.
 fn oldest(from: u64) -> u64 {
     from.max(

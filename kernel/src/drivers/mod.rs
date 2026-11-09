@@ -12,6 +12,7 @@
 
 pub(crate) mod ahci;
 pub(crate) mod amd_iommu;
+pub(crate) mod clock;
 pub(crate) mod device_memory;
 pub(crate) mod e1000e;
 pub(crate) mod gpt;
@@ -29,10 +30,23 @@ pub(crate) mod xhci;
 use core::fmt::Write;
 
 /// Formats into the console (serial when present, and the framebuffer),
-/// expanding `\n` to `\r\n` for serial terminals.
+/// expanding `\n` to `\r\n` for serial terminals, and keeps a copy in the
+/// kernel log, which the bring-up shell's `log` command pages through.
 pub(crate) struct Console;
 
 impl Write for Console {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        crate::kernel_log::record(text.as_bytes());
+        Screen.write_str(text)
+    }
+}
+
+/// Writes to the screen and serial like [`Console`] but keeps no copy in
+/// the kernel log: for the bring-up shell's log pager, whose pages would
+/// otherwise grow the log they page through.
+pub(crate) struct Screen;
+
+impl Write for Screen {
     fn write_str(&mut self, text: &str) -> core::fmt::Result {
         let mut lines = text.split('\n');
         if let Some(first) = lines.next() {
@@ -90,6 +104,25 @@ impl DmaPage {
     pub(crate) const ZERO: Self = Self([0; 4096]);
 }
 
+/// Writes back and invalidates the cache lines covering `length` bytes at
+/// `address`, for devices that read and write memory without snooping the
+/// processor caches: call it after filling a buffer such a device will
+/// read, and before reading what it wrote.
+pub(crate) fn flush_cache(address: usize, length: usize) {
+    const LINE: usize = 64;
+    let end = address.saturating_add(length);
+    let mut line = address & !(LINE - 1);
+    while line < end {
+        // SAFETY: CLFLUSH only writes back and invalidates the line; the
+        // callers pass memory their driver owns, which is mapped.
+        unsafe { core::arch::x86_64::_mm_clflush(line as *const u8) };
+        line += LINE;
+    }
+    // SAFETY: MFENCE orders the flushes before later accesses and has no
+    // other effect.
+    unsafe { core::arch::x86_64::_mm_mfence() };
+}
+
 /// Waits until `ready` returns true or roughly `seconds` have elapsed.
 pub(crate) fn wait_until(seconds: u64, ready: impl FnMut() -> bool) -> bool {
     wait_until_ms(seconds.saturating_mul(1000), ready)
@@ -100,19 +133,20 @@ pub(crate) fn delay_ms(milliseconds: u64) {
     wait_until_ms(milliseconds, || false);
 }
 
-/// Waits until `ready` returns true or roughly `milliseconds` have elapsed.
-///
-/// The bound assumes a timestamp counter of at most 5 GHz, so it never waits
-/// less than requested; slower counters wait proportionally longer.
+/// Waits until `ready` returns true or `milliseconds` have elapsed, counted
+/// on the timestamp counter at the rate [`clock`] calibrated (or, before
+/// calibration, at an assumed 5 GHz, which never waits less than asked).
 pub(crate) fn wait_until_ms(milliseconds: u64, mut ready: impl FnMut() -> bool) -> bool {
     let start = crate::arch::x86_64::timer::timestamp_counter();
-    let limit = milliseconds.saturating_mul(5_000_000);
+    let limit = milliseconds.saturating_mul(clock::ticks_per_ms());
     loop {
         if ready() {
             return true;
         }
         if crate::arch::x86_64::timer::timestamp_counter().wrapping_sub(start) > limit {
-            return false;
+            // One last look, in case the wait was descheduled by an SMI just
+            // before the deadline.
+            return ready();
         }
         core::hint::spin_loop();
     }

@@ -37,6 +37,14 @@ const PORT_ENABLED: u32 = 1 << 1;
 const PORT_RESET: u32 = 1 << 4;
 const PORT_POWER: u32 = 1 << 9;
 const PORT_RESET_CHANGE: u32 = 1 << 21;
+const PORT_WARM_RESET_CHANGE: u32 = 1 << 19;
+const PORT_WARM_RESET: u32 = 1 << 31;
+/// PORTSC Port Link State (xHCI 1.2 section 5.4.8, table 5-27).
+const PORT_LINK_STATE_SHIFT: u32 = 5;
+const LINK_INACTIVE: u32 = 6;
+const LINK_COMPLIANCE: u32 = 10;
+const CRCR_ABORT: u32 = 1 << 2;
+const CRCR_RUNNING: u32 = 1 << 3;
 // Bits that keep their value when written back; all others are RW1C/RW1S.
 const PORT_PRESERVE: u32 = PORT_POWER | (0xf << 5) | (3 << 14) | (7 << 25);
 const PORT_CHANGE_BITS: u32 = 0x7f << 17;
@@ -45,6 +53,8 @@ const LEGACY_BIOS_OWNED: u32 = 1 << 16;
 const LEGACY_OS_OWNED: u32 = 1 << 24;
 const LEGACY_DISABLE_SMI: u32 = (0x7 << 1) | (0xff << 5) | (0x7 << 17);
 const LEGACY_SMI_EVENTS: u32 = 0x7 << 29;
+/// Extended capability ID of a Supported Protocol capability (section 7.2).
+const SUPPORTED_PROTOCOL: u32 = 2;
 
 const TRB_NORMAL: u32 = 1;
 const TRB_ISOCH: u32 = 5;
@@ -55,6 +65,8 @@ const TRB_DATA: u32 = 3;
 const TRB_STATUS: u32 = 4;
 const TRB_LINK: u32 = 6;
 const TRB_ENABLE_SLOT: u32 = 9;
+const TRB_DISABLE_SLOT: u32 = 10;
+const TRB_STOP_ENDPOINT: u32 = 15;
 const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_ENDPOINT: u32 = 12;
 const TRB_EVALUATE_CONTEXT: u32 = 13;
@@ -64,12 +76,16 @@ const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_COMPLETION: u32 = 33;
 const TRB_CYCLE: u32 = 1 << 0;
 const TRB_TOGGLE_CYCLE: u32 = 1 << 1;
+/// Interrupt on Short Packet: report a short IN transfer with its residue
+/// at the TRB it ended in (section 4.10.1.1).
+const TRB_INTERRUPT_ON_SHORT_PACKET: u32 = 1 << 2;
 const TRB_INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
 const TRB_IMMEDIATE_DATA: u32 = 1 << 6;
 const TRB_DIRECTION_IN: u32 = 1 << 16;
 const COMPLETION_SUCCESS: u32 = 1;
-const COMPLETION_STALL: u32 = 6;
 const COMPLETION_SHORT_PACKET: u32 = 13;
+/// A transfer ended by a Stop Endpoint command, not by the device.
+const COMPLETION_STOPPED: u32 = 26;
 const RING_TRBS: usize = 256;
 const MAX_SLOTS: u32 = 32;
 const MAX_SCRATCHPADS: usize = 256;
@@ -141,6 +157,21 @@ const SPEED_SUPER: u32 = 4;
 const MAX_HUB_DEPTH: u32 = 5;
 const HUB_PORT_LIMIT: u16 = 15;
 const COMMAND_TIMEOUT_MS: u64 = 1000;
+/// How long a controller may take to finish a reset. Most need milliseconds;
+/// some real controllers take seconds, and Linux allows ten.
+const RESET_TIMEOUT_MS: u64 = 10_000;
+/// How long ports are watched for devices after the controller starts:
+/// devices reconnect after the reset, and USB 3 links train on their own.
+const PORT_SCAN_MS: u64 = 2000;
+/// A connection must be stable this long before the port is reset (USB 2.0
+/// section 7.1.7.3, TATTDB).
+const DEBOUNCE_MS: u64 = 100;
+/// Attempts at addressing a device before its port is given up.
+const ATTACH_ATTEMPTS: usize = 3;
+/// Corsair keyboards need time between control requests; Linux gives the
+/// family USB_QUIRK_DELAY_INIT and USB_QUIRK_DELAY_CTRL_MSG.
+const VENDOR_CORSAIR: u16 = 0x1b1c;
+const CORSAIR_DELAY_MS: u64 = 200;
 const POOL_PAGES: usize = 1536;
 
 static mut POOL: [DmaPage; POOL_PAGES] = [DmaPage::ZERO; POOL_PAGES];
@@ -194,6 +225,8 @@ pub(crate) enum Error {
     NotInputDevice(u16, u16),
     NoDevices,
     HubTooDeep,
+    /// The device's configuration did not fit what the driver can track.
+    NoRoom,
 }
 
 struct Ring {
@@ -359,6 +392,9 @@ pub(crate) struct Input {
     report: *mut DmaPage,
     /// Bytes each report transfer asks for: the endpoint's packet size.
     report_length: u32,
+    /// Times the endpoint halted and was restarted; an input that keeps
+    /// failing is dropped.
+    recoveries: u8,
 }
 
 impl Input {
@@ -455,6 +491,11 @@ pub(crate) struct Controller {
     speakers: [Option<Speaker>; MAX_SPEAKERS],
     /// Whether enumeration reports every device and hub, not only errors.
     verbose: bool,
+    /// Root ports that speak USB 3 (bit n: port n + 1), from the Supported
+    /// Protocol capabilities.
+    usb3_ports: [u64; 4],
+    /// The slot most recently enabled, so a failed attach can disable it.
+    last_slot: u32,
 }
 
 impl Controller {
@@ -477,6 +518,14 @@ impl Controller {
         let mark = pool_mark();
         let result = Self::open_inner(function, registers, verbose);
         if result.is_err() {
+            // The controller may still point at pool pages (contexts, rings,
+            // scratchpads): reset it and cut its bus mastering before the
+            // next controller is given them.
+            if registers != 0 {
+                let operational = registers + usize::from(read32(registers, CAP_LENGTH) as u8);
+                halt_and_reset(operational);
+            }
+            function.disable_bus_master();
             pool_release_to(mark);
         }
         result
@@ -486,8 +535,22 @@ impl Controller {
         if base == 0 {
             return Err(Error::NoMemoryBar);
         }
+        // Bound the capability walk by the register window; config space
+        // tells its size.
+        let window = function
+            .memory_bar_size(0)
+            .map_or(0x1_0000, |size| size.min(0x10_0000) as usize);
         function.enable_memory_and_bus_master();
-        take_from_firmware(base);
+        if read32(base, CAP_LENGTH) == u32::MAX {
+            // Registers that read all ones: the function is not decoding.
+            return Err(Error::NoMemoryBar);
+        }
+        let handoff = take_from_firmware(base, window);
+        if handoff.firmware_kept && verbose {
+            say!(
+                "linox:   firmware did not release the controller (USB legacy support); took it\n"
+            );
+        }
 
         let operational = base + usize::from(read32(base, CAP_LENGTH) as u8);
         let structural_1 = read32(base, CAP_STRUCTURAL_1);
@@ -498,16 +561,24 @@ impl Controller {
             ((((structural_2 >> 21) & 0x1f) << 5) | ((structural_2 >> 27) & 0x1f)) as usize;
         let context_size = if capability_1 & (1 << 2) != 0 { 64 } else { 32 };
 
+        // Section 4.2: wait for Controller Not Ready to clear before
+        // touching the operational registers, then halt and reset.
+        if !wait_until_ms(RESET_TIMEOUT_MS, || {
+            read32(operational, OP_STATUS) & STATUS_NOT_READY == 0
+        }) {
+            return Err(Error::ResetTimedOut);
+        }
         write32(
             operational,
             OP_COMMAND,
             read32(operational, OP_COMMAND) & !COMMAND_RUN,
         );
+        // Section 5.4.2: the controller halts within 16 ms of R/S clearing.
         if !wait_until_ms(100, || read32(operational, OP_STATUS) & STATUS_HALTED != 0) {
             return Err(Error::HaltTimedOut);
         }
         write32(operational, OP_COMMAND, COMMAND_RESET);
-        if !wait_until_ms(1000, || {
+        if !wait_until_ms(RESET_TIMEOUT_MS, || {
             read32(operational, OP_COMMAND) & COMMAND_RESET == 0
                 && read32(operational, OP_STATUS) & STATUS_NOT_READY == 0
         }) {
@@ -562,6 +633,8 @@ impl Controller {
             inputs: [const { None }; MAX_INPUTS],
             speakers: [const { None }; MAX_SPEAKERS],
             verbose,
+            usb3_ports: handoff.usb3_ports,
+            last_slot: 0,
         };
         if capability_1 & (1 << 3) != 0 {
             for port in 1..=ports {
@@ -572,22 +645,10 @@ impl Controller {
                     read32(register, 0) & PORT_PRESERVE | PORT_POWER,
                 );
             }
+            // Section 4.19.4: software waits 20 ms after setting Port Power.
+            delay_ms(20);
         }
-        // Devices reconnect after the controller reset; allow a debounce period.
-        let connected = |controller: &Self| {
-            (1..=ports).any(|port| read32(controller.port_register(port), 0) & PORT_CONNECTED != 0)
-        };
-        if wait_until_ms(1000, || connected(&controller)) {
-            delay_ms(100);
-        }
-        for port in 1..=ports {
-            // A device that fails after its slot is enabled keeps its pages:
-            // the controller may still write to its contexts.
-            match controller.try_root_port(port) {
-                Ok(()) | Err(Error::NotConnected) => {}
-                Err(error) => say!("linox:     port {}: {:?}\n", port, error),
-            }
-        }
+        controller.scan_root_ports(ports);
         if controller.inputs().next().is_none() && controller.speakers().next().is_none() {
             controller.stop();
             return Err(Error::NoDevices);
@@ -655,10 +716,17 @@ impl Controller {
             };
             if let Some((last, batch)) = in_flight {
                 let batch_ms = (batch as u64 * u64::from(period_us)).div_ceil(1000);
-                let finished = wait_until_ms(batch_ms * 2 + 100, || {
-                    self.next_event().is_some_and(|event| {
-                        event.kind() == TRB_TRANSFER_EVENT && event.parameter == last
-                    })
+                let finished = wait_until_ms(batch_ms * 2 + 100, || match self.next_event() {
+                    Some(event)
+                        if event.kind() == TRB_TRANSFER_EVENT && event.parameter == last =>
+                    {
+                        true
+                    }
+                    Some(event) => {
+                        self.requeue_input(&event);
+                        false
+                    }
+                    None => false,
                 });
                 if !finished {
                     return Some(sent);
@@ -722,6 +790,12 @@ impl Controller {
                 };
             }
             let kind = input.kind;
+            if !completed && event.completion() != COMPLETION_STOPPED {
+                // A transaction error or babble halts the endpoint (section
+                // 4.10.2): queued TRBs would never run again.
+                self.recover_input(index);
+                continue;
+            }
             self.queue_report(index, buffer);
             if completed {
                 return Some(Report {
@@ -733,6 +807,69 @@ impl Controller {
             }
         }
         None
+    }
+
+    /// Gives back the report slot of an input transfer event that arrived
+    /// while something else was waiting on the event ring (a command, a
+    /// control transfer, a test tone). The report is dropped, but its slot
+    /// is queued again: otherwise each such event would cost the input one
+    /// of its slots for good, and a keyboard typed on during a beep would
+    /// eventually go silent.
+    fn requeue_input(&mut self, event: &Event) {
+        if event.kind() != TRB_TRANSFER_EVENT {
+            return;
+        }
+        let Some(index) = self.inputs.iter().position(|input| {
+            input.as_ref().is_some_and(|input| {
+                input.slot == event.slot() && input.endpoint == event.endpoint()
+            })
+        }) else {
+            return;
+        };
+        let buffer = self.inputs[index]
+            .as_ref()
+            .and_then(|input| input.completed_buffer(event.parameter));
+        if let Some(buffer) = buffer {
+            self.queue_report(index, buffer);
+        }
+    }
+
+    /// Restarts input `index` after its endpoint halted: Reset Endpoint, a
+    /// clear of the device's halt, moving the dequeue pointer to the ring's
+    /// enqueue pointer (dropping what was queued), and requeueing every
+    /// report slot.
+    fn recover_input(&mut self, index: usize) {
+        let Some(input) = self.inputs.get_mut(index).and_then(Option::as_mut) else {
+            return;
+        };
+        input.recoveries = input.recoveries.saturating_add(1);
+        if input.recoveries > 8 {
+            say!(
+                "linox: USB input {:04x}:{:04x} on port {} keeps failing; dropped\n",
+                input.vendor,
+                input.product,
+                input.location
+            );
+            self.inputs[index] = None;
+            return;
+        }
+        let target = input.endpoint << 16 | input.slot << 24;
+        let dequeue = input.interrupt.enqueue_pointer();
+        let _ = self.command(0, TRB_RESET_ENDPOINT << 10 | target);
+        let _ = self.command(dequeue, TRB_SET_TR_DEQUEUE << 10 | target);
+        let Some(input) = self.inputs.get(index).and_then(Option::as_ref) else {
+            return;
+        };
+        let slots: [Option<u64>; REPORT_SLOTS as usize] = {
+            let mut slots = [None; REPORT_SLOTS as usize];
+            for (slot, buffer) in slots.iter_mut().zip(input.report_slots()) {
+                *slot = Some(buffer);
+            }
+            slots
+        };
+        for buffer in slots.into_iter().flatten() {
+            self.queue_report(index, buffer);
+        }
     }
 
     /// Halts the controller.
@@ -751,17 +888,135 @@ impl Controller {
         self.operational + OP_PORTS + 0x10 * (port as usize - 1)
     }
 
+    fn is_usb3(&self, port: u32) -> bool {
+        let bit = port as usize - 1;
+        self.usb3_ports
+            .get(bit / 64)
+            .is_some_and(|word| word & 1 << (bit % 64) != 0)
+    }
+
+    /// Watches the root ports for [`PORT_SCAN_MS`] and attaches each device
+    /// once its connection has been stable for [`DEBOUNCE_MS`]: devices
+    /// reconnect at their own pace after the controller reset, and a slow
+    /// one must not be missed because another came up first.
+    fn scan_root_ports(&mut self, ports: u32) {
+        const UNSEEN: u64 = u64::MAX;
+        let ports = ports.min(255);
+        let start = crate::arch::x86_64::timer::timestamp_counter();
+        let mut seen = [UNSEEN; 255];
+        let mut done = [false; 255];
+        loop {
+            let now = super::clock::elapsed_ms(start);
+            let mut pending = false;
+            for port in 1..=ports {
+                let index = port as usize - 1;
+                if done[index] {
+                    continue;
+                }
+                if read32(self.port_register(port), 0) & PORT_CONNECTED == 0 {
+                    seen[index] = UNSEEN;
+                    continue;
+                }
+                pending = true;
+                if seen[index] == UNSEEN {
+                    seen[index] = now;
+                    continue;
+                }
+                if now - seen[index] < DEBOUNCE_MS {
+                    continue;
+                }
+                done[index] = true;
+                // A device that fails after its slot is enabled keeps its
+                // pages unless the slot could be disabled again.
+                match self.try_root_port(port) {
+                    Ok(()) | Err(Error::NotConnected) => {}
+                    Err(error) => say!("linox:     port {}: {:?}\n", port, error),
+                }
+            }
+            // Stop once the scan time is up, or earlier once every
+            // connected port is handled and the slowest USB 3 link has had
+            // time to train.
+            if now >= PORT_SCAN_MS || (!pending && now >= PORT_SCAN_MS / 4) {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Resets the root port (a warm reset for a USB 3 link stuck inactive
+    /// or in compliance mode) and attaches its device, retrying a device
+    /// that fails to address.
     fn try_root_port(&mut self, port: u32) -> Result<(), Error> {
+        let register = self.port_register(port);
+        let mut last = Error::NotConnected;
+        for attempt in 0..ATTACH_ATTEMPTS {
+            let status = self.reset_root_port(port, attempt > 0)?;
+            let (inputs, speakers) = (self.inputs().count(), self.speakers().count());
+            let mark = pool_mark();
+            self.last_slot = 0;
+            match self.attach(Location::root(port), (status >> 10) & 0xf) {
+                Ok(()) => return Ok(()),
+                Err(error @ (Error::NotInputDevice(..) | Error::OutOfDmaMemory)) => {
+                    return Err(error)
+                }
+                Err(error) => last = error,
+            }
+            // Retry only a device that added nothing the controller keeps.
+            if self.inputs().count() != inputs || self.speakers().count() != speakers {
+                return Err(last);
+            }
+            if self.disable_last_slot() {
+                pool_release_to(mark);
+            } else {
+                return Err(last);
+            }
+            if read32(register, 0) & PORT_CONNECTED == 0 {
+                return Err(last);
+            }
+            if self.verbose {
+                say!(
+                    "linox:     port {}: {:?}; resetting and trying again\n",
+                    port,
+                    last
+                );
+            }
+        }
+        Err(last)
+    }
+
+    /// Brings a connected root port to the Enabled state and returns its
+    /// status. USB 2 ports are reset (section 4.3.1); USB 3 ports enable
+    /// themselves once the link trains, unless the link is stuck, which
+    /// takes a warm reset (section 4.19.5.1). `again` forces a reset.
+    fn reset_root_port(&mut self, port: u32, again: bool) -> Result<u32, Error> {
         let register = self.port_register(port);
         let status = read32(register, 0);
         if status & PORT_CONNECTED == 0 {
             return Err(Error::NotConnected);
         }
-        if status & PORT_ENABLED == 0 {
-            write32(register, 0, status & PORT_PRESERVE | PORT_RESET);
-            if !wait_until_ms(500, || read32(register, 0) & PORT_RESET_CHANGE != 0) {
+        let usb3 = self.is_usb3(port);
+        let link = (status >> PORT_LINK_STATE_SHIFT) & 0xf;
+        if usb3
+            && !again
+            && status & PORT_ENABLED == 0
+            && !matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
+        {
+            // Still training: give it time to reach U0.
+            let _ = wait_until_ms(500, || read32(register, 0) & PORT_ENABLED != 0);
+        }
+        let status = read32(register, 0);
+        if again || status & PORT_ENABLED == 0 {
+            let (reset, change) =
+                if usb3 && (again || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)) {
+                    (PORT_WARM_RESET, PORT_WARM_RESET_CHANGE | PORT_RESET_CHANGE)
+                } else {
+                    (PORT_RESET, PORT_RESET_CHANGE)
+                };
+            write32(register, 0, status & PORT_PRESERVE | reset);
+            if !wait_until_ms(500, || read32(register, 0) & change != 0) {
                 return Err(Error::PortResetFailed);
             }
+            // USB 2.0 section 7.1.7.5: 10 ms of reset recovery (TRSTRCY).
             delay_ms(20);
         }
         let status = read32(register, 0);
@@ -773,7 +1028,22 @@ impl Controller {
         if status & PORT_ENABLED == 0 {
             return Err(Error::PortResetFailed);
         }
-        self.attach(Location::root(port), (status >> 10) & 0xf)
+        Ok(status)
+    }
+
+    /// Disables the slot the last attach enabled, so the controller stops
+    /// using its contexts and the pages can be reused. Whether it did.
+    fn disable_last_slot(&mut self) -> bool {
+        let slot = core::mem::take(&mut self.last_slot);
+        if slot == 0 {
+            return true;
+        }
+        let disabled = self.command(0, TRB_DISABLE_SLOT << 10 | slot << 24).is_ok();
+        if disabled {
+            // SAFETY: the device-context array holds MAX_SLOTS + 1 entries.
+            unsafe { self.device_contexts.add(slot as usize).write_volatile(0) };
+        }
+        disabled
     }
 
     /// Addresses the device at `location`, then configures its input
@@ -793,6 +1063,7 @@ impl Controller {
             slot: 0,
             location,
             speed,
+            request_delay_ms: 0,
         };
         let identity = device.address(self)?;
         if self.verbose {
@@ -902,7 +1173,7 @@ impl Controller {
         input.interrupt.push(
             buffer,
             input.report_length,
-            TRB_NORMAL << 10 | TRB_INTERRUPT_ON_COMPLETION,
+            TRB_NORMAL << 10 | TRB_INTERRUPT_ON_COMPLETION | TRB_INTERRUPT_ON_SHORT_PACKET,
         );
         let (slot, endpoint) = (input.slot, input.endpoint);
         self.ring(slot, endpoint);
@@ -918,6 +1189,7 @@ impl Controller {
                 return false;
             };
             if event.kind() != TRB_COMMAND_COMPLETION || event.parameter != address {
+                self.requeue_input(&event);
                 return false;
             }
             result = if event.completion() == COMPLETION_SUCCESS {
@@ -927,7 +1199,24 @@ impl Controller {
             };
             true
         });
+        if matches!(result, Err(Error::CommandTimedOut(_))) {
+            self.abort_command();
+        }
         result
+    }
+
+    /// Aborts the command the controller is stuck on, so the commands
+    /// queued after it can run (section 4.6.1.2): set CRCR.CA, wait for the
+    /// ring to stop, and drop the Command Ring Stopped event.
+    fn abort_command(&mut self) {
+        write32(self.operational, OP_COMMAND_RING, CRCR_ABORT);
+        write32(self.operational, OP_COMMAND_RING + 4, 0);
+        let _ = wait_until_ms(COMMAND_TIMEOUT_MS * 5, || {
+            read32(self.operational, OP_COMMAND_RING) & CRCR_RUNNING == 0
+        });
+        while let Some(event) = self.next_event() {
+            self.requeue_input(&event);
+        }
     }
 
     fn ring(&self, slot: u32, target: u32) {
@@ -978,6 +1267,8 @@ struct Device {
     slot: u32,
     location: Location,
     speed: u32,
+    /// A pause after each control request, for devices that need one.
+    request_delay_ms: u64,
 }
 
 impl Device {
@@ -985,6 +1276,10 @@ impl Device {
     fn address(&mut self, controller: &mut Controller) -> Result<Identity, Error> {
         let completion = controller.command(0, TRB_ENABLE_SLOT << 10)?;
         self.slot = completion.slot();
+        if self.slot == 0 || self.slot > MAX_SLOTS {
+            return Err(Error::NoRoom);
+        }
+        controller.last_slot = self.slot;
         // SAFETY: the device-context array holds MAX_SLOTS + 1 entries.
         unsafe {
             controller
@@ -1005,6 +1300,9 @@ impl Device {
             self.pages.input as u64,
             TRB_ADDRESS_DEVICE << 10 | self.slot << 24,
         )?;
+        // USB 2.0 section 9.2.6.3: two ms of SET_ADDRESS recovery; Linux
+        // allows ten.
+        delay_ms(10);
 
         // Read the first eight bytes to learn the real default-pipe packet size.
         self.control_in(
@@ -1040,12 +1338,17 @@ impl Device {
             18,
         )?;
         let device = self.buffer();
-        Ok(Identity {
+        let identity = Identity {
             vendor: u16::from_le_bytes([device[8], device[9]]),
             product: u16::from_le_bytes([device[10], device[11]]),
             class: device[4],
             protocol: device[6],
-        })
+        };
+        if identity.vendor == VENDOR_CORSAIR {
+            self.request_delay_ms = CORSAIR_DELAY_MS;
+            delay_ms(CORSAIR_DELAY_MS);
+        }
+        Ok(identity)
     }
 
     /// Reads the configuration descriptors into the buffer and returns their
@@ -1151,13 +1454,14 @@ impl Device {
                     HID_BOOT_PROTOCOL,
                     interface,
                 ) {
+                    // Many keyboards send boot-format reports on their boot
+                    // interface either way (Linux never asks), so carry on.
                     say!(
-                        "linox:     port {}: interface {} refused the boot protocol: {:?}\n",
+                        "linox:     port {}: interface {} refused the boot protocol ({:?}); using it anyway\n",
                         self.location,
                         interface,
                         error
                     );
-                    continue;
                 }
             }
             // SET_IDLE asks for reports only on change. It is optional; some
@@ -1191,6 +1495,7 @@ impl Device {
                 interrupt: Ring::new(ring),
                 report,
                 report_length: u32::from(packet.max(1)),
+                recoveries: 0,
             });
             added += 1;
         }
@@ -1623,7 +1928,7 @@ impl Device {
         self.control.push(
             self.pages.buffer as u64,
             u32::from(length),
-            TRB_DATA << 10 | TRB_DIRECTION_IN,
+            TRB_DATA << 10 | TRB_DIRECTION_IN | TRB_INTERRUPT_ON_SHORT_PACKET,
         );
         let status = self
             .control
@@ -1690,14 +1995,22 @@ impl Device {
 
     /// Rings endpoint 0 and waits for the transfer event of the TRB at
     /// `last`. An error on any earlier TRB of the transfer ends the wait.
+    /// Events of other slots and endpoints are not this transfer's.
     fn transfer(&mut self, controller: &mut Controller, last: u64) -> Result<(), Error> {
         controller.ring(self.slot, 1);
         let mut result = Err(Error::TransferTimedOut);
+        let control = &self.control;
+        let slot = self.slot;
         wait_until_ms(COMMAND_TIMEOUT_MS, || {
             let Some(event) = controller.next_event() else {
                 return false;
             };
-            if event.kind() != TRB_TRANSFER_EVENT {
+            if event.kind() != TRB_TRANSFER_EVENT
+                || event.slot() != slot
+                || event.endpoint() != 1
+                || control.parameter_at(event.parameter).is_none()
+            {
+                controller.requeue_input(&event);
                 return false;
             }
             if !matches!(
@@ -1713,16 +2026,33 @@ impl Device {
             }
             false
         });
-        // A STALL halts the default control pipe. Reset it and move its
-        // dequeue pointer past the failed transfer; the device clears its
-        // own stall at the next SETUP.
-        if matches!(result, Err(Error::TransferFailed(COMPLETION_STALL))) {
-            let target = 1 << 16 | self.slot << 24;
-            let _ = controller.command(0, TRB_RESET_ENDPOINT << 10 | target);
-            let _ = controller.command(
-                self.control.enqueue_pointer(),
-                TRB_SET_TR_DEQUEUE << 10 | target,
-            );
+        let target = 1 << 16 | self.slot << 24;
+        match result {
+            Ok(()) => {}
+            // Any error but a short packet halts the default control pipe
+            // (section 4.10.2): reset it and move its dequeue pointer past
+            // the failed transfer. The device clears a stall at the next
+            // SETUP.
+            Err(Error::TransferFailed(_)) => {
+                let _ = controller.command(0, TRB_RESET_ENDPOINT << 10 | target);
+                let _ = controller.command(
+                    self.control.enqueue_pointer(),
+                    TRB_SET_TR_DEQUEUE << 10 | target,
+                );
+            }
+            // A device that never answers leaves the transfer on the ring:
+            // stop the endpoint (section 4.6.9) and skip past it, or its
+            // late completion would be taken for a later transfer's.
+            Err(_) => {
+                let _ = controller.command(0, TRB_STOP_ENDPOINT << 10 | target);
+                let _ = controller.command(
+                    self.control.enqueue_pointer(),
+                    TRB_SET_TR_DEQUEUE << 10 | target,
+                );
+            }
+        }
+        if self.request_delay_ms != 0 {
+            delay_ms(self.request_delay_ms);
         }
         result
     }
@@ -1764,28 +2094,84 @@ fn interrupt_in_endpoint(descriptor: &[u8]) -> Option<(u8, u16, u8)> {
     })
 }
 
-/// Performs the USB legacy-support handoff so firmware stops driving the
-/// controller through SMIs.
-fn take_from_firmware(base: usize) {
+/// What the extended capabilities said.
+struct Handoff {
+    /// Firmware kept BIOS Owned set past the handoff wait.
+    firmware_kept: bool,
+    usb3_ports: [u64; 4],
+}
+
+/// Walks the extended capabilities (section 7) in the `window` bytes of
+/// registers: performs the USB legacy-support handoff so firmware stops
+/// driving the controller through SMIs (section 4.22.1), and records which
+/// root ports speak USB 3 from the Supported Protocol capabilities
+/// (section 7.2). A walk that leaves the window, reads all ones (a function
+/// not decoding), or runs on too long ends.
+fn take_from_firmware(base: usize, window: usize) -> Handoff {
+    let mut handoff = Handoff {
+        firmware_kept: false,
+        usb3_ports: [0; 4],
+    };
     let mut offset = ((read32(base, CAP_CAPABILITY_1) >> 16) as usize) * 4;
-    while offset != 0 {
+    for _ in 0..64 {
+        if offset == 0 || offset + 16 > window {
+            break;
+        }
         let capability = read32(base, offset);
-        if capability & 0xff == LEGACY_SUPPORT {
-            write32(base, offset, capability | LEGACY_OS_OWNED);
-            let _ = wait_until_ms(1000, || read32(base, offset) & LEGACY_BIOS_OWNED == 0);
-            let control = read32(base, offset + 4);
-            write32(
-                base,
-                offset + 4,
-                (control & LEGACY_DISABLE_SMI) | LEGACY_SMI_EVENTS,
-            );
-            return;
+        if capability == u32::MAX {
+            break;
+        }
+        match capability & 0xff {
+            LEGACY_SUPPORT => {
+                write32(base, offset, capability | LEGACY_OS_OWNED);
+                if !wait_until_ms(1000, || read32(base, offset) & LEGACY_BIOS_OWNED == 0) {
+                    // Firmware did not let go; take the controller anyway,
+                    // as section 4.22.1 permits after a timeout.
+                    handoff.firmware_kept = true;
+                    write32(base, offset, read32(base, offset) & !LEGACY_BIOS_OWNED);
+                }
+                let control = read32(base, offset + 4);
+                write32(
+                    base,
+                    offset + 4,
+                    (control & LEGACY_DISABLE_SMI) | LEGACY_SMI_EVENTS,
+                );
+            }
+            SUPPORTED_PROTOCOL if capability >> 24 == 3 => {
+                let ports = read32(base, offset + 8);
+                let first = ports & 0xff;
+                let count = (ports >> 8) & 0xff;
+                for port in first..first.saturating_add(count).min(256) {
+                    if port != 0 {
+                        let bit = port as usize - 1;
+                        handoff.usb3_ports[bit / 64] |= 1 << (bit % 64);
+                    }
+                }
+            }
+            _ => {}
         }
         let next = ((capability >> 8) & 0xff) as usize * 4;
         if next == 0 {
-            return;
+            break;
         }
         offset += next;
+    }
+    handoff
+}
+
+/// Halts the controller whose operational registers are at `operational`
+/// and resets it, so it forgets every pointer into memory.
+fn halt_and_reset(operational: usize) {
+    write32(
+        operational,
+        OP_COMMAND,
+        read32(operational, OP_COMMAND) & !COMMAND_RUN,
+    );
+    if wait_until_ms(100, || read32(operational, OP_STATUS) & STATUS_HALTED != 0) {
+        write32(operational, OP_COMMAND, COMMAND_RESET);
+        let _ = wait_until_ms(RESET_TIMEOUT_MS, || {
+            read32(operational, OP_COMMAND) & COMMAND_RESET == 0
+        });
     }
 }
 

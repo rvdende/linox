@@ -4,6 +4,9 @@
 //! partition, given as a [`WritableExtent`] for the same disk, so it is safe
 //! to run against a disk that holds another operating system. It uses one
 //! admin queue pair and one I/O queue pair without interrupts.
+//!
+//! Section numbers refer to the NVM Express Base Specification 2.0 and the
+//! NVM Command Set Specification 1.0.
 
 use core::ptr::{addr_of, addr_of_mut};
 
@@ -24,6 +27,13 @@ const CONFIGURATION_ENABLE: u32 = 1;
 const CONFIGURATION_QUEUE_ENTRY_SIZES: u32 = (6 << 16) | (4 << 20);
 const STATUS_READY: u32 = 1;
 const STATUS_FATAL: u32 = 1 << 1;
+/// CC.SHN = 01b: normal shutdown (section 3.1.3.5).
+const CONFIGURATION_SHUTDOWN_NORMAL: u32 = 1 << 14;
+/// CSTS.SHST (section 3.1.3.6): 10b means shutdown processing is complete.
+const STATUS_SHUTDOWN_MASK: u32 = 3 << 2;
+const STATUS_SHUTDOWN_COMPLETE: u32 = 2 << 2;
+/// The longest a shutdown may take when RTD3E does not say: Linux's default.
+const SHUTDOWN_TIMEOUT_SECONDS: u64 = 10;
 const QUEUE_ENTRIES: u16 = 16;
 const OPCODE_CREATE_IO_SUBMISSION_QUEUE: u8 = 0x01;
 const OPCODE_CREATE_IO_COMPLETION_QUEUE: u8 = 0x05;
@@ -55,6 +65,18 @@ pub(crate) enum Error {
     CommandFailed(u8, u16),
     NoNamespace,
     UnsupportedBlockSize(u32),
+    /// The namespace's LBA format carries metadata, which this driver does
+    /// not provide buffers for.
+    UnsupportedMetadata(u16),
+    /// The registers read all ones: the function is not decoding.
+    NotResponding,
+    /// CAP.MQES allows fewer entries than the driver's queues hold.
+    QueuesTooSmall(u16),
+    /// An earlier command timed out; the queues are out of step until the
+    /// controller is opened again.
+    Unusable,
+    /// A completion carried another command's identifier.
+    CompletionMismatch(u16),
     OutOfRange,
     /// The extent belongs to another disk's partition table.
     WrongDisk,
@@ -79,6 +101,9 @@ pub(crate) struct Controller {
     pub(crate) namespace: u32,
     pub(crate) block_size: u32,
     pub(crate) block_count: u64,
+    /// Set when a command timed out (section 4.6: the queues no longer
+    /// match what the controller thinks).
+    broken: bool,
 }
 
 /// What Identify Controller reports.
@@ -101,6 +126,14 @@ impl Controller {
         let registers = function.memory_bar(0).ok_or(Error::NoMemoryBar)? as usize;
         function.enable_memory_and_bus_master();
         let capabilities = read64(registers, REGISTER_CAPABILITIES);
+        if capabilities == u64::MAX {
+            return Err(Error::NotResponding);
+        }
+        // CAP.MQES is zero-based (section 3.1.3.1).
+        let largest_queue = (capabilities & 0xffff) as u16;
+        if largest_queue < QUEUE_ENTRIES - 1 {
+            return Err(Error::QueuesTooSmall(largest_queue));
+        }
         let doorbell_stride = 4_usize << ((capabilities >> 32) & 0xf);
         let minimum_page_shift = 12 + ((capabilities >> 48) & 0xf);
         if minimum_page_shift != 12 {
@@ -143,6 +176,15 @@ impl Controller {
             REGISTER_ADMIN_COMPLETION_QUEUE,
             admin.completions as u64,
         );
+        // Section 3.5.1: configure CC, then enable in a second write. CAP
+        // may change after the first CC write, so the timeout is read again.
+        write32(
+            registers,
+            REGISTER_CONFIGURATION,
+            CONFIGURATION_QUEUE_ENTRY_SIZES,
+        );
+        let capabilities = read64(registers, REGISTER_CAPABILITIES);
+        let ready_timeout = (((capabilities >> 24) & 0xff) / 2).max(1) + 1;
         write32(
             registers,
             REGISTER_CONFIGURATION,
@@ -165,6 +207,7 @@ impl Controller {
             namespace: 0,
             block_size: 0,
             block_count: 0,
+            broken: false,
         };
         let identity = controller.identify_controller()?;
         controller.open_namespace()?;
@@ -295,8 +338,16 @@ impl Controller {
         // SAFETY: Identify completed into the data page.
         let data = unsafe { &(*addr_of!(DATA)).0 };
         let block_count = u64::from_le_bytes(data[0..8].try_into().unwrap_or([0; 8]));
-        let format = usize::from(data[26] & 0x0f);
-        let block_shift = u32::from(data[128 + format * 4 + 2]);
+        // FLBAS (NVM Command Set section 4.1.5.1): bits 3:0 and, with more
+        // than 16 formats, bits 6:5 above them select the LBA format.
+        let flbas = data[26];
+        let format = usize::from(flbas & 0x0f | (flbas >> 5 & 3) << 4).min(63);
+        let entry = 128 + format * 4;
+        let metadata = u16::from_le_bytes([data[entry], data[entry + 1]]);
+        if metadata != 0 {
+            return Err(Error::UnsupportedMetadata(metadata));
+        }
+        let block_shift = u32::from(data[entry + 2]);
         let block_size = 1_u32.checked_shl(block_shift).unwrap_or(0);
         if !(512..=4096).contains(&block_size) {
             return Err(Error::UnsupportedBlockSize(block_size));
@@ -326,6 +377,9 @@ impl Controller {
     }
 
     fn submit(&mut self, admin: bool, opcode: u8, mut command: [u32; 16]) -> Result<(), Error> {
+        if self.broken {
+            return Err(Error::Unusable);
+        }
         let identifier = self.next_command;
         self.next_command = self.next_command.wrapping_add(1);
         command[0] = u32::from(opcode) | u32::from(identifier) << 16;
@@ -349,15 +403,22 @@ impl Controller {
         if !wait_until(COMMAND_TIMEOUT_SECONDS, || {
             (read32(completion, 12) >> 16 & 1 != 0) == phase
         }) {
+            self.broken = true;
             return Err(Error::CommandTimedOut(opcode));
         }
         let status = (read32(completion, 12) >> 17) as u16;
+        let completed = read32(completion, 12) as u16;
         queue.head += 1;
         if queue.head == QUEUE_ENTRIES {
             queue.head = 0;
             queue.phase = !queue.phase;
         }
         write32(queue.completion_doorbell, 0, u32::from(queue.head));
+        // Completion dword 3 carries the command identifier (section 4.6).
+        if completed != identifier {
+            self.broken = true;
+            return Err(Error::CompletionMismatch(completed));
+        }
         if status & 0x7ff != 0 {
             return Err(Error::CommandFailed(opcode, status));
         }
@@ -387,6 +448,40 @@ impl Queue {
             completion_doorbell,
         }
     }
+}
+
+/// Shuts down the controller at `function` cleanly if it is enabled,
+/// whoever enabled it (section 3.6.1), as an operating system must before
+/// power goes: the drive then records a safe shutdown and needs no recovery
+/// at its next start. The bring-up shell does this before reboot and
+/// power-off.
+///
+/// # Safety
+///
+/// `function` must be an NVMe controller that no other code drives, with
+/// its registers identity mapped.
+pub(crate) unsafe fn shutdown(function: Function) -> bool {
+    match function.memory_bar(0) {
+        Some(registers) => shutdown_registers(registers as usize),
+        None => false,
+    }
+}
+
+fn shutdown_registers(registers: usize) -> bool {
+    let configuration = read32(registers, REGISTER_CONFIGURATION);
+    if configuration == u32::MAX || configuration & CONFIGURATION_ENABLE == 0 {
+        return false;
+    }
+    // RTD3E (Identify Controller) bounds the time; without reading it, use
+    // the generous default.
+    write32(
+        registers,
+        REGISTER_CONFIGURATION,
+        configuration & !(3 << 14) | CONFIGURATION_SHUTDOWN_NORMAL,
+    );
+    wait_until(SHUTDOWN_TIMEOUT_SECONDS, || {
+        read32(registers, REGISTER_STATUS) & STATUS_SHUTDOWN_MASK == STATUS_SHUTDOWN_COMPLETE
+    })
 }
 
 /// The memory NVMe controllers may reach by DMA.

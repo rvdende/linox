@@ -2,11 +2,19 @@
 //! Audio and GPU HDMI/DP audio functions: controller reset, codec discovery
 //! through the CORB/RIRB command rings, and a report of each codec's output
 //! pins, and a test tone played through one output stream.
+//!
+//! AMD's GPU HDMI/DP audio functions (such as 1002:ab28 on Navi 21 and
+//! 1002:1640 on Raphael) do not snoop the processor caches, and AMD's
+//! chipset/SoC HD Audio snoops only once bit 1 of PCI config byte 0x42 is
+//! set (Linux's "ATI" snoop type). This driver's rings and buffers are
+//! ordinary write-back memory, so it writes back every line it hands the
+//! controller and discards stale lines before reading what the controller
+//! wrote; on a snooping controller that costs a few cache-line flushes.
 
 use core::ptr::{addr_of, addr_of_mut};
 
 use super::pci::{Function, Identity};
-use super::{delay_ms, wait_until_ms, DmaPage, DmaRegion};
+use super::{delay_ms, flush_cache, wait_until_ms, DmaPage, DmaRegion};
 
 const CAPABILITIES: usize = 0x00;
 const GLOBAL_CONTROL: usize = 0x08;
@@ -77,6 +85,12 @@ const WIDGET_OUTPUT: u32 = 0;
 const WIDGET_PIN: u32 = 4;
 const COMMAND_TIMEOUT_MS: u64 = 50;
 const MAX_CODECS: usize = 15;
+const VENDOR_AMD: u16 = 0x1022;
+/// AMD/ATI HD Audio miscellaneous control: bits 2:0 select snooping, and
+/// 0b010 turns it on.
+const AMD_MISC_CONTROL: u8 = 0x40;
+const AMD_MISC_CONTROL_SHIFT: u32 = 16;
+const AMD_ENABLE_SNOOP: u32 = 0x02;
 
 static mut CORB: DmaPage = DmaPage::ZERO;
 static mut RIRB: DmaPage = DmaPage::ZERO;
@@ -182,6 +196,16 @@ impl Controller {
     pub(crate) unsafe fn open(function: Function) -> Result<Self, Error> {
         let base = function.memory_bar(0).ok_or(Error::NoMemoryBar)? as usize;
         function.enable_memory_and_bus_master();
+        let vendor = function.read_u32(0) as u16;
+        if vendor == VENDOR_AMD {
+            // Byte 0x42 sits in the dword at 0x40: ask the chipset/SoC
+            // function for snooped DMA. The GPU (ATI) audio functions have
+            // no such switch and are left alone.
+            let value = function.read_u32(AMD_MISC_CONTROL);
+            let value =
+                value & !(7 << AMD_MISC_CONTROL_SHIFT) | AMD_ENABLE_SNOOP << AMD_MISC_CONTROL_SHIFT;
+            function.write_u32(AMD_MISC_CONTROL, value);
+        }
         write8(base, CORB_CONTROL, 0);
         write8(base, RIRB_CONTROL, 0);
         write32(
@@ -210,6 +234,8 @@ impl Controller {
 
         (*addr_of_mut!(CORB)).0.fill(0);
         (*addr_of_mut!(RIRB)).0.fill(0);
+        flush_cache(addr_of!(CORB) as usize, 4096);
+        flush_cache(addr_of!(RIRB) as usize, 4096);
         let corb = addr_of!(CORB) as u64;
         let rirb = addr_of!(RIRB) as u64;
         write32(base, CORB_LOW, corb as u32);
@@ -316,6 +342,8 @@ impl Controller {
                 entry.add(3).write_volatile(0);
             }
         }
+        flush_cache(addr_of!(BUFFER_LIST) as usize, 4096);
+        flush_cache(samples as usize, bytes);
 
         write32(stream, STREAM_CONTROL, STREAM_RESET);
         if !wait_until_ms(100, || read32(stream, STREAM_CONTROL) & STREAM_RESET != 0) {
@@ -385,12 +413,14 @@ impl Controller {
         self.corb_write = (self.corb_write + 1) % RING_ENTRIES as u16;
         // SAFETY: the CORB page belongs to this driver, and the controller
         // only reads entries up to the write pointer.
-        unsafe {
-            addr_of_mut!(CORB)
+        let entry = unsafe {
+            let entry = addr_of_mut!(CORB)
                 .cast::<u32>()
-                .add(usize::from(self.corb_write))
-                .write_volatile(command);
-        }
+                .add(usize::from(self.corb_write));
+            entry.write_volatile(command);
+            entry
+        };
+        flush_cache(entry as usize, 4);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         write16(self.base, CORB_WRITE, self.corb_write);
         let next = (self.rirb_read + 1) % RING_ENTRIES as u16;
@@ -402,12 +432,11 @@ impl Controller {
         self.rirb_read = next;
         // SAFETY: the controller wrote the response before moving its
         // write pointer; each entry is a response and a codec tag.
-        let response = unsafe {
-            addr_of!(RIRB)
-                .cast::<u32>()
-                .add(usize::from(next) * 2)
-                .read_volatile()
-        };
+        let entry = unsafe { addr_of!(RIRB).cast::<u32>().add(usize::from(next) * 2) };
+        // Drop any stale cached copy of the entry the controller wrote.
+        flush_cache(entry as usize, 8);
+        // SAFETY: as above.
+        let response = unsafe { entry.read_volatile() };
         write8(self.base, RIRB_STATUS, RIRB_STATUS_CLEAR);
         Ok(response)
     }

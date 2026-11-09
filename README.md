@@ -280,12 +280,20 @@ an XKB keymap. There is no GPU acceleration, clipboard or popup placement.
 - `linox-usb.img` is a raw GPT disk image with one EFI system partition, for
   firmware that does not boot hybrid ISOs from USB.
 
-Write either one to a stick (this erases the stick) and boot it in UEFI mode
-with Secure Boot disabled:
+Write the USB image to a stick (this erases the stick) and boot it in UEFI
+mode with Secure Boot disabled:
 
 ```sh
-sudo dd if=build/media/linox-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
+tools/images/write-usb.sh /dev/sdX
 ```
+
+The helper refuses anything that is not an unmounted, removable USB disk
+under 256 GB that does not hold the running system, shows the disk's model,
+serial and size, asks for the device name to be typed back, writes with
+`sudo dd` and verifies what it wrote (`--dry-run` only checks).
+`docs/HARDWARE-BRINGUP.md` is the checklist for the first boot on the
+development PC (firmware settings, what each screen shows, what to
+photograph) and the plan from bring-up mode to the full system there.
 
 `make test-boot-media` boots both images in QEMU as a CD-ROM and as a USB stick
 on an xHCI controller, and requires each boot to reach the controller prompt.
@@ -330,10 +338,23 @@ every PCI device, and runs the physical-hardware drivers in `kernel/src/drivers`
   output pins, and plays a 440 Hz test tone on request (`beep`).
 - Polled Ethernet for the Intel 82574 and the Realtek RTL8125/RTL8126, checked
   by broadcasting a DHCP discover and reporting the offer. The Realtek path
-  follows Linux's r8169 register layout and has not run on hardware yet.
+  takes the chip from its out-of-band controller, powers up its PHY and
+  renegotiates, following the behaviour of Linux's r8169; QEMU has no model
+  of it, and it has not run on hardware yet.
+
+Bring-up is built to be read from a photo of the screen: the loader
+reports its steps on the firmware console before the kernel takes over, the
+kernel checks the firmware maps the framebuffer before drawing, every wait
+on hardware is bounded by a clock calibrated against the ACPI PM timer or
+HPET, each step names itself so that a CPU exception or a panic (both
+reported on the framebuffer with registers and return addresses) says
+where it struck, and the report ends with a one-screen summary.
 
 With a keyboard or serial port it then offers a small bring-up shell (`help`,
-`pci`, `acpi`, `mem`, `disks`, `disktest`, `net`, `beep`, `reboot`, `poweroff`). Only
+`log` to page through everything printed since boot, `faults` for DMA the
+IOMMU blocked, `usb`, `pci`, `acpi`, `mem`, `disks`, `disktest`, `net`,
+`beep`, `crash` to test the crash report, `reboot` and `poweroff`, which
+shut NVMe controllers down cleanly first). Only
 `disktest` writes to storage: on each Linox volume partition it writes a block,
 reads it back, restores it, and checks that a write past the partition is
 refused; disks without one are not written. `make test-hardware-profile` boots a QEMU machine with an
@@ -341,8 +362,11 @@ AMD IOMMU, an e1000e on a DHCP network, an HD Audio codec, a USB audio device,
 NVMe, AHCI, two xHCI controllers (one keyboard behind a hub), and a SATA disk
 without virtio, types a command on an
 emulated USB keyboard, records the test tones from HD Audio and USB audio through QEMU's WAV output,
-runs `disktest` on the NVMe disk and checks the disk image is unchanged afterwards, and
-checks the framebuffer console with no serial port.
+runs `disktest` on the NVMe disk and checks the disk image is unchanged afterwards,
+pages the log, checks that the crash test's report names the fault and the
+bring-up stage, and checks the framebuffer console at 2560x1440 with no
+serial port. Its AMD IOMMU has interrupt remapping and x2APIC support, as
+Raphael's does.
 
 Bringing up a specific machine starts with `sudo tools/hardware/probe.sh`, run
 under an existing Linux installation on that machine, which archives the

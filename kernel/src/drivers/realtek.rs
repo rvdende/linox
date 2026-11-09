@@ -1,11 +1,30 @@
 //! Realtek RTL8125 and RTL8168-family Ethernet controllers.
 //!
 //! `probe` only reads registers: the MAC address, the chip identifier, and
-//! the PHY link state. `Controller` resets an RTL8125 or RTL8126 and moves
-//! frames through polled descriptor rings, following the register layout of
-//! Linux's r8169 driver. It skips the chip-specific tuning that driver
-//! applies and relies on the link firmware negotiated; it has not been run
-//! on hardware yet.
+//! the PHY link state. `Controller` takes an RTL8125 or RTL8126 from
+//! whatever state firmware or the previous OS left it in, resets it, powers
+//! its PHY and restarts autonegotiation, and moves frames through polled
+//! descriptor rings. Realtek publishes no datasheet for these chips; the
+//! register layout and the bring-up steps follow the behaviour of Linux's
+//! r8169 driver (read for reference, not copied):
+//!
+//! 1. Gate the receive path (MISC.RXDV_GATED_EN), ask the MAC to stop
+//!    (ChipCmd.StopReq) and wait for its FIFOs to drain: a UEFI network
+//!    driver or the previous OS may have left DMA running into memory that
+//!    is now ours, and Linux's own shutdown leaves the gate closed.
+//! 2. Turn off Tx/Rx, take the MAC from the out-of-band management
+//!    controller (clear MCU.NOW_IS_OOB and MAC OCP 0xe8de bit 14) and wait
+//!    for the link-list FIFO to report ready.
+//! 3. Reset the MAC (ChipCmd.CmdReset), select the classic descriptor format
+//!    (MAC OCP 0xeb58 bit 0 clear), program the rings, open the gate, and
+//!    enable Tx/Rx.
+//! 4. Power up the PHY and restart autonegotiation through the PHY OCP
+//!    window (standard MII registers at OCP 0xa400 + 2 * register), then
+//!    wait for a link. The PHY firmware patch Linux loads (rtl8125b-2.fw)
+//!    fixes errata only; the link comes up without it.
+//!
+//! The chip-specific tuning r8169 applies (EEE, PCIe PHY tables, power
+//! saving) is skipped. It has not run on hardware yet.
 
 use core::ptr::{addr_of, addr_of_mut};
 
@@ -29,6 +48,37 @@ const TRANSMIT_POLL_8125: usize = 0x90;
 const RECEIVE_MAX_SIZE: usize = 0xda;
 const RECEIVE_RING_LOW: usize = 0xe4;
 const RECEIVE_RING_HIGH: usize = 0xe8;
+/// MAC OCP register window: write (reg << 15) | data with bit 31 set, or
+/// write reg << 15 and read the data back.
+const MAC_OCP: usize = 0xb0;
+/// PHY OCP register window: as MAC_OCP, with bit 31 as the busy/ready flag.
+const PHY_OCP: usize = 0xb8;
+const OCP_FLAG: u32 = 1 << 31;
+const MCU: usize = 0xd3;
+const MCU_NOW_IS_OOB: u8 = 1 << 7;
+const MCU_TRANSMIT_EMPTY: u8 = 1 << 5;
+const MCU_RECEIVE_EMPTY: u8 = 1 << 4;
+const MCU_LINK_LIST_READY: u8 = 1 << 1;
+const INTERRUPT_MITIGATE: usize = 0xe2;
+const MISC: usize = 0xf0;
+const MISC_RXDV_GATED: u32 = 1 << 19;
+const COMMAND_STOP_REQUEST: u8 = 0x80;
+/// MAC OCP registers r8169 touches on the RTL8125 family.
+const OCP_OOB_CONTROL: u32 = 0xe8de;
+const OCP_DESCRIPTOR_FORMAT: u32 = 0xeb58;
+/// The PHY's standard MII registers in PHY OCP space.
+const OCP_STANDARD_PHY: u32 = 0xa400;
+const MII_CONTROL: u32 = 0;
+const MII_CONTROL_POWER_DOWN: u16 = 1 << 11;
+const MII_CONTROL_AUTONEGOTIATE: u16 = 1 << 12;
+const MII_CONTROL_RESTART: u16 = 1 << 9;
+/// The receive-config bit r8169 sets from the RTL8125B on.
+const RECEIVE_PAUSE_SLOT: u32 = 1 << 11;
+/// TxConfig chip identifiers (bits 30:20 masked with 0x7cf) this driver
+/// knows: RTL8125A, RTL8125B, and the RTL8126A variants.
+const CHIP_8125A: u32 = 0x609;
+const CHIP_8125B: u32 = 0x641;
+const CHIPS_8126A: [u32; 2] = [0x649, 0x64a];
 const COMMAND_RESET: u8 = 0x10;
 const COMMAND_RECEIVE: u8 = 0x08;
 const COMMAND_TRANSMIT: u8 = 0x04;
@@ -47,6 +97,8 @@ const PHY_10_MBPS: u16 = 0x0004;
 const PHY_100_MBPS: u16 = 0x0008;
 const PHY_1000_MBPS: u16 = 0x0010;
 const PHY_2500_MBPS: u16 = 0x0400;
+/// The RTL8126's 5 Gb/s bit.
+const PHY_5000_MBPS: u16 = 0x1000;
 const DESCRIPTOR_OWNED: u32 = 1 << 31;
 const DESCRIPTOR_RING_END: u32 = 1 << 30;
 const DESCRIPTOR_FIRST: u32 = 1 << 29;
@@ -56,7 +108,8 @@ const RECEIVE_DESCRIPTORS: usize = 32;
 const TRANSMIT_DESCRIPTORS: usize = 8;
 const BUFFER_SIZE: usize = 2048;
 const TRANSMIT_TIMEOUT_MS: u64 = 100;
-const LINK_TIMEOUT_MS: u64 = 5000;
+/// 2.5GBASE-T negotiation can take about three seconds.
+const LINK_TIMEOUT_MS: u64 = 6000;
 
 static mut RECEIVE_RING: DmaPage = DmaPage::ZERO;
 static mut TRANSMIT_RING: DmaPage = DmaPage::ZERO;
@@ -120,10 +173,22 @@ pub(crate) unsafe fn probe(function: Function) -> Option<Report> {
     })
 }
 
+/// The name of a chip identifier this driver knows.
+pub(crate) fn chip_name(chip: u32) -> Option<&'static str> {
+    match chip {
+        CHIP_8125A => Some("RTL8125A"),
+        CHIP_8125B => Some("RTL8125B"),
+        chip if CHIPS_8126A.contains(&chip) => Some("RTL8126A"),
+        _ => None,
+    }
+}
+
 /// Decodes PHYstatus into a link speed and duplex.
 fn link(base: usize) -> (Option<u32>, bool) {
     let phy = read16(base, PHY_STATUS);
-    let speed = if phy & PHY_2500_MBPS != 0 {
+    let speed = if phy & PHY_5000_MBPS != 0 {
+        5000
+    } else if phy & PHY_2500_MBPS != 0 {
         2500
     } else if phy & PHY_1000_MBPS != 0 {
         1000
@@ -146,6 +211,21 @@ pub(crate) struct Controller {
     mac: [u8; 6],
     next_receive: usize,
     next_transmit: usize,
+    /// Set when a transmission timed out: the descriptor ring is out of
+    /// step until the controller is opened again.
+    broken: bool,
+}
+
+/// Why opening a controller failed.
+// The fields are reported through Debug, which dead-code analysis ignores.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Error {
+    NoMemoryBar,
+    /// The registers read all ones: the function is not decoding.
+    NotResponding,
+    UnknownChip(u32),
+    ResetTimedOut,
 }
 
 impl Controller {
@@ -157,20 +237,53 @@ impl Controller {
     /// `function` must satisfy `can_transfer`, nothing else may drive it,
     /// and its registers and this driver's DMA pages must be identity
     /// mapped. Only one controller may be open at a time.
-    pub(crate) unsafe fn open(function: Function) -> Option<Self> {
-        let base = function.memory_bar(2)? as usize;
-        function.enable_memory_and_bus_master();
+    pub(crate) unsafe fn open(function: Function) -> Result<Self, Error> {
+        let base = function.memory_bar(2).ok_or(Error::NoMemoryBar)? as usize;
+        // Registers first, bus mastering only once the chip is quiet.
+        function.enable_memory();
+        let transmit = read32(base, TRANSMIT_CONFIG);
+        if transmit == u32::MAX {
+            return Err(Error::NotResponding);
+        }
+        let chip = (transmit >> 20) & 0x7cf;
+        if chip_name(chip).is_none() {
+            return Err(Error::UnknownChip(chip));
+        }
         let mut mac = [0_u8; 6];
         for (index, value) in mac.iter_mut().enumerate() {
             *value = read8(base, MAC_ADDRESS + index);
         }
         write32(base, INTERRUPT_MASK_8125, 0);
+        // Step 1: gate receive and drain whatever was running.
+        write32(base, MISC, read32(base, MISC) | MISC_RXDV_GATED);
+        super::delay_ms(2);
+        write8(
+            base,
+            CHIP_COMMAND,
+            read8(base, CHIP_COMMAND) | COMMAND_STOP_REQUEST,
+        );
+        let empty = MCU_TRANSMIT_EMPTY | MCU_RECEIVE_EMPTY;
+        let _ = wait_until_ms(50, || read8(base, MCU) & empty == empty);
+        let _ = wait_until_ms(50, || read16(base, INTERRUPT_MITIGATE) & 0x0103 == 0x0103);
+        // Step 2: take the MAC from the out-of-band controller.
+        write8(
+            base,
+            CHIP_COMMAND,
+            read8(base, CHIP_COMMAND) & !(COMMAND_TRANSMIT | COMMAND_RECEIVE),
+        );
+        super::delay_ms(1);
+        write8(base, MCU, read8(base, MCU) & !MCU_NOW_IS_OOB);
+        mac_ocp_modify(base, OCP_OOB_CONTROL, 1 << 14, 0);
+        let _ = wait_until_ms(50, || read8(base, MCU) & MCU_LINK_LIST_READY != 0);
+        // Step 3: reset, then set up the MAC.
         write8(base, CHIP_COMMAND, COMMAND_RESET);
         if !wait_until_ms(100, || read8(base, CHIP_COMMAND) & COMMAND_RESET == 0) {
-            return None;
+            return Err(Error::ResetTimedOut);
         }
+        function.enable_memory_and_bus_master();
         write32(base, INTERRUPT_MASK_8125, 0);
         write32(base, INTERRUPT_STATUS_8125, u32::MAX);
+        mac_ocp_modify(base, OCP_DESCRIPTOR_FORMAT, 1 << 0, 0);
 
         let receive_ring = addr_of_mut!(RECEIVE_RING).cast::<u32>();
         for index in 0..RECEIVE_DESCRIPTORS {
@@ -202,22 +315,39 @@ impl Controller {
         write32(base, RECEIVE_RING_LOW, receive_ring as u32);
         write16(base, RECEIVE_MAX_SIZE, BUFFER_SIZE as u16);
         write8(base, CONFIG_LOCK, CONFIG_LOCKED);
+        write32(base, MISC, read32(base, MISC) & !MISC_RXDV_GATED);
         write8(base, CHIP_COMMAND, COMMAND_TRANSMIT | COMMAND_RECEIVE);
+        let pause = if chip == CHIP_8125A {
+            0
+        } else {
+            RECEIVE_PAUSE_SLOT
+        };
         write32(
             base,
             RECEIVE_CONFIG,
-            RECEIVE_DEFAULTS_8125 | ACCEPT_BROADCAST | ACCEPT_MULTICAST | ACCEPT_MY_ADDRESS,
+            RECEIVE_DEFAULTS_8125 | pause | ACCEPT_BROADCAST | ACCEPT_MULTICAST | ACCEPT_MY_ADDRESS,
         );
         write32(base, MULTICAST_FILTER, u32::MAX);
         write32(base, MULTICAST_FILTER + 4, u32::MAX);
         write32(base, TRANSMIT_CONFIG, TRANSMIT_DEFAULTS_8125);
-        // The reset restarts autonegotiation.
+        // Step 4: the MAC reset leaves the PHY as it was, possibly powered
+        // down by the previous driver. Power it up and renegotiate.
+        if let Some(control) = phy_read(base, MII_CONTROL) {
+            phy_write(
+                base,
+                MII_CONTROL,
+                control & !MII_CONTROL_POWER_DOWN | MII_CONTROL_AUTONEGOTIATE | MII_CONTROL_RESTART,
+            );
+        }
+        // Autonegotiation drops the link first; wait for it to come back.
+        super::delay_ms(100);
         let _ = wait_until_ms(LINK_TIMEOUT_MS, || link(base).0.is_some());
-        Some(Self {
+        Ok(Self {
             base,
             mac,
             next_receive: 0,
             next_transmit: 0,
+            broken: false,
         })
     }
 
@@ -233,7 +363,7 @@ impl Nic for Controller {
     }
 
     fn send(&mut self, frame: &[u8]) -> bool {
-        if frame.len() > FRAME_LIMIT {
+        if frame.len() > FRAME_LIMIT || self.broken {
             return false;
         }
         let index = self.next_transmit;
@@ -264,10 +394,16 @@ impl Nic for Controller {
         self.next_transmit = (index + 1) % TRANSMIT_DESCRIPTORS;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         write16(self.base, TRANSMIT_POLL_8125, 1);
-        wait_until_ms(TRANSMIT_TIMEOUT_MS, || {
+        let sent = wait_until_ms(TRANSMIT_TIMEOUT_MS, || {
             // SAFETY: the controller clears the owned bit once it is done.
             unsafe { ring.add(index * 4).read_volatile() & DESCRIPTOR_OWNED == 0 }
-        })
+        });
+        if !sent {
+            // The chip still owns the descriptor; later sends would find
+            // the ring out of step.
+            self.broken = true;
+        }
+        sent
     }
 
     fn receive(&mut self, buffer: &mut [u8; FRAME_LIMIT]) -> Option<usize> {
@@ -347,6 +483,35 @@ fn transmit_buffer(index: usize) -> *mut u8 {
             .cast::<u8>()
             .add(index * BUFFER_SIZE)
     }
+}
+
+/// Reads MAC OCP register `register` (an even address below 0x10000).
+fn mac_ocp_read(base: usize, register: u32) -> u16 {
+    write32(base, MAC_OCP, register << 15);
+    read32(base, MAC_OCP) as u16
+}
+
+fn mac_ocp_modify(base: usize, register: u32, clear: u16, set: u16) {
+    let value = mac_ocp_read(base, register) & !clear | set;
+    write32(base, MAC_OCP, OCP_FLAG | register << 15 | u32::from(value));
+}
+
+/// Reads standard PHY register `register` through the PHY OCP window; the
+/// flag rises when the data is valid.
+fn phy_read(base: usize, register: u32) -> Option<u16> {
+    write32(base, PHY_OCP, (OCP_STANDARD_PHY + register * 2) << 15);
+    wait_until_ms(10, || read32(base, PHY_OCP) & OCP_FLAG != 0)
+        .then(|| read32(base, PHY_OCP) as u16)
+}
+
+/// Writes standard PHY register `register`; the flag falls when done.
+fn phy_write(base: usize, register: u32, value: u16) -> bool {
+    write32(
+        base,
+        PHY_OCP,
+        OCP_FLAG | (OCP_STANDARD_PHY + register * 2) << 15 | u32::from(value),
+    );
+    wait_until_ms(10, || read32(base, PHY_OCP) & OCP_FLAG == 0)
 }
 
 fn read8(base: usize, offset: usize) -> u8 {

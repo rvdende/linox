@@ -4,16 +4,31 @@
 //! network behind an Intel IOMMU). When they are absent, as on a physical PC,
 //! the kernel enters this mode instead of failing. It runs on the firmware page
 //! tables with interrupts disabled, reports the platform on the console, and
-//! exercises the physical-hardware drivers in `crate::drivers`. Nothing here
-//! writes to storage.
+//! exercises the physical-hardware drivers in `crate::drivers`. Only the
+//! shell's `disktest` writes to storage, and only inside partitions of the
+//! Linox volume type, restoring what it wrote.
+//!
+//! On a physical PC the screen is usually the only output, so bring-up is
+//! built to be photographed: each step is named as it starts (and a crash
+//! or panic names the step it struck in, see [`trap`]), waits on hardware
+//! are bounded by a calibrated clock, slow steps report how long they took,
+//! and the report ends with a summary that fits on one screen. Everything
+//! printed is kept in the kernel log, which the shell's `log` command pages
+//! through.
+
+mod log;
+mod trap;
 
 use core::ptr::read_unaligned;
 
 use crate::drivers::net::{self, Nic};
 use crate::drivers::{
-    ahci, amd_iommu, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
+    ahci, amd_iommu, clock, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
 };
 use crate::{BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
+
+pub use trap::report_panic;
+pub(crate) use trap::{firmware_maps, set_stage};
 
 const EFI_LOADER_CODE: u32 = 1;
 const EFI_LOADER_DATA: u32 = 2;
@@ -26,8 +41,24 @@ const EFI_RESET_COLD: u32 = 0;
 const EFI_RESET_SHUTDOWN: u32 = 2;
 const MAX_LISTED_PARTITIONS: u32 = 128;
 
+/// What the report found, repeated at its end so that one photo of the
+/// screen shows the outcome of every step.
+#[derive(Default)]
+struct Summary {
+    clock: Option<(&'static str, u64)>,
+    iommus: usize,
+    remapping: usize,
+    nvme: (usize, usize),
+    xhci: (usize, usize),
+    keyboards: usize,
+    pointers: usize,
+}
+
 /// Reports the platform and runs the hardware drivers, then halts.
 pub(crate) fn run(boot_info: &BootInfo) -> ! {
+    trap::install();
+    set_stage("bring-up start");
+    crate::framebuffer::set_jump_scroll(true);
     say!("\nlinox: QEMU reference devices not found; entering hardware bring-up mode\n");
     say!(
         "linox: serial console {}\n",
@@ -47,14 +78,39 @@ pub(crate) fn run(boot_info: &BootInfo) -> ! {
             framebuffer.base
         );
     }
-    report_memory(boot_info);
-    let iommus = report_acpi(boot_info.acpi_rsdp as u64);
-    report_pci();
-    let mut remapping = enable_dma_remapping(&iommus);
-    report_network();
-    report_audio();
-    report_disks(&mut remapping);
-    let keyboards = open_keyboards();
+    let rsdp = boot_info.acpi_rsdp as u64;
+    let mut summary = Summary::default();
+    step("clock calibration", || {
+        summary.clock = calibrate_clock(rsdp);
+    });
+    step("memory map", || report_memory(boot_info));
+    let ivrs = step("ACPI tables", || report_acpi(rsdp));
+    summary.iommus = ivrs
+        .as_ref()
+        .map_or(0, |ivrs| ivrs.units.iter().flatten().count());
+    step("PCI enumeration", report_pci);
+    let mut remapping = step("AMD-Vi DMA remapping", || match &ivrs {
+        Some(ivrs) => enable_dma_remapping(ivrs),
+        None => [const { None }; MAX_IOMMUS],
+    });
+    summary.remapping = remapping.iter().flatten().count();
+    step("network", report_network);
+    step("HD Audio", report_audio);
+    summary.nvme = step("disks", || report_disks(&mut remapping));
+    let keyboards = step("USB (xHCI)", open_keyboards);
+    for controller in keyboards.iter().flatten() {
+        summary.xhci.0 += 1;
+        for input in controller.inputs() {
+            match input.kind {
+                xhci::InputKind::Keyboard => summary.keyboards += 1,
+                _ => summary.pointers += 1,
+            }
+        }
+    }
+    summary.xhci.1 = functions(pci::Identity::is_xhci).1;
+    report_faults(&mut remapping, false);
+    set_stage("summary");
+    report_summary(&summary);
 
     if keyboards
         .iter()
@@ -65,7 +121,164 @@ pub(crate) fn run(boot_info: &BootInfo) -> ! {
         say!("linox: no keyboard or serial input; halted\n");
         halt();
     }
-    shell(boot_info, keyboards)
+    shell(boot_info, keyboards, remapping)
+}
+
+/// Runs one bring-up step under its stage name, and reports how long it
+/// took when that was long enough to notice.
+fn step<T>(name: &'static str, body: impl FnOnce() -> T) -> T {
+    set_stage(name);
+    let started = crate::arch::x86_64::timer::timestamp_counter();
+    let result = body();
+    let elapsed = clock::elapsed_ms(started);
+    if elapsed >= 1000 {
+        say!("linox: {} took {} ms\n", name, elapsed);
+    }
+    result
+}
+
+fn report_summary(summary: &Summary) {
+    say!("\nlinox: ---- bring-up summary ----\n");
+    match summary.clock {
+        Some((source, hz)) => say!(
+            "linox: clock: TSC {}.{:03} MHz, calibrated against the {}\n",
+            hz / 1_000_000,
+            hz / 1000 % 1000,
+            source
+        ),
+        None => say!("linox: clock: NOT calibrated; timeouts assume a 5 GHz TSC\n"),
+    }
+    say!(
+        "linox: AMD-Vi: {} unit(s) in IVRS, remapping on {}\n",
+        summary.iommus,
+        summary.remapping
+    );
+    say!(
+        "linox: NVMe: {} of {} controller(s) opened\n",
+        summary.nvme.0,
+        summary.nvme.1
+    );
+    say!(
+        "linox: xHCI: {} of {} controller(s) running, {} keyboard(s), {} mouse/tablet(s)\n",
+        summary.xhci.0,
+        summary.xhci.1,
+        summary.keyboards,
+        summary.pointers
+    );
+    say!("linox: (type 'log' to page back through the whole report)\n");
+}
+
+/// Calibrates the timestamp counter against the ACPI PM timer or the HPET,
+/// whichever the firmware describes first.
+fn calibrate_clock(rsdp: u64) -> Option<(&'static str, u64)> {
+    let mut references = [None; 2];
+    for_each_table(rsdp, |signature, table| {
+        // SAFETY: the firmware identity map covers its ACPI tables; reads
+        // stay inside the length the table records.
+        unsafe {
+            let length = u64::from(read_unaligned((table + 4) as *const u32));
+            match signature {
+                // FADT (ACPI 6.5 section 5.2.9): PM_TMR_BLK at 76, PM_TMR_LEN
+                // at 91, flags at 112 (TMR_VAL_EXT is bit 8, HW_REDUCED_ACPI
+                // bit 20), X_PM_TMR_BLK (a generic address) at 208.
+                b"FACP" if length >= 116 => {
+                    let flags = read_unaligned((table + 112) as *const u32);
+                    let wide = flags & 1 << 8 != 0;
+                    if flags & 1 << 20 != 0 {
+                        return;
+                    }
+                    let extended = if length >= 220 {
+                        let space = read_unaligned((table + 208) as *const u8);
+                        let address = read_unaligned((table + 212) as *const u64);
+                        match (space, address) {
+                            (_, 0) => None,
+                            (0, address) => Some(clock::Reference::PmTimerMemory { address, wide }),
+                            (1, port) if port <= 0xffff => Some(clock::Reference::PmTimerPort {
+                                port: port as u16,
+                                wide,
+                            }),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let port = read_unaligned((table + 76) as *const u32);
+                    let length = read_unaligned((table + 91) as *const u8);
+                    references[0] = extended.or_else(|| {
+                        (port != 0 && port <= 0xffff && length == 4).then_some(
+                            clock::Reference::PmTimerPort {
+                                port: port as u16,
+                                wide,
+                            },
+                        )
+                    });
+                }
+                // HPET description table: the block's generic address at 40.
+                b"HPET" if length >= 56 => {
+                    let space = read_unaligned((table + 40) as *const u8);
+                    let address = read_unaligned((table + 44) as *const u64);
+                    if space == 0 && address != 0 {
+                        references[1] = Some(clock::Reference::Hpet { address });
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    for reference in references.into_iter().flatten() {
+        // SAFETY: the reference comes from the firmware's FADT or HPET table.
+        match unsafe { clock::calibrate(reference) } {
+            Some(hz) => {
+                say!(
+                    "linox: TSC runs at {}.{:03} MHz (measured against the {})\n",
+                    hz / 1_000_000,
+                    hz / 1000 % 1000,
+                    reference.name()
+                );
+                return Some((reference.name(), hz));
+            }
+            None => say!(
+                "linox: the {} did not count; trying the next clock\n",
+                reference.name()
+            ),
+        }
+    }
+    say!("linox: no ACPI timer to calibrate against; timeouts assume a 5 GHz TSC\n");
+    None
+}
+
+/// Calls `visit` with the signature and address of every table the root
+/// table lists.
+fn for_each_table(rsdp: u64, mut visit: impl FnMut(&[u8; 4], u64)) {
+    // SAFETY: the firmware identity map covers its ACPI tables; every read is
+    // bounded by the table lengths the firmware recorded.
+    unsafe {
+        if rsdp == 0 || read_bytes::<8>(rsdp) != *b"RSD PTR " {
+            return;
+        }
+        let revision = read_unaligned((rsdp + 15) as *const u8);
+        let (root, entry_size) = if revision >= 2 {
+            (read_unaligned((rsdp + 24) as *const u64), 8)
+        } else {
+            (u64::from(read_unaligned((rsdp + 16) as *const u32)), 4)
+        };
+        if root == 0 {
+            return;
+        }
+        let length = u64::from(read_unaligned((root + 4) as *const u32));
+        let mut offset = 36;
+        while offset + entry_size <= length {
+            let table = if entry_size == 8 {
+                read_unaligned((root + offset) as *const u64)
+            } else {
+                u64::from(read_unaligned((root + offset) as *const u32))
+            };
+            offset += entry_size;
+            if table != 0 {
+                visit(&read_bytes::<4>(table), table);
+            }
+        }
+    }
 }
 
 fn halt() -> ! {
@@ -130,6 +343,7 @@ fn report_network() {
         if e1000e::is_supported(&device) {
             // SAFETY: bring-up is the only driver of this controller, and the
             // firmware identity map covers its registers and DMA pages.
+            set_stage("network: Intel 82574");
             let Some(mut nic) = (unsafe { e1000e::Controller::open(address) }) else {
                 say!("Intel 82574 reset failed\n");
                 return;
@@ -157,9 +371,10 @@ fn report_network() {
             return;
         };
         say!(
-            "Realtek {:04x} chip {:#x}, MAC {}, ",
+            "Realtek {:04x} chip {:#x} ({}), MAC {}, ",
             device.device,
             report.chip,
+            realtek::chip_name(report.chip).unwrap_or("unknown chip"),
             net::Mac(report.mac)
         );
         match report.speed {
@@ -168,20 +383,26 @@ fn report_network() {
                 speed,
                 if report.full_duplex { "full" } else { "half" }
             ),
-            None => say!("no link\n"),
+            None => say!("no link yet\n"),
         }
-        if !realtek::can_transfer(&device) || report.speed.is_none() {
+        if !realtek::can_transfer(&device) {
             return;
         }
+        // The previous driver may have powered the PHY down, so open the
+        // controller (which powers it up and renegotiates) with or without
+        // a link now.
+        set_stage("network: Realtek reset and link");
         // SAFETY: as for the 82574 above.
         match unsafe { realtek::Controller::open(address) } {
-            Some(mut nic) => {
-                if nic.link_speed().is_none() {
-                    say!("linox:   link did not return after reset\n");
+            Ok(mut nic) => match nic.link_speed() {
+                Some(speed) => {
+                    say!("linox:   link up at {} Mb/s after reset\n", speed);
+                    set_stage("network: Realtek DHCP");
+                    report_dhcp(&mut nic, transaction);
                 }
-                report_dhcp(&mut nic, transaction);
-            }
-            None => say!("linox:   reset failed\n"),
+                None => say!("linox:   no link after reset (is a cable plugged in?)\n"),
+            },
+            Err(error) => say!("linox:   bring-up failed: {:?}\n", error),
         }
     });
 }
@@ -295,10 +516,14 @@ fn report_dhcp(nic: &mut impl Nic, transaction: u32) {
     }
 }
 
-fn report_disks(remapping: &mut Remapping) {
-    let (controllers, _) = functions(pci::Identity::is_nvme);
+/// Reports every disk; returns how many NVMe controllers opened, of how many.
+fn report_disks(remapping: &mut Remapping) -> (usize, usize) {
+    let (controllers, nvme_count) = functions(pci::Identity::is_nvme);
+    let mut nvme_opened = 0;
     for function in controllers.iter().flatten() {
-        probe_nvme(*function, remapping);
+        if probe_nvme(*function, remapping) {
+            nvme_opened += 1;
+        }
     }
     let (controllers, _) = functions(pci::Identity::is_ahci);
     let mut slot = 0;
@@ -353,6 +578,7 @@ fn report_disks(remapping: &mut Remapping) {
             }
         }
     }
+    (nvme_opened, nvme_count)
 }
 
 /// Every USB controller with at least one input device or speaker.
@@ -408,17 +634,17 @@ fn open_keyboards() -> UsbKeyboards {
     opened
 }
 
-fn shell(boot_info: &BootInfo, mut usb: UsbKeyboards) -> ! {
-    say!("\nLinox bring-up shell. Type 'help' for commands.\n");
-    let mut decoders: [[keyboard::Keyboard; xhci::MAX_INPUTS]; MAX_CONTROLLERS] =
-        core::array::from_fn(|_| core::array::from_fn(|_| keyboard::Keyboard::new()));
-    let mut line = [0_u8; LINE_CAPACITY];
-    let mut length = 0;
-    say!("bring-up> ");
-    loop {
-        let mut pressed = [0_u8; 16];
+/// The shell's keyboards: every USB keyboard, and serial when present.
+struct Input {
+    usb: UsbKeyboards,
+    decoders: [[keyboard::Keyboard; xhci::MAX_INPUTS]; MAX_CONTROLLERS],
+}
+
+impl Input {
+    /// Collects the bytes typed since the last call into `pressed`.
+    fn poll(&mut self, pressed: &mut [u8; 16]) -> usize {
         let mut count = 0;
-        for (controller, decoders) in usb.iter_mut().zip(decoders.iter_mut()) {
+        for (controller, decoders) in self.usb.iter_mut().zip(self.decoders.iter_mut()) {
             let Some(report) = controller.as_mut().and_then(xhci::Controller::poll) else {
                 continue;
             };
@@ -434,22 +660,53 @@ fn shell(boot_info: &BootInfo, mut usb: UsbKeyboards) -> ! {
                 }
             });
         }
-        if crate::serial_input_ready() {
+        if count < pressed.len() && crate::serial_input_ready() {
             pressed[count] = crate::serial_read_byte_blocking();
             count += 1;
         }
+        count
+    }
+
+    /// Waits for one key.
+    fn key(&mut self) -> u8 {
+        let mut pressed = [0_u8; 16];
+        loop {
+            if self.poll(&mut pressed) > 0 {
+                return pressed[0];
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn shell(boot_info: &BootInfo, usb: UsbKeyboards, mut remapping: Remapping) -> ! {
+    set_stage("bring-up shell");
+    say!("\nLinox bring-up shell. Type 'help' for commands.\n");
+    let mut input = Input {
+        usb,
+        decoders: core::array::from_fn(|_| core::array::from_fn(|_| keyboard::Keyboard::new())),
+    };
+    let mut line = [0_u8; LINE_CAPACITY];
+    let mut length = 0;
+    say!("bring-up> ");
+    loop {
+        let mut pressed = [0_u8; 16];
+        let count = input.poll(&mut pressed);
         for byte in pressed[..count].iter().copied() {
             match byte {
                 b'\r' | b'\n' => {
+                    // The prompt is in the log already; add what was typed.
+                    crate::kernel_log::record(&line[..length]);
                     say!("\n");
-                    run_command(boot_info, &mut usb, &line[..length]);
+                    run_command(boot_info, &mut input, &mut remapping, &line[..length]);
                     length = 0;
+                    set_stage("bring-up shell");
                     say!("bring-up> ");
                 }
                 0x08 | 0x7f => {
                     if length > 0 {
                         length -= 1;
-                        say!("\x08 \x08");
+                        crate::serial_write_raw(b"\x08 \x08");
                     }
                 }
                 0x03 => {
@@ -457,7 +714,8 @@ fn shell(boot_info: &BootInfo, mut usb: UsbKeyboards) -> ! {
                     say!("^C\nbring-up> ");
                 }
                 0x0c => {
-                    say!("\x1b[2J\x1b[Hbring-up> ");
+                    crate::serial_write_raw(b"\x1b[2J\x1b[H");
+                    say!("bring-up> ");
                     length = 0;
                 }
                 0x20..=0x7e if length < LINE_CAPACITY => {
@@ -471,17 +729,27 @@ fn shell(boot_info: &BootInfo, mut usb: UsbKeyboards) -> ! {
     }
 }
 
-fn run_command(boot_info: &BootInfo, usb: &mut UsbKeyboards, line: &[u8]) {
+const HELP: &str = "\
+Commands:
+  log [end]   page through everything printed since boot (Enter: next, b: back, q: quit)
+  pci acpi mem disks net usb   repeat one report
+  faults      AMD-Vi DMA faults logged since the last look
+  disktest    write, verify and restore one block of each Linox volume partition
+  beep        play a test tone on every HD Audio codec and USB speaker
+  crash [panic]   test the crash report: an invalid-opcode fault, or a Rust panic
+  clear  echo TEXT  reboot  poweroff
+";
+
+fn run_command(boot_info: &BootInfo, input: &mut Input, remapping: &mut Remapping, line: &[u8]) {
     let text = core::str::from_utf8(line).unwrap_or("").trim();
     let (command, argument) = text.split_once(' ').unwrap_or((text, ""));
     match command {
         "" => {}
-        "help" => say!(
-            "Commands: help, pci, acpi, mem, disks, disktest, net, beep, clear, echo TEXT, reboot, poweroff\n"
-        ),
+        "help" => say!("{}", HELP),
         "beep" => {
+            set_stage("shell: beep");
             play_test_tones();
-            for controller in usb.iter_mut().flatten() {
+            for controller in input.usb.iter_mut().flatten() {
                 for index in 0..xhci::MAX_SPEAKERS {
                     let Some((vendor, product, name)) = controller
                         .speakers()
@@ -502,23 +770,87 @@ fn run_command(boot_info: &BootInfo, usb: &mut UsbKeyboards, line: &[u8]) {
                 }
             }
         }
+        "log" => log::page(|| input.key(), argument.trim() == "end"),
         "pci" => report_pci(),
-        "net" => report_network(),
+        "net" => {
+            set_stage("shell: net");
+            report_network();
+        }
         "acpi" => {
             report_acpi(boot_info.acpi_rsdp as u64);
         }
         "mem" => report_memory(boot_info),
-        "disks" => report_disks(&mut [const { None }; MAX_IOMMUS]),
-        "disktest" => test_disk_writes(),
-        "clear" => say!("\x1b[2J\x1b[H"),
+        "disks" => {
+            set_stage("shell: disks");
+            report_disks(&mut [const { None }; MAX_IOMMUS]);
+        }
+        "usb" => report_usb(&input.usb),
+        "faults" => report_faults(remapping, true),
+        "disktest" => {
+            set_stage("shell: disktest");
+            test_disk_writes();
+        }
+        "crash" => {
+            set_stage("shell: crash test");
+            if argument.trim() == "panic" {
+                panic!("crash test requested in the bring-up shell");
+            }
+            // SAFETY: ud2 raises #UD, which the bring-up exception table
+            // reports; the handler never returns.
+            unsafe { core::arch::asm!("ud2", options(nomem, nostack, noreturn)) };
+        }
+        "clear" => crate::serial_write_raw(b"\x1b[2J\x1b[H"),
         "echo" => say!("{}\n", argument),
         "reboot" => reset(boot_info, EFI_RESET_COLD),
         "poweroff" => reset(boot_info, EFI_RESET_SHUTDOWN),
-        _ => say!("unknown command: {}\n", command),
+        _ => say!("unknown command: {} (try 'help')\n", command),
+    }
+}
+
+/// Lists the USB input devices and speakers each running controller found.
+fn report_usb(usb: &UsbKeyboards) {
+    for controller in usb.iter().flatten() {
+        for input in controller.inputs() {
+            say!(
+                "linox: {} {:04x}:{:04x} on port {}\n",
+                match input.kind {
+                    xhci::InputKind::Keyboard => "keyboard",
+                    xhci::InputKind::Mouse => "mouse",
+                    xhci::InputKind::Tablet => "tablet",
+                },
+                input.vendor,
+                input.product,
+                input.location
+            );
+        }
+        for speaker in controller.speakers() {
+            say!(
+                "linox: USB speaker {:04x}:{:04x} on port {}: {}\n",
+                speaker.vendor,
+                speaker.product,
+                speaker.location,
+                speaker.name
+            );
+        }
     }
 }
 
 fn reset(boot_info: &BootInfo, kind: u32) {
+    set_stage("shutting down NVMe before reset");
+    let (controllers, _) = functions(pci::Identity::is_nvme);
+    for function in controllers.iter().flatten() {
+        // SAFETY: bring-up is the only driver of its NVMe controllers, and
+        // the firmware identity map covers their registers.
+        if unsafe { nvme::shutdown(*function) } {
+            say!(
+                "linox: NVMe {:02x}:{:02x}.{} shut down\n",
+                function.bus,
+                function.device,
+                function.function
+            );
+        }
+    }
+    set_stage("UEFI ResetSystem");
     say!("linox: resetting through UEFI runtime services\n");
     // SAFETY: bring-up never calls SetVirtualAddressMap, so the runtime
     // services remain callable through the firmware identity map.
@@ -561,66 +893,108 @@ fn report_memory(boot_info: &BootInfo) {
     );
 }
 
-/// Reports the ACPI tables and returns the AMD-Vi units IVRS lists.
-fn report_acpi(rsdp: u64) -> [u64; MAX_IOMMUS] {
-    let mut iommus = [0_u64; MAX_IOMMUS];
-    // SAFETY: the firmware identity map covers its ACPI tables; every read is
-    // bounded by the table lengths the firmware recorded.
-    unsafe {
-        if rsdp == 0 || read_bytes::<8>(rsdp) != *b"RSD PTR " {
-            say!("linox: ACPI root pointer missing\n");
-            return iommus;
-        }
-        let revision = read_unaligned((rsdp + 15) as *const u8);
-        let (root, entry_size) = if revision >= 2 {
-            (read_unaligned((rsdp + 24) as *const u64), 8)
-        } else {
-            (u64::from(read_unaligned((rsdp + 16) as *const u32)), 4)
-        };
-        let length = u64::from(read_unaligned((root + 4) as *const u32));
-        say!("linox: ACPI tables:");
-        let mut offset = 36;
-        while offset + entry_size <= length {
-            let table = if entry_size == 8 {
-                read_unaligned((root + offset) as *const u64)
-            } else {
-                u64::from(read_unaligned((root + offset) as *const u32))
-            };
-            offset += entry_size;
-            if table == 0 {
-                continue;
-            }
-            let signature = read_bytes::<4>(table);
-            say!(" {}", core::str::from_utf8(&signature).unwrap_or("????"));
-            match &signature {
+/// Reports the ACPI tables and returns what IVRS says about AMD-Vi.
+fn report_acpi(rsdp: u64) -> Option<amd_iommu::Ivrs> {
+    if rsdp == 0 {
+        say!("linox: ACPI root pointer missing\n");
+        return None;
+    }
+    let mut ivrs = None;
+    say!("linox: ACPI tables:");
+    for_each_table(rsdp, |signature, table| {
+        say!(" {}", core::str::from_utf8(signature).unwrap_or("????"));
+        // SAFETY: the firmware identity map covers its ACPI tables; every
+        // read is bounded by the table lengths the firmware recorded.
+        unsafe {
+            match signature {
                 b"APIC" => report_madt(table),
-                b"IVRS" => report_ivrs(table, &mut iommus),
+                b"IVRS" => {
+                    let length = read_unaligned((table + 4) as *const u32) as usize;
+                    let bytes = core::slice::from_raw_parts(table as *const u8, length);
+                    ivrs = Some(amd_iommu::parse_ivrs(bytes));
+                    say!("[AMD-Vi]");
+                }
                 b"DMAR" => say!("[Intel VT-d]"),
                 b"MCFG" => report_mcfg(table),
                 b"HPET" => say!("[{:#x}]", read_unaligned((table + 44) as *const u64)),
                 _ => {}
             }
         }
-        say!("\n");
-        for base in iommus.iter().copied().filter(|base| *base != 0) {
-            // SAFETY: the base comes from IVRS and the firmware identity map
-            // covers it; the registers read have no side effects.
-            let report = amd_iommu::probe(base);
-            say!(
-                "linox: AMD-Vi {:#x}: {} by firmware, status {:#x}, features ",
-                base,
-                if report.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                },
-                report.status
-            );
-            let _ = report.write_features(&mut crate::drivers::Console);
-            say!("\n");
-        }
+    });
+    say!("\n");
+    if let Some(ivrs) = &ivrs {
+        report_ivrs(ivrs);
     }
-    iommus
+    ivrs
+}
+
+fn report_ivrs(ivrs: &amd_iommu::Ivrs) {
+    say!(
+        "linox: IVRS: IVinfo {:#x}{}\n",
+        ivrs.info,
+        if ivrs.preboot_dma_protection() {
+            " (firmware enabled pre-boot DMA protection)"
+        } else {
+            ""
+        }
+    );
+    for unit in ivrs.units.iter().flatten() {
+        // SAFETY: the base comes from IVRS and the firmware identity map
+        // covers it; the registers read have no side effects.
+        let report = unsafe { amd_iommu::probe(unit.base) };
+        say!(
+            "linox: AMD-Vi {:#x} (PCI {:02x}:{:02x}.{}, IVHD flags {:#04x}): {} by firmware, \
+             control {:#x}, status {:#x}, features ",
+            unit.base,
+            unit.device >> 8,
+            (unit.device >> 3) & 0x1f,
+            unit.device & 7,
+            unit.flags,
+            if report.enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            report.control,
+            report.status
+        );
+        let _ = report.write_features(&mut crate::drivers::Console);
+        if unit.segment != 0 {
+            // Linox enumerates only PCI segment 0.
+            say!(", PCI segment {} (not enumerated)", unit.segment);
+        }
+        if report.exclusion & 1 != 0 {
+            say!(", exclusion range at {:#x}", report.exclusion & !0xfff);
+        }
+        say!("\n");
+    }
+    for range in ivrs.unity.iter().flatten() {
+        let (read, write) = range.access();
+        say!(
+            "linox: IVMD: devices {:04x}-{:04x} need {:#x}-{:#x} ({}{}{})\n",
+            range.first_device,
+            range.last_device,
+            range.start,
+            range.start.saturating_add(range.length),
+            if range.is_exclusion() {
+                "exclusion"
+            } else {
+                "unity"
+            },
+            if read { ", read" } else { "" },
+            if write { ", write" } else { "" }
+        );
+    }
+    let aliases = ivrs.aliases.iter().flatten().count();
+    if aliases != 0 {
+        say!("linox: IVRS: {} requester-ID alias(es)\n", aliases);
+    }
+    if ivrs.dropped != 0 {
+        say!(
+            "linox: IVRS: {} entries did not fit and were ignored\n",
+            ivrs.dropped
+        );
+    }
 }
 
 /// The AMD-Vi units with remapping on.
@@ -628,10 +1002,11 @@ type Remapping = [Option<amd_iommu::Remapping>; MAX_IOMMUS];
 
 /// Turns on DMA remapping on every AMD-Vi unit. Devices Linox drives reach
 /// only their driver's buffers, display controllers keep untranslated access
-/// for the firmware framebuffer, and every other device is blocked.
-fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
+/// for the firmware framebuffer, devices with IVMD unity ranges reach those,
+/// and every other device is blocked.
+fn enable_dma_remapping(ivrs: &amd_iommu::Ivrs) -> Remapping {
     let mut units = [const { None }; MAX_IOMMUS];
-    if iommus.iter().all(|base| *base == 0) {
+    if ivrs.units.iter().all(Option::is_none) {
         return units;
     }
     let (xhci, nvme, ahci) = (
@@ -645,7 +1020,7 @@ fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
         hda::dma_regions(),
     );
     // SAFETY: no unit is enabled yet, and bring-up runs on one CPU.
-    let mut table = unsafe { amd_iommu::DeviceTableBuilder::new() };
+    let mut table = unsafe { amd_iommu::DeviceTableBuilder::new(&ivrs.unity) };
     let (mut confined, mut passthrough, mut blocked) = (0, 0, 0);
     let mut failure = None;
     pci::for_each_function(|device| {
@@ -671,36 +1046,94 @@ fn enable_dma_remapping(iommus: &[u64; MAX_IOMMUS]) -> Remapping {
             amd_iommu::Access::Passthrough => passthrough += 1,
             amd_iommu::Access::Blocked => blocked += 1,
         }
-        if let Err(error) = table.assign(device.address.requester_id(), access) {
-            failure = Some(error);
+        let id = device.address.requester_id();
+        // A device whose DMA carries another requester ID (IVHD alias
+        // entries) is translated under that ID.
+        let alias = ivrs.alias_of(id);
+        for target in core::iter::once(id).chain(alias) {
+            if let Err(error) = table.assign(target, access) {
+                failure = Some(error);
+            }
         }
     });
     if let Some(error) = failure {
         say!("linox: AMD-Vi remapping not enabled: {:?}\n", error);
         return units;
     }
-    for (slot, base) in iommus.iter().enumerate() {
-        if *base == 0 {
+    for (slot, unit) in ivrs.units.iter().enumerate() {
+        let Some(unit) = unit else {
             continue;
-        }
+        };
         // SAFETY: the base comes from IVRS, the firmware identity map covers
         // it, and bring-up is the only code driving the unit.
-        match unsafe { amd_iommu::Remapping::enable(*base, &table) } {
-            Ok(unit) => {
+        match unsafe { amd_iommu::Remapping::enable(unit, &table) } {
+            Ok(remapping) => {
                 say!(
                     "linox: AMD-Vi {:#x}: DMA remapping on; {} devices confined to their \
-                     driver's buffers, {} displays passed through, {} blocked\n",
-                    base,
+                     driver's buffers ({} domains), {} displays passed through, {} blocked\n",
+                    unit.base,
                     confined,
+                    table.domains(),
                     passthrough,
                     blocked
                 );
-                units[slot] = Some(unit);
+                if let Some(free) = units.get_mut(slot) {
+                    *free = Some(remapping);
+                }
             }
-            Err(error) => say!("linox: AMD-Vi {:#x}: remapping failed: {:?}\n", base, error),
+            Err(error) => say!(
+                "linox: AMD-Vi {:#x}: remapping failed: {:?}\n",
+                unit.base,
+                error
+            ),
         }
     }
     units
+}
+
+/// Prints the DMA faults the units have logged since the last call: a
+/// device Linox blocked that still tried to reach memory shows up here.
+fn report_faults(remapping: &mut Remapping, always: bool) {
+    let mut count = 0;
+    for unit in remapping.iter_mut().flatten() {
+        if unit.overflowed() {
+            say!(
+                "linox: AMD-Vi {:#x}: the event log overflowed; later faults were lost\n",
+                unit.base()
+            );
+        }
+        while let Some(fault) = unit.next_fault() {
+            count += 1;
+            if count <= 32 {
+                say!(
+                    "linox: AMD-Vi event {:#x} from {:02x}:{:02x}.{} at {:#x}{}\n",
+                    fault.code,
+                    fault.device >> 8,
+                    (fault.device >> 3) & 0x1f,
+                    fault.device & 7,
+                    fault.address,
+                    if fault.is_page_fault() {
+                        " (I/O page fault: a blocked DMA)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+    }
+    if count > 32 {
+        say!("linox: ... and {} more AMD-Vi events\n", count - 32);
+    }
+    if always && count == 0 {
+        say!(
+            "linox: {}\n",
+            if remapping.iter().any(Option::is_some) {
+                "no new AMD-Vi events"
+            } else {
+                "AMD-Vi remapping is not on"
+            }
+        );
+    }
 }
 
 /// Checks that remapping stops `controller` from writing outside its own
@@ -783,31 +1216,6 @@ unsafe fn report_madt(table: u64) {
     say!("[{} CPUs", enabled);
     if capable != 0 {
         say!(" +{} hotplug", capable);
-    }
-    say!("]");
-}
-
-unsafe fn report_ivrs(table: u64, iommus: &mut [u64; MAX_IOMMUS]) {
-    let length = u64::from(read_unaligned((table + 4) as *const u32));
-    say!("[AMD-Vi");
-    let mut offset = 48;
-    while offset + 24 <= length {
-        let kind = read_unaligned((table + offset) as *const u8);
-        let size = u64::from(read_unaligned((table + offset + 2) as *const u16));
-        if size == 0 {
-            break;
-        }
-        if matches!(kind, 0x10 | 0x11 | 0x40) {
-            let base = read_unaligned((table + offset + 8) as *const u64);
-            say!(" {:#x}", base);
-            // Several IVHD blocks of different types can describe one unit.
-            if !iommus.contains(&base) {
-                if let Some(free) = iommus.iter_mut().find(|slot| **slot == 0) {
-                    *free = base;
-                }
-            }
-        }
-        offset += size;
     }
     say!("]");
 }
@@ -915,7 +1323,7 @@ fn check_extent_writes(
     "write verified, restored, and bounded"
 }
 
-fn probe_nvme(function: pci::Function, remapping: &mut Remapping) {
+fn probe_nvme(function: pci::Function, remapping: &mut Remapping) -> bool {
     say!(
         "linox: NVMe {:02x}:{:02x}.{}: ",
         function.bus,
@@ -928,7 +1336,7 @@ fn probe_nvme(function: pci::Function, remapping: &mut Remapping) {
         Ok(opened) => opened,
         Err(error) => {
             say!("initialization failed: {:?}\n", error);
-            return;
+            return false;
         }
     };
     say!(
@@ -959,6 +1367,7 @@ fn probe_nvme(function: pci::Function, remapping: &mut Remapping) {
     if remapping.iter().any(Option::is_some) {
         verify_dma_confinement(&mut controller, function, remapping);
     }
+    true
 }
 
 fn list_partitions(disk: &mut impl BlockDevice) {

@@ -79,7 +79,12 @@ pub(crate) fn dhcp_discover(nic: &mut impl Nic, transaction: u32) -> Option<Offe
     }
     let mut offer = None;
     wait_until_ms(DHCP_TIMEOUT_MS, || {
-        while let Some(length) = nic.receive(&mut frame) {
+        // A bounded batch per pass, so a flood of frames cannot keep the
+        // wait from reaching its deadline.
+        for _ in 0..64 {
+            let Some(length) = nic.receive(&mut frame) else {
+                break;
+            };
             offer = parse_offer(&frame[..length], mac, transaction);
             if offer.is_some() {
                 return true;

@@ -547,8 +547,8 @@ static-mut	kernel/src/arch/x86_64/cpu/linux_procfs.rs	MEMINFO	shared-runtime	all
 static-mut	kernel/src/arch/x86_64/cpu/linux_cgroupfs.rs	CGROUP_FILE	shared-runtime	allowlist	none	serialized-proc-cgroup-render-buffer
 static-mut	kernel/src/arch/x86_64/cpu/linux_procfs.rs	UPTIME	shared-runtime	allowlist	none	serialized-proc-uptime-render-buffer
 static-mut	kernel/src/arch/x86_64/iommu.rs	STANDING	platform-device	allowlist	none	serialized-iommu-standing-device-admissions
-static-mut	kernel/src/bringup.rs	PROBE	platform-device	allowlist	none	hardware-bringup-single-writer
-static-mut	kernel/src/bringup.rs	TRANSACTION	platform-device	allowlist	none	hardware-bringup-single-writer
+static-mut	kernel/src/bringup/mod.rs	PROBE	platform-device	allowlist	none	hardware-bringup-single-writer
+static-mut	kernel/src/bringup/mod.rs	TRANSACTION	platform-device	allowlist	none	hardware-bringup-single-writer
 static-mut	kernel/src/drivers/ahci.rs	BUFFERS	platform-device	allowlist	none	hardware-bringup-driver-dma-memory
 static-mut	kernel/src/drivers/ahci.rs	COMMAND_LISTS	platform-device	allowlist	none	hardware-bringup-driver-dma-memory
 static-mut	kernel/src/drivers/ahci.rs	COMMAND_TABLES	platform-device	allowlist	none	hardware-bringup-driver-dma-memory
@@ -690,3 +690,9 @@ interior-mutable	kernel/src/linux_async_io.rs	ENTRIES	process-runtime	allowlist	
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_SWAP_CURSOR	domain-runtime	allowlist	none	atomic-swap-scan-cursor
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_USER_FAULT_RECLAIM	process-runtime	allowlist	none	atomic-user-fault-reclaim-tag
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_cgroupfs.rs	LINUX_CACHE_RECLAIM_ROTOR	domain-runtime	allowlist	none	atomic-cache-reclaim-rotor
+interior-mutable	boot/efi/src/main.rs	FIRMWARE_CONSOLE	bootstrap-init	allowlist	none	firmware-console-until-exit-boot-services
+interior-mutable	kernel/src/bringup/trap.rs	IDT	platform-device	allowlist	none	hardware-bringup-exception-table
+interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	none	fatal-report-reentrancy-latch
+interior-mutable	kernel/src/bringup/trap.rs	STAGE_LENGTH	platform-device	allowlist	none	hardware-bringup-stage-publication
+interior-mutable	kernel/src/bringup/trap.rs	STAGE_TEXT	platform-device	allowlist	none	hardware-bringup-stage-publication
+interior-mutable	kernel/src/drivers/clock.rs	TICKS_PER_MS	platform-device	allowlist	none	atomic-published-after-calibration

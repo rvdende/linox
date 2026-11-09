@@ -9,6 +9,9 @@ const COMMAND: u8 = 0x04;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 const COMMAND_INTERRUPT_DISABLE: u16 = 1 << 10;
+const STATUS_CAPABILITIES: u32 = 1 << 4;
+const CAPABILITIES_POINTER: u8 = 0x34;
+const CAPABILITY_POWER_MANAGEMENT: u8 = 0x01;
 
 /// A PCI function address.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -116,9 +119,59 @@ impl Function {
         self.write_u32(COMMAND, (command | u32::from(COMMAND_MEMORY)) & 0xffff);
     }
 
+    /// The configuration-space offset of capability `id`, if the function
+    /// lists it (PCI Local Bus 3.0 section 6.7).
+    pub(crate) fn capability(self, id: u8) -> Option<u8> {
+        if self.read_u32(COMMAND) >> 16 & STATUS_CAPABILITIES == 0 {
+            return None;
+        }
+        let mut offset = (self.read_u32(CAPABILITIES_POINTER) & 0xfc) as u8;
+        // At most 48 capabilities fit in the 192 bytes after the header.
+        for _ in 0..48 {
+            if offset < 0x40 {
+                return None;
+            }
+            let header = self.read_u32(offset);
+            if header as u8 == id {
+                return Some(offset);
+            }
+            offset = ((header >> 8) & 0xfc) as u8;
+        }
+        None
+    }
+
+    /// Brings the function to power state D0 if firmware or a previous OS
+    /// left it in D1-D3hot (PCI Bus Power Management Interface 1.2 section
+    /// 5.6). Leaving D3hot takes 10 ms and may reset the function, which
+    /// then forgets its BARs: they are restored.
+    pub(crate) fn power_on(self) -> bool {
+        let Some(capability) = self.capability(CAPABILITY_POWER_MANAGEMENT) else {
+            return false;
+        };
+        let control = self.read_u32(capability + 4);
+        if control & 3 == 0 {
+            return false;
+        }
+        let bars: [u32; 6] = core::array::from_fn(|index| self.read_u32(0x10 + index as u8 * 4));
+        let command = self.read_u32(COMMAND) & 0xffff;
+        // Keep PME_Status (write-one-to-clear) and the other bits as they are.
+        self.write_u32(capability + 4, control & !(3 | 1 << 15));
+        super::delay_ms(10);
+        for (index, bar) in bars.iter().enumerate() {
+            let offset = 0x10 + index as u8 * 4;
+            if self.read_u32(offset) != *bar {
+                self.write_u32(offset, *bar);
+            }
+        }
+        self.write_u32(COMMAND, command);
+        true
+    }
+
     /// Enables memory decoding and bus mastering, and masks legacy INTx,
-    /// because these drivers poll.
+    /// because these drivers poll. A function in a low-power state is
+    /// brought to D0 first.
     pub(crate) fn enable_memory_and_bus_master(self) {
+        let _ = self.power_on();
         let command = self.read_u32(COMMAND);
         let value =
             command | u32::from(COMMAND_MEMORY | COMMAND_BUS_MASTER | COMMAND_INTERRUPT_DISABLE);

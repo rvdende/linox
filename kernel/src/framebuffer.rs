@@ -84,6 +84,9 @@ struct Console {
     cells: [[Cell; MAX_COLUMNS]; MAX_ROWS],
     drawn: [[Cell; MAX_COLUMNS]; MAX_ROWS],
     damage: Option<Bounds>,
+    /// Lines to scroll at once when output reaches the bottom: 1, or a
+    /// quarter of the screen in jump-scroll mode.
+    jump_scroll: bool,
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
@@ -136,6 +139,7 @@ static mut CONSOLE: Console = Console {
     cells: [[BLANK; MAX_COLUMNS]; MAX_ROWS],
     drawn: [[BLANK; MAX_COLUMNS]; MAX_ROWS],
     damage: None,
+    jump_scroll: false,
 };
 
 /// Returns the byte length a framebuffer description covers, or `None` when
@@ -268,6 +272,45 @@ pub(crate) fn write(bytes: &[u8]) {
     if let Some(damage) = damage {
         present(damage);
     }
+}
+
+/// Releases the console after a fatal exception or panic that may have
+/// struck while it was drawing, so the crash report still reaches the
+/// screen. The text model may be mid-update; a report is worth more.
+pub(crate) fn recover() {
+    OWNED.store(false, Ordering::Release);
+    BUSY.store(false, Ordering::Release);
+}
+
+/// Scrolls a quarter of the screen at a time instead of one line. Each
+/// scroll redraws most of the screen, and a large framebuffer in an
+/// uncached PCI BAR (as firmware leaves it on a physical PC) takes a
+/// noticeable fraction of a second per redraw; bring-up mode turns this on
+/// so that its long report scrolls in a few redraws, not hundreds.
+pub(crate) fn set_jump_scroll(enabled: bool) {
+    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: BUSY grants exclusive access to CONSOLE.
+    unsafe { (*core::ptr::addr_of_mut!(CONSOLE)).jump_scroll = enabled };
+    BUSY.store(false, Ordering::Release);
+}
+
+/// Stops drawing for good, after drawing itself faulted.
+pub(crate) fn abandon() {
+    READY.store(false, Ordering::Release);
+}
+
+/// The console's text grid as (columns, rows), once it is drawing.
+pub(crate) fn text_size() -> Option<(usize, usize)> {
+    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: BUSY grants exclusive access to CONSOLE.
+    let console = unsafe { &*core::ptr::addr_of!(CONSOLE) };
+    let size = (console.columns, console.rows);
+    BUSY.store(false, Ordering::Release);
+    Some(size)
 }
 
 /// Whether a Linux program currently draws to the screen through /dev/fb0.
@@ -592,8 +635,16 @@ impl Console {
             self.row += 1;
             return;
         }
-        self.cells.copy_within(1..self.rows, 0);
-        self.cells[self.rows - 1][..self.columns].fill(BLANK);
+        let lines = if self.jump_scroll {
+            (self.rows / 4).max(1)
+        } else {
+            1
+        };
+        self.cells.copy_within(lines..self.rows, 0);
+        for row in self.rows - lines..self.rows {
+            self.cells[row][..self.columns].fill(BLANK);
+        }
+        self.row = self.rows - lines;
         self.flush();
     }
 

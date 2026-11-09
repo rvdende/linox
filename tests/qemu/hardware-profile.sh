@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Boot Linox on a QEMU machine shaped like a physical AMD desktop instead of the
-# virtio reference profile: AMD IOMMU with DMA remapping, an e1000e NIC on a
-# network with a DHCP server, an NVMe SSD with a GPT disk, AHCI,
-# xHCI with USB keyboards (one behind a hub), a VGA framebuffer, and no virtio
-# devices.
+# virtio reference profile: an AMD IOMMU with DMA remapping, interrupt
+# remapping and x2APIC support (as on Ryzen 7000 "Raphael"), an e1000e NIC on
+# a network with a DHCP server, an NVMe SSD with a GPT disk, AHCI, xHCI with
+# USB keyboards (one behind a hub), a VGA framebuffer, and no virtio devices.
+# QEMU has no RTL8125 model, so the Realtek driver cannot be tested here.
 #
-# The first boot keeps a serial port, checks the bring-up report, and types a
-# command on the USB keyboard through the QEMU monitor. The second removes the
-# serial port, as on most PCs, and checks that the framebuffer console shows
-# text. Screenshots are kept in build/qemu/hardware-profile/.
+# The first boot keeps a serial port, checks the bring-up report, types
+# commands on the USB keyboard through the QEMU monitor (echo, beep,
+# disktest, the log pager, the DMA fault report) and ends with the crash
+# test, whose report must name the fault and the bring-up stage. The second
+# removes the serial port, as on most PCs, uses a 2560x1440 display, and
+# checks that the framebuffer console shows text. Screenshots are kept in
+# build/qemu/hardware-profile/.
 
 set -euo pipefail
 
@@ -59,24 +63,24 @@ truncate -s 64M "$sata"
 sgdisk --clear --new=1:2048:0 --typecode=1:8300 --change-name=1:"sata-data" "$sata" >/dev/null
 
 boot_profile() {
-    local label=$1 serial=$2
+    local label=$1 serial=$2 display=${3:-std}
     local log="$work_dir/$label.log"
     local monitor="$work_dir/$label.monitor"
     cp "$ovmf_vars_template" "$work_dir/vars.fd"
     : >"$log"
     "$qemu" \
-        -machine "q35,accel=$accelerator" \
+        -machine "q35,accel=$accelerator,kernel-irqchip=split" \
         -cpu "$cpu_model" \
         -smp 1 \
         -m 1G \
         -display none \
-        -vga std \
+        $([[ "$display" == std ]] && echo "-vga std" || echo "-vga none -device VGA,$display") \
         -monitor "unix:$monitor,server=on,wait=off" \
         -serial "$serial" \
         -no-reboot \
         -netdev user,id=net0,restrict=on \
         -device e1000e,netdev=net0 \
-        -device amd-iommu,dma-remap=on \
+        -device amd-iommu,dma-remap=on,intremap=on,xtsup=on \
         -audiodev "wav,id=sound,path=$work_dir/$label.wav" \
         -device intel-hda \
         -device hda-duplex,audiodev=sound \
@@ -100,11 +104,11 @@ boot_profile() {
 }
 
 screenshot() {
-    local label=$1
-    printf 'screendump "%s"\n' "$work_dir/$label.ppm" |
+    local label=$1 name=${2:-$1}
+    printf 'screendump "%s"\n' "$work_dir/$name.ppm" |
         socat - "UNIX-CONNECT:$work_dir/$label.monitor" >/dev/null
     sleep 1
-    python3 -I - "$work_dir/$label.ppm" "$output_dir/$label.png" <<'EOF'
+    python3 -I - "$work_dir/$name.ppm" "$output_dir/$name.png" <<'EOF'
 import sys
 from PIL import Image
 image = Image.open(sys.argv[1]).convert("RGB")
@@ -162,12 +166,47 @@ for _ in $(seq 1 15); do
     grep -aq 'Linox volume blocks' "$work_dir/serial.log" && break
     sleep 1
 done
+# Page to the end of the log, then quit the pager.
+for key in l o g spc e n d ret; do
+    monitor_command "sendkey $key"
+    sleep 0.2
+done
+for _ in $(seq 1 10); do
+    grep -aq -- '-- log ' "$work_dir/serial.log" && break
+    sleep 1
+done
+monitor_command "sendkey q"
+sleep 0.5
+for key in f a u l t s ret; do
+    monitor_command "sendkey $key"
+    sleep 0.2
+done
+for _ in $(seq 1 10); do
+    grep -aq -e 'no new AMD-Vi events' -e 'AMD-Vi event ' "$work_dir/serial.log" && break
+    sleep 1
+done
 screenshot serial >/dev/null
+# The crash test halts the machine with a report; it goes last.
+for key in c r a s h ret; do
+    monitor_command "sendkey $key"
+    sleep 0.2
+done
+for _ in $(seq 1 10); do
+    grep -aq '^LINOX_KERNEL_PANIC' <(tr -d '\r' <"$work_dir/serial.log") && break
+    sleep 1
+done
+screenshot serial serial-crash >/dev/null
 stop_qemu
 tr -d '\r' <"$work_dir/serial.log" | sed -n '/hardware bring-up mode/,$p' >"$output_dir/serial.log"
+tr -d '\r' <"$work_dir/serial.log" >"$output_dir/serial-full.log"
 failed=0
 for expected in \
     'entering hardware bring-up mode' \
+    'TSC runs at' \
+    'bring-up summary' \
+    'xHCI: 2 of 2 controller(s) running, 2 keyboard(s)' \
+    'NVMe: 1 of 1 controller(s) opened' \
+    'remapping on 1' \
     'serial console present' \
     'framebuffer 1280x800' \
     'AMD-Vi' \
@@ -183,7 +222,7 @@ for expected in \
     'QEMU HARDDISK (serial LINOXSATA01), 131072 sectors of 512 bytes (64 MiB)' \
     'MiB Linux filesystem "sata-data"' \
     'tablet 0627:0001 on port' \
-    'by firmware, status' \
+    'by firmware, control' \
     'Intel 82574, MAC 52:54:00:12:34:56, link up' \
     'DHCP offer 10.0.2.15 from 10.0.2.2' \
     '8086:2668 HD Audio' \
@@ -201,8 +240,15 @@ for expected in \
     'USB speaker 46f4:0002 on port' \
     'USB speaker 46f4:0002 played a 500 Hz tone (1000 packets)' \
     'bring-up> disktest' \
-    ': write verified, restored, and bounded'; do
-    if ! grep -Fq "$expected" "$output_dir/serial.log"; then
+    ': write verified, restored, and bounded' \
+    'bring-up> log end' \
+    '-- log ' \
+    'bring-up> faults' \
+    'bring-up> crash' \
+    'FATAL: invalid opcode (#UD) (vector 6) during bring-up stage: shell: crash test' \
+    'kernel addresses on stack:' \
+    'LINOX_KERNEL_PANIC'; do
+    if ! grep -Fq -- "$expected" "$output_dir/serial.log"; then
         echo "missing: $expected" >&2
         failed=1
     fi
@@ -234,7 +280,13 @@ if ((loud_usb < 10000)); then
     echo "the USB audio tone was not recorded ($loud_usb loud samples)" >&2
     failed=1
 fi
-keyboards=$(grep -c 'keyboard 0627:0001 on port' "$output_dir/serial.log" || true)
+# The loader reports its steps on the firmware console before the kernel runs.
+if ! grep -aq 'linox loader: display 1280x800' "$work_dir/serial.log"; then
+    echo "missing: the loader's display line" >&2
+    failed=1
+fi
+# Count the report's own lines, not the log pager's replay of them.
+keyboards=$(sed '/bring-up summary/q' "$output_dir/serial.log" | grep -c 'keyboard 0627:0001 on port' || true)
 if ((keyboards != 2)); then
     echo "expected keyboards on both xHCI controllers, found $keyboards" >&2
     failed=1
@@ -250,7 +302,7 @@ if ((failed)); then
 fi
 echo "ok   bring-up report over serial and USB keyboard input (two controllers)"
 
-boot_profile no-serial none
+boot_profile no-serial none "xres=2560,yres=1440,vgamem_mb=32"
 # Firmware enumeration time varies with the device set, so poll the screen
 # until the console has drawn the bring-up report.
 lit=0
@@ -264,5 +316,11 @@ if ((lit < 20000)); then
     echo "framebuffer console shows too little text without a serial port ($lit lit pixels)" >&2
     exit 1
 fi
-echo "ok   framebuffer console without a serial port ($lit lit pixels)"
+size=$(python3 -I -c 'import sys; from PIL import Image; print("%dx%d" % Image.open(sys.argv[1]).size)' \
+    "$output_dir/no-serial.png")
+if [[ "$size" != 2560x1440 ]]; then
+    echo "expected a 2560x1440 screen, got $size" >&2
+    exit 1
+fi
+echo "ok   framebuffer console at $size without a serial port ($lit lit pixels)"
 echo "Hardware profile test passed; screenshots in ${output_dir#"$repo_root"/}"
