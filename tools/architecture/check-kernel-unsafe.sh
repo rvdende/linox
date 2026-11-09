@@ -8,8 +8,8 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 554 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 554 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 521 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 521 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
@@ -20,8 +20,8 @@ if (( undocumented > 260 )); then
     echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 260 to ${undocumented}" >&2
     exit 1
 fi
-if (( static_mut > 8 )); then
-    echo "kernel unsafe check: top-level static mut declarations grew from 8 to ${static_mut}" >&2
+if (( static_mut > 6 )); then
+    echo "kernel unsafe check: top-level static mut declarations grew from 6 to ${static_mut}" >&2
     exit 1
 fi
 
@@ -40,11 +40,12 @@ per_file_limits=(
     "image_store.rs 5"
     "linux_overlay.rs 15"
     "lib.rs 19"
-    "memory.rs 38"
+    "trusted/boot.rs 1"
     "trusted/claim.rs 4"
     "trusted/dma.rs 3"
     "trusted/firmware.rs 2"
     "trusted/frame.rs 9"
+    "trusted/frame_tables.rs 2"
     "trusted/mmio.rs 2"
     "trusted/msr.rs 3"
     "trusted/page_table.rs 2"
@@ -83,6 +84,7 @@ forbidding_files=(
     "linux_input.rs"
     "linux_sysv_ipc.rs"
     "linux_tmpfs.rs"
+    "memory.rs"
     "volume.rs"
 )
 for file in "${forbidding_files[@]}"; do
@@ -101,6 +103,18 @@ constructors="$(rg -g '*.rs' -l '\b(Frame|PageTable)::from_physical\(' "$kernel_
 if [[ -n "$constructors" ]]; then
     echo "kernel unsafe check: Frame/PageTable::from_physical outside the memory layer:" >&2
     echo "$constructors" >&2
+    exit 1
+fi
+
+# The frame allocator's tables are carved from RAM (trusted::frame_tables)
+# and the loader's memory map is read (trusted::boot) only by the frame
+# allocator.
+boot_memory="$(rg -g '*.rs' -l 'FrameTables::carve\(|for_each_memory_descriptor\(' "$kernel_source" \
+    | sed "s|^${kernel_source}/||" \
+    | rg -v '^(memory\.rs|trusted/.*)$' || true)"
+if [[ -n "$boot_memory" ]]; then
+    echo "kernel unsafe check: frame tables or the boot memory map outside the frame allocator:" >&2
+    echo "$boot_memory" >&2
     exit 1
 fi
 

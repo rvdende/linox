@@ -4,6 +4,9 @@
 //!
 //! - [`frame`]: a physical frame of RAM, read and written by copying
 //!   through the direct map.
+//! - [`frame_tables`]: the frame allocator's per-frame tables, carved out
+//!   of RAM once at boot.
+//! - [`boot`]: the loader's boot handoff (the firmware memory map).
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
 //! - [`root`]: reading and reloading the page-table root register.
@@ -23,10 +26,12 @@
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
+pub(crate) mod boot;
 pub(crate) mod claim;
 pub(crate) mod dma;
 pub(crate) mod firmware;
 pub(crate) mod frame;
+pub(crate) mod frame_tables;
 pub(crate) mod mmio;
 pub(crate) mod msr;
 pub(crate) mod page_table;

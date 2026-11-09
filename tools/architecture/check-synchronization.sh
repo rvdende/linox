@@ -25,7 +25,7 @@ require_text "$root/kernel/src/arch/x86_64/timer.rs" \
 require_text "$root/kernel/src/arch/x86_64/pci.rs" \
     'let _kernel_entry = crate::sync::kernel_entry_lock();'
 require_text "$root/kernel/src/memory.rs" \
-    'allocator: IrqSpinLock<MaybeUninit<FrameAllocator>>'
+    'allocator: IrqSpinLock<Option<FrameAllocator<'"'"'static>>>'
 require_text "$root/kernel/src/memory.rs" \
     'if !allocator.can_release_contiguous_extent(owner, first, count)'
 require_text "$root/kernel/src/sync.rs" \

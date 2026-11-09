@@ -1800,6 +1800,7 @@ unsafe fn ensure_fine_region(
 
 pub(crate) fn supervisor_write_protect_enabled() -> bool {
     let cr0: usize;
+    // SAFETY: reading CR0 has no side effects and touches no memory.
     unsafe {
         asm!(
             "mov {}, cr0",
