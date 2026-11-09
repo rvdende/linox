@@ -617,13 +617,53 @@ every other rank, since drivers queue from interrupts) and a set-once
 `OwnedState`; the live volume is a ranked `SpinLock` and the initramfs
 root a set-once `OwnedState`. `linux_aio.rs`, `linux_tmpfs.rs`,
 `linux_sysv_ipc.rs`, `linux_input.rs` and `volume.rs` carry
-`#![forbid(unsafe_code)]`, which `check-kernel-unsafe.sh` keeps. Still to
-do in step 7: the overlay's node pages, data chains and page-cache index
-(the data frames carry memory cgroup charges, so they stay frames and move
-to `Frame` copies with a heap index), the signal queues (`linux_signal`:
-senders hold locks up to the heap's rank, so its lock needs a rank audit
-first) and the file cache table (`linux_file_cache`, consulted from
-copy-on-write faults under arbitrary locks).
+`#![forbid(unsafe_code)]`, which `check-kernel-unsafe.sh` keeps.
+
+**Steps 6 and 7, continued (2026-11-09).** Unsafe blocks 599 -> 539,
+undocumented 266 -> 218.
+- Owner cells: `ipc` (CONTROL_CHANNEL, 103), `packet`
+  (PACKET_MAILBOXES, 104), `linux_mount` (MOUNT_NAMESPACES, 192),
+  `linux_user` (USER_NAMESPACES, 194, per instance) and `domain` (DOMAINS,
+  450, an `IrqSpinLock` in a set-once `OwnedState`) are ranked locks;
+  `docs/feedback-hardening/SYNCHRONIZATION.md` gives each rank's
+  reasoning. The leaves ranked between the heap and the frame allocator
+  never allocate under their lock: storage is reserved before, or a
+  larger table is built outside and swapped in.
+- The file cache (`linux_file_cache`) is two open-addressed heap tables
+  per domain behind a leaf lock (FILE_CACHE, 196) held only to probe or
+  fill a table with room, since copy-on-write faults ask it under any
+  lock a user copy may hold.
+- Images: `trusted::image` establishes the `'static` byte slices in one
+  place. `BootImage` (the loader's handoff images, made once in
+  `kernel_main`, with a direct-map view for later use), `ImageFrames`
+  (the boot archive's private frame copy) and `PublishedImage` (an
+  unpacked root filesystem on the heap, freed only by an `unsafe`
+  `retire` whose caller vouches every domain using it is gone).
+  `manifest.rs` and `pe.rs` take slices; `published_rootfs` keeps each
+  slot's image and heap path index in an `Arc` behind a per-slot leaf
+  lock (PUBLISHED_ROOTFS, 197), so uninstalling frees the index only
+  after its last reader; `image_store`'s backings are a leaf lock
+  (ROOTFS_IMAGES, 198) and its one unsafe block is the retire helper.
+- The overlay's nodes are heap objects (chunks of nine that never move,
+  found by index hints instead of raw addresses), and its data chains and
+  page-cache index pages are frames read and written only through `Frame`
+  copies (the data frames keep their memory cgroup charges). 15 -> 6
+  sites: its owner cell and the two hint maps' owner cells remain.
+- Forbid `unsafe_code`: `domain.rs`, `ipc.rs`, `packet.rs`,
+  `linux_mount.rs`, `linux_user.rs`, `linux_file_cache.rs`,
+  `published_rootfs.rs`, `initramfs.rs`, `manifest.rs`, `pe.rs`.
+
+Still to do in steps 6 and 7: the overlay's owner cell. No rank fits one
+lock held across an overlay operation (it calls the volumes, the overlay
+mounts, the sockets and the tmpfs limits while it holds nodes, and is
+called under several of those), so it needs leaf locking: node fields
+read and written under a short lock, the calls out made between
+(SYNCHRONIZATION.md, "Owner cells still without a lock"). The published
+root filesystem's entries are `Entry<'static>` borrowed by callers in
+`cpu/`; giving them a lifetime tied to the publication would let
+`PublishedImage::retire` become safe. And the signal queues
+(`linux_signal`: senders hold locks up to the heap's rank, so its lock
+needs a rank audit first).
 
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the

@@ -60,6 +60,80 @@ the bounded operation is required and safe.
   The `initialized` flag remains release/acquire publication for the fully
   constructed allocator.
 
+## Leaf locks between the heap and the frame allocator
+
+Some tables are consulted from page faults and path walks, under whatever
+lock the calling system call holds. Every lock a system call may hold
+across a copy to user memory ranks below the kernel heap (190), and the
+frame allocator (200) is taken only inside `memory.rs`. So these tables
+get leaf locks ranked 191-199: each critical section only reads or writes
+the table's own records, never allocates or frees heap memory, and calls
+nothing that takes a lock. Two such leaves are never held together.
+
+- `MOUNT_NAMESPACES` (192, `linux_mount`): the mount namespace table.
+  Records are copied out; the domain and published-root checks that
+  `current_root_is_read_only` makes run after the lock is released.
+- `USER_NAMESPACES` (194, `linux_user`): one lock per instance. A table's
+  storage (64 namespaces) is reserved with the lock released
+  (`reserve_table`), so `create` only fills reserved room; the domain
+  lookup that picks the instance happens before the lock is taken.
+- `FILE_CACHE` (196, `linux_file_cache`): one lock per domain. The cache
+  is asked by `contains` from copy-on-write faults (mprotect, fork's
+  sharing checks, private page releases) and by `lookup`/`insert` from
+  the mmap fault path. A fault can happen during any copy to user memory,
+  so the caller may hold SYSV_IPC, SOCKETS, the futex coordination lock,
+  MEMORY_AREAS, VOLUMES, the tmpfs limits or the swap areas (all below
+  the heap); the fault path itself then takes the frame allocator. The
+  cache therefore sits above all of them and below the frame allocator,
+  and is held only to probe or fill a table that already has room:
+  `insert` allocates a twice-as-large table with the lock released,
+  rehashes into it under the lock (an insert into reserved slots, no
+  allocation), swaps it in and frees the old table after unlocking;
+  `reset_current` takes the whole table out under the lock and releases
+  the cached frames and the storage after. A lock-free table was not
+  needed: the critical sections are a few probes long.
+- `PUBLISHED_ROOTFS` (197, `published_rootfs`): one lock per domain slot,
+  held to clone, take or put the `Arc` of the slot's image and path
+  index. Readers keep the clone while they walk; the index is freed when
+  the last clone drops, after the lock is released.
+- `ROOTFS_IMAGES` (198, `image_store`): the unpacked images and which
+  slots use them. Taken after the image store (102) and the published
+  root filesystems; an image whose last user goes is freed after the lock
+  is released.
+
+## Other new ranks
+
+- `CONTROL_CHANNEL` (103, `ipc`) and `PACKET_MAILBOXES` (104, `packet`):
+  taken by native service calls at system-call level, never under another
+  lock. The channel calls the scheduler's wakeup while held; a packet
+  consume copies the packet to user memory while held, which is why both
+  rank just above system-call level (as SYSV_IPC does), below everything
+  a user copy or a wakeup may take.
+- `DOMAINS` (450, `domain`): the domain manager, an `IrqSpinLock` in a
+  set-once `OwnedState`. Capability and credential checks ask it under
+  whatever lock a call holds, and the scheduler asks it for service
+  classes and CPU limits while it chooses what to run, so it ranks above
+  the scheduler's locks (400) and is a leaf: the checks that need frame
+  counts (`memory::owner_live_frame_count`) read them before taking it.
+  Interrupts stay off while it is held, so a timer interrupt's scheduler
+  work on the same CPU cannot reach it while it is held.
+
+## Owner cells still without a lock
+
+The overlay (`linux_overlay`, each domain's in-memory files) keeps an
+owner cell serialized by the kernel-entry lock. Its operations hold node
+references while they call the volumes (VOLUMES, 186), the overlay mounts
+(182), the socket table (140, FIFOs and socket names), the tmpfs limits
+(189), the unlinked-file list (188) and the heap, and they are called
+under several of those (a loop device's backing file under VOLUMES, a
+pseudo-terminal's node under PTYS, overlayfs copy-up under
+OVERLAY_MOUNTS). A lock held across an operation would have to rank both
+below and above those, so the overlay needs leaf locking instead: node
+fields read and written under a short lock, with the calls out made
+between. Its nodes are now heap objects (chunks that never move) and its
+file data frames are reached only through `Frame` copies, which that
+refactor builds on.
+
 ## Local interrupt audit
 
 Direct `cli`, `sti`, and `sti; hlt; cli` sequences are limited to local CPU
