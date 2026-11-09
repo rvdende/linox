@@ -1,14 +1,12 @@
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use linox_image_store::{Digest, ImageStore, ObjectBackend, StagingHandle, StoreError};
 
 use crate::{
     memory::{self, FrameLease, FrameOwner},
-    trusted::frame::Frame,
+    sync::{LockRank, SpinLock},
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -19,11 +17,19 @@ pub(crate) const CACHE_QUOTA: usize = usize::MAX;
 /// 512 MiB is too small for toolchain images (rust:alpine expands past it).
 pub(crate) const DEFAULT_ROOTFS_UNPACK_LIMIT_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// The object store and the layers published to it for the next root
+/// filesystem, once installed.
+struct Store {
+    objects: ImageStore<RamBackend, OBJECT_LIMIT>,
+    published_layers: [Digest; linox_oci::OCI_LAYER_LIMIT],
+    published_layer_count: usize,
+}
+
 struct ImageStoreOwner {
-    installed: AtomicBool,
-    store: UnsafeCell<MaybeUninit<ImageStore<RamBackend, OBJECT_LIMIT>>>,
-    published_layers: UnsafeCell<[Digest; linox_oci::OCI_LAYER_LIMIT]>,
-    published_layer_count: AtomicUsize,
+    /// Image pulls and root filesystem installs run at system-call or
+    /// boot level and hold it while they unpack, so it ranks just above
+    /// system-call level.
+    store: SpinLock<Option<Store>>,
     rootfs_frame_starts: [AtomicU64; crate::control_abi::DOMAIN_LIMIT],
     rootfs_frame_counts: [AtomicUsize; crate::control_abi::DOMAIN_LIMIT],
     rootfs_lengths: [AtomicUsize; crate::control_abi::DOMAIN_LIMIT],
@@ -35,13 +41,8 @@ struct ImageStoreOwner {
     builtin_rootfs_length: AtomicUsize,
 }
 
-unsafe impl Sync for ImageStoreOwner {}
-
 static IMAGE_STORE: ImageStoreOwner = ImageStoreOwner {
-    installed: AtomicBool::new(false),
-    store: UnsafeCell::new(MaybeUninit::uninit()),
-    published_layers: UnsafeCell::new([Digest([0; 32]); linox_oci::OCI_LAYER_LIMIT]),
-    published_layer_count: AtomicUsize::new(0),
+    store: SpinLock::new(LockRank::IMAGE_STORE, None),
     rootfs_frame_starts: [const { AtomicU64::new(0) }; crate::control_abi::DOMAIN_LIMIT],
     rootfs_frame_counts: [const { AtomicUsize::new(0) }; crate::control_abi::DOMAIN_LIMIT],
     rootfs_lengths: [const { AtomicUsize::new(0) }; crate::control_abi::DOMAIN_LIMIT],
@@ -54,32 +55,21 @@ static IMAGE_STORE: ImageStoreOwner = ImageStoreOwner {
 /// The image reference that selects the boot image's Rust root filesystem.
 pub(crate) const BUILTIN_RUST_IMAGE: &[u8] = b"builtin://rust";
 
-#[derive(Clone, Copy)]
-struct RamObject {
-    live: bool,
-    length: usize,
-    page_count: usize,
-    first: FrameLease,
-}
-
-impl RamObject {
-    const EMPTY: Self = Self {
-        live: false,
-        length: 0,
-        page_count: 0,
-        first: FrameLease::EMPTY,
-    };
-}
-
+/// Objects (compressed layers) in kernel heap memory: each a buffer of
+/// its expected length, filled by appends.
 struct RamBackend {
-    objects: [RamObject; OBJECT_LIMIT],
+    objects: [Option<Box<[u8]>>; OBJECT_LIMIT],
 }
 
 impl RamBackend {
     const fn new() -> Self {
         Self {
-            objects: [RamObject::EMPTY; OBJECT_LIMIT],
+            objects: [const { None }; OBJECT_LIMIT],
         }
+    }
+
+    fn object(&self, object: u8) -> Option<&[u8]> {
+        self.objects.get(usize::from(object))?.as_deref()
     }
 }
 
@@ -87,123 +77,61 @@ impl ObjectBackend for RamBackend {
     type Object = u8;
 
     fn create(&mut self, expected_length: usize) -> Option<Self::Object> {
-        let page_count = expected_length.div_ceil(PAGE_SIZE);
-        if page_count == 0 {
+        if expected_length == 0 {
             return None;
         }
-        let slot = self.objects.iter().position(|object| !object.live)?;
-        let object = &mut self.objects[slot];
-        let (first, _) = memory::allocate_contiguous_extent(FrameOwner::KERNEL, page_count)?;
-        object.live = true;
-        object.length = expected_length;
-        object.page_count = page_count;
-        object.first = first;
+        let slot = self.objects.iter().position(Option::is_none)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(expected_length).ok()?;
+        bytes.resize(expected_length, 0);
+        self.objects[slot] = Some(bytes.into_boxed_slice());
         Some(slot as u8)
     }
 
     fn append(&mut self, object: Self::Object, offset: usize, bytes: &[u8]) -> bool {
-        let Some(object) = self
-            .objects
-            .get_mut(usize::from(object))
-            .filter(|object| object.live)
+        let Some(Some(object)) = self.objects.get_mut(usize::from(object)) else {
+            return false;
+        };
+        let Some(target) = offset
+            .checked_add(bytes.len())
+            .and_then(|end| object.get_mut(offset..end))
         else {
             return false;
         };
-        if offset
-            .checked_add(bytes.len())
-            .is_none_or(|end| end > object.length)
-        {
-            return false;
-        }
-        let mut copied = 0;
-        while copied < bytes.len() {
-            let position = offset + copied;
-            let page = position / PAGE_SIZE;
-            let page_offset = position % PAGE_SIZE;
-            let length = (bytes.len() - copied).min(PAGE_SIZE - page_offset);
-            let Some(frame) = object
-                .first
-                .address()
-                .checked_add((page * PAGE_SIZE) as u64)
-                .and_then(|address| FrameLease::from_parts(address, object.first.generation()))
-                .and_then(Frame::leased)
-            else {
-                return false;
-            };
-            frame.write_bytes(page_offset, &bytes[copied..copied + length]);
-            copied += length;
-        }
+        target.copy_from_slice(bytes);
         true
     }
 
     fn read(&self, object: Self::Object, offset: usize, output: &mut [u8]) -> bool {
-        let Some(object) = self
-            .objects
-            .get(usize::from(object))
-            .filter(|object| object.live)
-        else {
+        let Some(source) = self.object(object).and_then(|object| {
+            offset
+                .checked_add(output.len())
+                .and_then(|end| object.get(offset..end))
+        }) else {
             return false;
         };
-        if offset
-            .checked_add(output.len())
-            .is_none_or(|end| end > object.length)
-        {
-            return false;
-        }
-        let mut copied = 0;
-        while copied < output.len() {
-            let position = offset + copied;
-            let page = position / PAGE_SIZE;
-            let page_offset = position % PAGE_SIZE;
-            let length = (output.len() - copied).min(PAGE_SIZE - page_offset);
-            let Some(frame) = object
-                .first
-                .address()
-                .checked_add((page * PAGE_SIZE) as u64)
-                .and_then(|address| FrameLease::from_parts(address, object.first.generation()))
-                .and_then(Frame::leased)
-            else {
-                return false;
-            };
-            frame.read_bytes(page_offset, &mut output[copied..copied + length]);
-            copied += length;
-        }
+        output.copy_from_slice(source);
         true
     }
 
     fn destroy(&mut self, object: Self::Object) -> bool {
-        let Some(object) = self
-            .objects
+        self.objects
             .get_mut(usize::from(object))
-            .filter(|object| object.live)
-        else {
-            return false;
-        };
-        if !memory::scrub_and_release_contiguous_extent(
-            FrameOwner::KERNEL,
-            object.first,
-            object.page_count,
-        ) {
-            return false;
-        }
-        *object = RamObject::EMPTY;
-        true
+            .and_then(Option::take)
+            .is_some()
     }
 }
 
 pub(crate) fn install() -> bool {
-    if IMAGE_STORE.installed.swap(true, Ordering::AcqRel) {
+    let mut store = IMAGE_STORE.store.lock();
+    if store.is_some() {
         return false;
     }
-    unsafe {
-        IMAGE_STORE
-            .store
-            .get()
-            .write(MaybeUninit::new(ImageStore::new(
-                RamBackend::new(),
-                CACHE_QUOTA,
-            )));
-    }
+    *store = Some(Store {
+        objects: ImageStore::new(RamBackend::new(), CACHE_QUOTA),
+        published_layers: [Digest([0; 32]); linox_oci::OCI_LAYER_LIMIT],
+        published_layer_count: 0,
+    });
     true
 }
 
@@ -247,104 +175,65 @@ pub(crate) fn stage_builtin_layer() -> bool {
 }
 
 pub(crate) fn stage(digest: [u8; 32], length: usize) -> Result<StagingHandle, StoreError> {
-    with_store(|store| store.stage(Digest(digest), length)).unwrap_or(Err(StoreError::Backend))
+    with_store(|store| store.objects.stage(Digest(digest), length))
+        .unwrap_or(Err(StoreError::Backend))
 }
 
 pub(crate) fn append(handle: StagingHandle, bytes: &[u8]) -> Result<usize, StoreError> {
-    with_store(|store| store.append(handle, bytes)).unwrap_or(Err(StoreError::Backend))
+    with_store(|store| store.objects.append(handle, bytes)).unwrap_or(Err(StoreError::Backend))
 }
 
 pub(crate) fn publish(handle: StagingHandle) -> Result<Digest, StoreError> {
-    let result = with_store(|store| store.publish(handle)).unwrap_or(Err(StoreError::Backend));
-    if let Ok(digest) = result {
-        let index = IMAGE_STORE
-            .published_layer_count
-            .fetch_add(1, Ordering::AcqRel);
+    with_store(|store| {
+        let digest = store.objects.publish(handle)?;
+        let index = store.published_layer_count;
         if index >= linox_oci::OCI_LAYER_LIMIT {
-            IMAGE_STORE
-                .published_layer_count
-                .store(linox_oci::OCI_LAYER_LIMIT, Ordering::Release);
             return Err(StoreError::QuotaExceeded);
         }
-        unsafe {
-            IMAGE_STORE
-                .published_layers
-                .get()
-                .cast::<Digest>()
-                .add(index)
-                .write(digest);
-        }
-    }
-    result
+        store.published_layers[index] = digest;
+        store.published_layer_count += 1;
+        Ok(digest)
+    })
+    .unwrap_or(Err(StoreError::Backend))
 }
 
 pub(crate) fn abort(handle: StagingHandle) -> Result<(), StoreError> {
-    with_store(|store| store.abort(handle)).unwrap_or(Err(StoreError::Backend))
+    with_store(|store| store.objects.abort(handle)).unwrap_or(Err(StoreError::Backend))
 }
 
 pub(crate) fn published_layer_count() -> usize {
-    IMAGE_STORE.published_layer_count.load(Ordering::Acquire)
+    with_store(|store| store.published_layer_count).unwrap_or(0)
+}
+
+/// Published layer `index`: its digest and object, if it is there.
+fn published_layer(store: &Store, index: usize) -> Option<(Digest, u8, usize)> {
+    if index >= store.published_layer_count {
+        return None;
+    }
+    let digest = store.published_layers[index];
+    let (object, length) = store.objects.published_object(digest)?;
+    Some((digest, object, length))
 }
 
 pub(crate) fn published_layer_info(index: usize) -> Option<([u8; 32], usize)> {
-    if index >= IMAGE_STORE.published_layer_count.load(Ordering::Acquire) {
-        return None;
-    }
-    let digest = unsafe {
-        IMAGE_STORE
-            .published_layers
-            .get()
-            .cast_const()
-            .cast::<Digest>()
-            .add(index)
-            .read()
-    };
-    with_store(|store| {
-        store
-            .published_object(digest)
-            .map(|(_, length)| (digest.0, length))
-    })?
+    with_store(|store| published_layer(store, index).map(|(digest, _, length)| (digest.0, length)))?
 }
 
 pub(crate) fn read_published_layer(index: usize, offset: usize, output: &mut [u8]) -> bool {
-    if index >= IMAGE_STORE.published_layer_count.load(Ordering::Acquire) {
-        return false;
-    }
-    let digest = unsafe {
-        IMAGE_STORE
-            .published_layers
-            .get()
-            .cast_const()
-            .cast::<Digest>()
-            .add(index)
-            .read()
-    };
     with_store(|store| {
-        store
-            .published_object(digest)
-            .is_some_and(|(object, length)| {
-                offset
-                    .checked_add(output.len())
-                    .is_some_and(|end| end <= length)
-                    && store.backend().read(object, offset, output)
-            })
+        published_layer(store, index).is_some_and(|(_, object, length)| {
+            offset
+                .checked_add(output.len())
+                .is_some_and(|end| end <= length)
+                && store.objects.backend().read(object, offset, output)
+        })
     })
     .unwrap_or(false)
 }
 
-fn with_store<T>(
-    operation: impl FnOnce(&mut ImageStore<RamBackend, OBJECT_LIMIT>) -> T,
-) -> Option<T> {
-    if !IMAGE_STORE.installed.load(Ordering::Acquire) {
-        return None;
-    }
-    let store = unsafe {
-        &mut *IMAGE_STORE
-            .store
-            .get()
-            .cast::<ImageStore<RamBackend, OBJECT_LIMIT>>()
-    };
-    Some(operation(store))
+/// Runs `operation` on the store, once installed, under its lock.
+fn with_store<T>(operation: impl FnOnce(&mut Store) -> T) -> Option<T> {
+    IMAGE_STORE.store.lock().as_mut().map(operation)
 }
 
 pub(crate) fn begin_layer_pull() -> bool {
@@ -352,31 +241,15 @@ pub(crate) fn begin_layer_pull() -> bool {
 }
 
 pub(crate) fn discard_published_layers() -> bool {
-    let count = IMAGE_STORE.published_layer_count.swap(0, Ordering::AcqRel);
-    if count > linox_oci::OCI_LAYER_LIMIT {
-        return false;
-    }
     with_store(|store| {
+        let count = core::mem::take(&mut store.published_layer_count);
+        if count > linox_oci::OCI_LAYER_LIMIT {
+            return false;
+        }
         let mut valid = true;
-        for index in 0..count {
-            let digest = unsafe {
-                IMAGE_STORE
-                    .published_layers
-                    .get()
-                    .cast_const()
-                    .cast::<Digest>()
-                    .add(index)
-                    .read()
-            };
-            valid &= digest != Digest([0; 32]) && store.remove(digest).is_ok();
-            unsafe {
-                IMAGE_STORE
-                    .published_layers
-                    .get()
-                    .cast::<Digest>()
-                    .add(index)
-                    .write(Digest([0; 32]));
-            }
+        for digest in &mut store.published_layers[..count] {
+            valid &= *digest != Digest([0; 32]) && store.objects.remove(*digest).is_ok();
+            *digest = Digest([0; 32]);
         }
         valid
     })
@@ -387,30 +260,23 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
     if slot >= crate::control_abi::DOMAIN_LIMIT || crate::published_rootfs::is_installed(slot) {
         return false;
     }
-    let layer_count = IMAGE_STORE.published_layer_count.load(Ordering::Acquire);
-    if layer_count == 0 || layer_count > linox_oci::OCI_LAYER_LIMIT {
-        return false;
-    }
     with_store(|store| {
+        let layer_count = store.published_layer_count;
+        if layer_count == 0 || layer_count > linox_oci::OCI_LAYER_LIMIT {
+            return false;
+        }
         let mut digests = [Digest([0; 32]); linox_oci::OCI_LAYER_LIMIT];
         let mut objects = [0_u8; linox_oci::OCI_LAYER_LIMIT];
         let mut compressed_lengths = [0_usize; linox_oci::OCI_LAYER_LIMIT];
         let mut headers = [0_usize; linox_oci::OCI_LAYER_LIMIT];
         let mut expected_lengths = [0_usize; linox_oci::OCI_LAYER_LIMIT];
         for index in 0..layer_count {
-            let digest = unsafe {
-                IMAGE_STORE
-                    .published_layers
-                    .get()
-                    .cast_const()
-                    .cast::<Digest>()
-                    .add(index)
-                    .read()
-            };
-            let Some((object, compressed_length)) = store.published_object(digest) else {
+            let digest = store.published_layers[index];
+            let Some((object, compressed_length)) = store.objects.published_object(digest) else {
                 return false;
             };
-            let Some(header) = gzip_header_length(store.backend(), object, compressed_length)
+            let Some(header) =
+                gzip_header_length(store.objects.backend(), object, compressed_length)
             else {
                 return false;
             };
@@ -419,6 +285,7 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
             }
             let mut trailer = [0; 4];
             if !store
+                .objects
                 .backend()
                 .read(object, compressed_length - 4, &mut trailer)
             {
@@ -456,6 +323,9 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
             );
             return false;
         };
+        // SAFETY: the extent was just allocated to the kernel, page_count
+        // frames long and direct-mapped; nothing else reaches it until
+        // register_rootfs_backing records it.
         let output =
             unsafe { core::slice::from_raw_parts_mut(address as *mut u8, page_count * PAGE_SIZE) };
         output.fill(0);
@@ -471,7 +341,7 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
                 return false;
             };
             let input = ObjectSlices::new(
-                store.backend(),
+                store.objects.backend(),
                 objects[index],
                 headers[index],
                 compressed_lengths[index] - headers[index] - 8,
@@ -524,6 +394,8 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
             return false;
         }
         output[rootfs_length..rootfs_end].fill(0);
+        // SAFETY: the same extent, no longer written; it stays allocated
+        // while a domain's published rootfs uses it (uninstall_rootfs).
         let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, rootfs_end) };
         if !crate::published_rootfs::install_published_rootfs(slot, bytes) {
             crate::serial_write_bytes(b"linox: OCI rootfs publication failed\r\n");
@@ -535,7 +407,7 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
             return false;
         }
         for digest in &digests[..layer_count] {
-            if store.remove(*digest).is_err() {
+            if store.objects.remove(*digest).is_err() {
                 let _ = crate::published_rootfs::uninstall_published_rootfs(slot);
                 let _ = memory::scrub_and_release_contiguous_extent(
                     FrameOwner::KERNEL,
@@ -554,19 +426,8 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
             );
             return false;
         }
-        for index in 0..layer_count {
-            unsafe {
-                IMAGE_STORE
-                    .published_layers
-                    .get()
-                    .cast::<Digest>()
-                    .add(index)
-                    .write(Digest([0; 32]));
-            }
-        }
-        IMAGE_STORE
-            .published_layer_count
-            .store(0, Ordering::Release);
+        store.published_layers[..layer_count].fill(Digest([0; 32]));
+        store.published_layer_count = 0;
         true
     })
     .unwrap_or(false)
@@ -626,6 +487,9 @@ pub(crate) fn install_cached_rootfs(
     let Some(address) = first_frame.direct_map_address() else {
         return false;
     };
+    // SAFETY: the caller hands over a kernel extent of page_count frames
+    // that holds the rootfs and is no longer written; it stays allocated
+    // while a domain's published rootfs uses it (uninstall_rootfs).
     let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
     if !crate::published_rootfs::install_published_rootfs(slot, bytes) {
         return false;
@@ -705,6 +569,8 @@ pub(crate) fn installed_rootfs(slot: usize) -> Option<&'static [u8]> {
         .load(Ordering::Acquire);
     let frame = FrameLease::from_parts(start, 1)?;
     let address = frame.direct_map_address()?;
+    // SAFETY: a registered backing extent, read-only once registered and
+    // freed only when its last domain uninstalls it.
     (length != 0).then(|| unsafe { core::slice::from_raw_parts(address as *const u8, length) })
 }
 
@@ -793,6 +659,7 @@ impl<'a> ObjectSlices<'a> {
     }
 }
 
+/// An object's bytes a page at a time, as the inflater takes them.
 impl<'a> Iterator for ObjectSlices<'a> {
     type Item = &'a [u8];
 
@@ -800,23 +667,11 @@ impl<'a> Iterator for ObjectSlices<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let object = self.backend.objects.get(usize::from(self.object))?;
-        let page = self.offset / PAGE_SIZE;
-        let page_offset = self.offset % PAGE_SIZE;
-        let length = self.remaining.min(PAGE_SIZE - page_offset);
-        if page >= object.page_count {
-            return None;
-        }
-        let address = FrameLease::from_parts(
-            object
-                .first
-                .address()
-                .checked_add((page * PAGE_SIZE) as u64)?,
-            object.first.generation(),
-        )?
-        .direct_map_address()?
-            + page_offset;
-        let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
+        let length = self.remaining.min(PAGE_SIZE - self.offset % PAGE_SIZE);
+        let bytes = self
+            .backend
+            .object(self.object)?
+            .get(self.offset..self.offset.checked_add(length)?)?;
         self.offset += length;
         self.remaining -= length;
         Some(bytes)

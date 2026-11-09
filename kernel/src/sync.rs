@@ -20,6 +20,10 @@ impl LockRank {
     /// copy to and from user memory while holding it, so it ranks just
     /// above system-call level, below anything a user copy may take.
     pub(crate) const SYSV_IPC: Self = Self(101);
+    /// The image store (`image_store`): held while a pull stages layers
+    /// and while a root filesystem is unpacked and published, at system
+    /// call or boot level, so it ranks just above system-call level.
+    pub(crate) const IMAGE_STORE: Self = Self(102);
     /// The mounts domains made; ranks below the heap so the table may grow
     /// while held, and above ARCHITECTURE, which system calls run under.
     pub(crate) const MOUNTS: Self = Self(105);

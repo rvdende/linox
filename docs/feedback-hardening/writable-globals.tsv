@@ -447,7 +447,7 @@ interior-mutable	kernel/src/arch/x86_64/smp.rs	ACTIVE_ROOTS	per-cpu-arch	allowli
 interior-mutable	kernel/src/arch/x86_64/smp.rs	TLB_SHOOTDOWN_ACKNOWLEDGED	per-cpu-arch	allowlist	none	serialized-cross-cpu-translation-acknowledgement
 interior-mutable	kernel/src/arch/x86_64/timer.rs	TIMER	platform-device	allowlist	none	explicit-host-timer-owner-root
 interior-mutable	kernel/src/domain.rs	DOMAIN_RUNTIME	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
-interior-mutable	kernel/src/image_store.rs	IMAGE_STORE	platform-device	allowlist	none	explicit-host-image-store-owner-root
+interior-mutable	kernel/src/image_store.rs	IMAGE_STORE	platform-device	allowlist	none	ranked-image-store-and-atomic-rootfs-backings
 interior-mutable	kernel/src/initramfs.rs	PUBLISHED_ROOT	platform-device	allowlist	none	explicit-host-initramfs-owner-root
 interior-mutable	kernel/src/ipc.rs	CONTROL_CHANNEL	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
 interior-mutable	kernel/src/lib.rs	HOST_CONTROL	platform-device	allowlist	none	explicit-host-control-owner-root

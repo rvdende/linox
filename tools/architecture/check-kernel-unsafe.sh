@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 624 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 624 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 614 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 614 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 287 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 287 to ${undocumented}" >&2
+if (( undocumented > 273 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 273 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 22 )); then
@@ -37,7 +37,7 @@ per_file_limits=(
     "arch/x86_64/pci.rs 25"
     "arch/x86_64/smp.rs 8"
     "arch/x86_64/timer.rs 8"
-    "image_store.rs 16"
+    "image_store.rs 5"
     "linux_overlay.rs 20"
     "lib.rs 20"
     "memory.rs 38"
