@@ -556,9 +556,51 @@ and MSI-X registers, `iommu.rs`, the local APIC and the HPET go through
 have no unsafe left and carry `#![forbid(unsafe_code)]`, which
 `check-kernel-unsafe.sh` keeps. Not yet done: loading another root
 (`activate`, in `address_space.rs` and `cpu.rs`, whose owners are
-changing them), xHCI's sub-allocated DMA pool and AMD-Vi's tables
-(both still `static mut` pages), and the virtio DMA pages `pci.rs` and
-`address_space.rs` share as raw direct-map addresses.
+changing them) and the virtio DMA pages `pci.rs` and `address_space.rs`
+share as raw direct-map addresses. (xHCI's pool and AMD-Vi's tables: next
+paragraph.)
+
+**Done so far (2026-11-09, continued): DMA pools, pixels and the frame
+allocator's tables (§4.3 C, E, F).** `trusted/dma.rs` now gives every kind
+of DMA memory one view, `DmaView` (volatile, bounds-checked accesses by
+offset and the device address of each byte), handed out by three owners:
+`StaticDma` claims (as before; `DmaPages::keep` keeps one for good),
+`DmaPool`, a static pool that one driver instance at a time
+sub-allocates through a `DmaArena` (`take`, `mark`/`release_to`, `keep`),
+handing out cloneable `DmaSpan`s, and `DmaBuffer`, moved here from
+`drivers/device_memory.rs` (deleted). xHCI's rings, contexts, scratchpads
+and buffers are `DmaSpan`s from its pool (`open` is safe: an arena per
+controller, kept when it opens and returned when it does not); AMD-Vi's
+device table, command buffer, event log, completion store and page-table
+pool are `StaticDma`s the one `DeviceTableBuilder` keeps for good, and its
+page tables are walked by pool offset; `Remapping::enable` is safe.
+`trusted/pixels.rs` is the framebuffer's one pixel type, `PixelBuffer`
+(volatile 32-bit stores and bounded copies), made from the firmware's
+identity map at boot (`PixelBuffer::firmware`, confined to `lib.rs` and
+`bringup/`), from the kernel's write-combining window
+(`paging::FramebufferWindow`, which only `paging.rs` makes), or from a
+`DmaBuffer` kept for the display (the virtio-gpu surface); `framebuffer.rs`
+draws only through it, publishes each surface once (`OwnedState`) for
+/dev/fb0, and keeps its console in `trusted/claim.rs`'s `ClaimCell`, a
+try-only latch the virtio-gpu scanout owner uses too. The frame allocator's
+tables are `trusted/frame_tables.rs`'s `FrameTables`, slices carved once
+from RAM at boot (only `memory.rs` calls `carve`); its frames are zeroed and
+scrubbed through `Frame`, and the firmware memory map is read through
+`trusted/boot.rs`. `iommu.rs`'s standing devices are a set-once
+`OwnedState`. `drivers/{xhci,amd_iommu,virtio_gpu}.rs`, `iommu.rs` and
+`memory.rs` carry `#![forbid(unsafe_code)]`; `framebuffer.rs` keeps one
+`unsafe fn`, `recover`, which force-releases the console for a bring-up
+crash report (the caller promises the interrupted code never resumes).
+Site counts: `xhci.rs` 19 -> 0, `amd_iommu.rs` 13 -> 0, `virtio_gpu.rs`
+4 -> 0, `device_memory.rs` 4 -> gone, `iommu.rs` 2 -> 0, `memory.rs` 38 ->
+0, `framebuffer.rs` 12 -> 1; `trusted/` gained `claim.rs` 4, `pixels.rs` 3,
+`frame_tables.rs` 2 and `boot.rs` 1. Kernel totals (`check-kernel-unsafe.sh`):
+`unsafe` blocks 599 -> 521, blocks without a SAFETY comment 266 -> 260,
+`static mut` 19 -> 6. Not yet done: `usb_input`'s
+controller state (a `static mut` under a try-latch, like the console's
+was), the virtio DMA pages `pci.rs` and `address_space.rs` share as raw
+direct-map addresses, and `paging.rs`'s own descriptor reads
+(`read_descriptor`, which could use `trusted::boot`).
 
 **Step 7 in progress (2026-11-09): kernel-private pages onto the heap.**
 AIO contexts (`linux_aio`), the in-kernel file store (`linux_tmpfs`) and
@@ -662,8 +704,10 @@ the context switch those steps introduce should be written into
    `tests/qemu/rust-workloads.sh`, `make test-storage`,
    `make test-oci-cache`, `make test-ltp` (the sysv IPC and tmpfs
    clusters).
-8. **Drivers onto `IoMem` and `DmaBuffer`.** Give `Mmio` a safe constructor
-   from a PCI BAR, then port the drivers the way `virtio_gpu.rs` is
+8. **Drivers onto `IoMem` and `DmaBuffer`.** (Done for every bring-up
+   driver, xHCI, AMD-Vi and virtio-gpu; left: `usb_input`'s state, the
+   virtio-net device in `linux_socket.rs`, and `pci.rs`'s virtio code.)
+   Give `Mmio` a safe constructor from a PCI BAR, then port the drivers the way `virtio_gpu.rs` is
    written: `e1000e`, `realtek`, `hda`, `nvme`, `ahci`, `xhci` and
    `usb_input`, `amd_iommu`'s command and event rings, the virtio-net device
    in `linux_socket.rs`, and the virtio-blk/net code in `pci.rs`. Each
