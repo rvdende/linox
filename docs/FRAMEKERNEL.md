@@ -829,8 +829,8 @@ keeps only the `Sync` impl of the owner that holds those records.
   `boot_verify.rs`, `linux_thread.rs`, `linux_scheduler.rs` 1 -> 0,
   `scheduler.rs` 4 -> 3; all of these but `cpu.rs`,
   `linux_process_state.rs` and `scheduler.rs` carry
-  `#![forbid(unsafe_code)]`. Kernel `unsafe` blocks 357 -> 284, blocks
-  without a SAFETY comment 117 -> 41.
+  `#![forbid(unsafe_code)]`. Kernel `unsafe` blocks 353 -> 280 (from main at b65ee6eb), blocks
+  without a SAFETY comment 115 -> 39.
 
 Still to do here, and why:
 - The process records (`linux_process_state.rs`, 8 sites, and the `Sync`
