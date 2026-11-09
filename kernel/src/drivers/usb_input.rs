@@ -8,15 +8,13 @@
 //! [`pump`]. The controllers run without interrupts: readers of
 //! /dev/input/eventN call the pump, which takes the reports that have
 //! arrived and turns them into input events with `linox_usb_hid`.
-
-use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, Ordering};
+#![forbid(unsafe_code)]
 
 use linox_usb_hid as usb_hid;
 
 use super::{pci, say, xhci};
 use crate::linux_input;
-use crate::trusted::mmio::Mmio;
+use crate::trusted::{claim::ClaimCell, mmio::Mmio};
 
 /// xHCI controllers driven for input.
 pub(crate) const MAX_CONTROLLERS: usize = 2;
@@ -153,13 +151,12 @@ struct State {
     devices: [[Option<Device>; xhci::MAX_INPUTS]; MAX_CONTROLLERS],
 }
 
-/// Written by [`start`] before the pump is installed, then owned by
-/// whichever pump call holds [`PUMPING`].
-static mut STATE: State = State {
+/// Written by [`start`] before the pump is installed, then used by
+/// whichever pump call claims it (a pump that finds it claimed returns).
+static STATE: ClaimCell<State> = ClaimCell::new(State {
     controllers: [const { None }; MAX_CONTROLLERS],
     devices: [const { [const { None }; xhci::MAX_INPUTS] }; MAX_CONTROLLERS],
-};
-static PUMPING: AtomicBool = AtomicBool::new(false);
+});
 
 /// Opens the controllers in `hosts`, whose registers are `registers` (by
 /// index, `None` where mapping failed; each is taken), and registers an
@@ -195,8 +192,10 @@ pub(crate) fn start(
         }
         return;
     }
-    // SAFETY: the pump is not installed yet, so nothing else uses STATE.
-    let state = unsafe { &mut *addr_of_mut!(STATE) };
+    // The pump is not installed yet, so nothing else holds STATE.
+    let Some(mut state) = STATE.try_claim() else {
+        return;
+    };
     let mut registered = 0;
     for (slot, host) in found.iter().flatten().enumerate() {
         let function = host.function;
@@ -271,6 +270,7 @@ pub(crate) fn start(
         }
         state.controllers[slot] = Some(controller);
     }
+    drop(state);
     if registered != 0 {
         linux_input::set_pump(pump);
     }
@@ -280,12 +280,11 @@ pub(crate) fn start(
 /// events. Cheap when nothing is pending: one memory read per controller.
 /// A call made while another is running returns at once.
 fn pump() {
-    if PUMPING.swap(true, Ordering::Acquire) {
+    // Start finished writing STATE before it installed the pump.
+    let Some(mut state) = STATE.try_claim() else {
         return;
-    }
-    // SAFETY: PUMPING grants exclusive access to STATE, which start finished
-    // writing before it installed the pump.
-    let state = unsafe { &mut *addr_of_mut!(STATE) };
+    };
+    let state = &mut *state;
     for (controller, devices) in state.controllers.iter_mut().zip(&mut state.devices) {
         let Some(controller) = controller else {
             continue;
@@ -299,5 +298,4 @@ fn pump() {
             }
         }
     }
-    PUMPING.store(false, Ordering::Release);
 }

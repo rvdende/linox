@@ -8,8 +8,8 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 412 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 412 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 410 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 410 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
@@ -20,8 +20,8 @@ if (( undocumented > 179 )); then
     echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 179 to ${undocumented}" >&2
     exit 1
 fi
-if (( static_mut > 4 )); then
-    echo "kernel unsafe check: top-level static mut declarations grew from 4 to ${static_mut}" >&2
+if (( static_mut > 3 )); then
+    echo "kernel unsafe check: top-level static mut declarations grew from 3 to ${static_mut}" >&2
     exit 1
 fi
 
@@ -89,6 +89,7 @@ forbidding_files=(
     "drivers/nvme.rs"
     "drivers/pci.rs"
     "drivers/realtek.rs"
+    "drivers/usb_input.rs"
     "drivers/virtio_gpu.rs"
     "drivers/xhci.rs"
     "initramfs.rs"

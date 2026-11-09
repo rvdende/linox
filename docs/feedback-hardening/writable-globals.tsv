@@ -531,7 +531,6 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_RUNTIME
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_RUNTIME_EPOLL_ALIASES	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_SOCKET_SINGLE_ATTEMPT	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu/architecture.rs	CPU_STACKS	per-cpu-arch	allowlist	none	explicit-per-cpu-stack-owner-root
-interior-mutable	kernel/src/drivers/usb_input.rs	PUMPING	platform-device	allowlist	none	usb-input-pump-reentrancy-latch
 interior-mutable	kernel/src/drivers/virtio_gpu.rs	SCANOUT	platform-device	allowlist	none	try-latched-virtio-gpu-scanout-owner
 interior-mutable	kernel/src/framebuffer.rs	OWNED	platform-device	allowlist	none	framebuffer-domain-ownership-flag
 interior-mutable	kernel/src/framebuffer.rs	READY	platform-device	allowlist	none	framebuffer-publication-flag
@@ -566,7 +565,7 @@ interior-mutable	kernel/src/drivers/realtek.rs	RECEIVE_BUFFERS	platform-device	a
 interior-mutable	kernel/src/drivers/realtek.rs	RECEIVE_RING	platform-device	allowlist	none	claimed-static-dma-pages
 interior-mutable	kernel/src/drivers/realtek.rs	TRANSMIT_BUFFERS	platform-device	allowlist	none	claimed-static-dma-pages
 interior-mutable	kernel/src/drivers/realtek.rs	TRANSMIT_RING	platform-device	allowlist	none	claimed-static-dma-pages
-static-mut	kernel/src/drivers/usb_input.rs	STATE	platform-device	allowlist	none	serialized-usb-input-controller-state
+interior-mutable	kernel/src/drivers/usb_input.rs	STATE	platform-device	allowlist	none	claim-cell-usb-input-controller-state
 interior-mutable	kernel/src/linux_areas.rs	PROCESSES	process-runtime	allowlist	none	ranked-memory-area-sets
 interior-mutable	kernel/src/linux_exe.rs	ENTRIES	process-runtime	allowlist	none	ranked-executable-path-list
 interior-mutable	kernel/src/linux_mounts.rs	MOUNTS	process-runtime	allowlist	none	ranked-domain-mount-table
