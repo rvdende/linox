@@ -1240,3 +1240,384 @@ pub(super) fn linux_epoll_create1(flags: u64) -> u64 {
     set_linux_descriptor_close_on_exec(descriptor, flags & LINUX_O_CLOEXEC != 0);
     descriptor
 }
+
+pub(super) fn clear_linux_poll_snapshot(slot: usize) {
+    for descriptor in &X86_RUNTIME.LINUX_THREAD_POLL_DESCRIPTORS[slot] {
+        descriptor.store(0, Ordering::SeqCst);
+    }
+    for events in &X86_RUNTIME.LINUX_THREAD_POLL_EVENTS[slot] {
+        events.store(0, Ordering::SeqCst);
+    }
+    crate::linux_wait_sets::remove(linux_wait_set_key(slot));
+}
+
+/// The `linux_wait_sets` key of the current process's thread `slot`.
+fn linux_wait_set_key(slot: usize) -> crate::linux_wait_sets::Key {
+    (
+        linux_execution_instance(),
+        current_linux_process_pid(),
+        slot as u16,
+    )
+}
+
+/// How many descriptors the current process's table has room for, as
+/// Linux's fdtable max_fds (what select looks at, at most): the fixed
+/// table, or a size past it covering the highest descriptor open there,
+/// grown as Linux grows its table (a power of two times 128).
+fn linux_descriptor_table_size() -> u64 {
+    let Some(&(highest, _)) = linux_overflow_descriptors().last() else {
+        return LINUX_DESCRIPTOR_TABLE_LIMIT;
+    };
+    ((highest / 128 + 1).next_power_of_two() * 128)
+        .min(linux_nr_open().max(highest + 1))
+        .max(LINUX_DESCRIPTOR_TABLE_LIMIT)
+}
+
+pub(super) fn clear_linux_select_snapshot(slot: usize) {
+    X86_RUNTIME.LINUX_THREAD_SELECT_READ_ADDRESSES[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_SELECT_WRITE_ADDRESSES[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_SELECT_EXCEPTION_ADDRESSES[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_SELECT_TIMEOUT_ADDRESSES[slot].store(0, Ordering::SeqCst);
+    for value in &X86_RUNTIME.LINUX_THREAD_SELECT_READ_SETS[slot] {
+        value.store(0, Ordering::SeqCst);
+    }
+    for value in &X86_RUNTIME.LINUX_THREAD_SELECT_WRITE_SETS[slot] {
+        value.store(0, Ordering::SeqCst);
+    }
+    for value in &X86_RUNTIME.LINUX_THREAD_SELECT_EXCEPTION_SETS[slot] {
+        value.store(0, Ordering::SeqCst);
+    }
+    crate::linux_wait_sets::remove(linux_wait_set_key(slot));
+}
+
+pub(super) fn clear_linux_iov_snapshot(slot: usize) {
+    for address in &X86_RUNTIME.LINUX_THREAD_IOV_ADDRESSES[slot] {
+        address.store(0, Ordering::SeqCst);
+    }
+    for length in &X86_RUNTIME.LINUX_THREAD_IOV_LENGTHS[slot] {
+        length.store(0, Ordering::SeqCst);
+    }
+}
+
+pub(super) fn complete_linux_poll_wait(slot: usize, timed_out: bool) -> bool {
+    let kind = if slot < LINUX_THREAD_LIMIT {
+        X86_RUNTIME.LINUX_THREAD_WAIT_KINDS[slot].load(Ordering::SeqCst)
+    } else {
+        LINUX_THREAD_WAIT_NONE
+    };
+    if slot >= LINUX_THREAD_LIMIT
+        || X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) != LINUX_THREAD_BLOCKED
+        || !matches!(kind, LINUX_THREAD_WAIT_POLL | LINUX_THREAD_WAIT_PPOLL)
+    {
+        return false;
+    }
+    let count = X86_RUNTIME.LINUX_THREAD_WAIT_OUTPUTS[slot].load(Ordering::SeqCst) as usize;
+    // More pollfds than the fixed snapshot holds wait in linux_wait_sets.
+    let stored = if count > LINUX_POLLFD_LIMIT {
+        match crate::linux_wait_sets::load(linux_wait_set_key(slot)) {
+            Some(words) if words.len() == count => Some(words),
+            _ => return false,
+        }
+    } else {
+        None
+    };
+    let mut small = [0_u8; LINUX_POLLFD_LIMIT * 8];
+    let mut large = Vec::new();
+    let pollfds: &mut [u8] = if stored.is_some() {
+        if large.try_reserve_exact(count * 8).is_err() {
+            return false;
+        }
+        large.resize(count * 8, 0);
+        &mut large[..]
+    } else {
+        &mut small[..]
+    };
+    let mut ready = 0_u64;
+    for index in 0..count {
+        let (descriptor, events) = match &stored {
+            Some(words) => (words[index] as u32, (words[index] >> 32) as u16),
+            None => (
+                X86_RUNTIME.LINUX_THREAD_POLL_DESCRIPTORS[slot][index].load(Ordering::SeqCst),
+                X86_RUNTIME.LINUX_THREAD_POLL_EVENTS[slot][index].load(Ordering::SeqCst),
+            ),
+        };
+        let returned = linux_descriptor_poll_events(descriptor as i32, events);
+        let offset = index * 8;
+        pollfds[offset..offset + 4].copy_from_slice(&descriptor.to_ne_bytes());
+        pollfds[offset + 4..offset + 6].copy_from_slice(&events.to_ne_bytes());
+        pollfds[offset + 6..offset + 8].copy_from_slice(&returned.to_ne_bytes());
+        ready += u64::from(returned != 0);
+    }
+    if ready == 0 && !timed_out {
+        return false;
+    }
+    let address = X86_RUNTIME.LINUX_THREAD_WAIT_KEYS[slot].load(Ordering::SeqCst);
+    let result = if count == 0 || copy_to_linux_user(address, &pollfds[..count * 8]) {
+        ready
+    } else {
+        LINUX_EFAULT
+    };
+    X86_RUNTIME.LINUX_THREAD_RAXS[slot].store(result, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_WAIT_KINDS[slot].store(LINUX_THREAD_WAIT_NONE, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_WAIT_KEYS[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_WAIT_OUTPUTS[slot].store(0, Ordering::SeqCst);
+    X86_RUNTIME.LINUX_THREAD_WAIT_DEADLINES[slot].store(0, Ordering::SeqCst);
+    if kind == LINUX_THREAD_WAIT_PPOLL {
+        X86_RUNTIME.LINUX_THREAD_SIGNAL_MASKS[slot].store(
+            X86_RUNTIME.LINUX_THREAD_WAIT_PRIOR_SIGNAL_MASKS[slot].swap(0, Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+    }
+    clear_linux_poll_snapshot(slot);
+    X86_RUNTIME.LINUX_THREAD_STATES[slot].store(LINUX_THREAD_READY, Ordering::SeqCst);
+    match (kind, timed_out) {
+        (LINUX_THREAD_WAIT_POLL, true) => {
+            X86_RUNTIME
+                .LINUX_POLL_WAIT_TIMEOUT_COUNT
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        (LINUX_THREAD_WAIT_POLL, false) => {
+            X86_RUNTIME
+                .LINUX_POLL_WAIT_WAKE_COUNT
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        (LINUX_THREAD_WAIT_PPOLL, true) => {
+            X86_RUNTIME
+                .LINUX_PPOLL_WAIT_TIMEOUT_COUNT
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        (LINUX_THREAD_WAIT_PPOLL, false) => {
+            X86_RUNTIME
+                .LINUX_PPOLL_WAIT_WAKE_COUNT
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+    true
+}
+
+pub(super) fn linux_descriptor_poll_events(descriptor: i32, requested: u16) -> u16 {
+    let Ok(descriptor) = u64::try_from(descriptor) else {
+        return 0;
+    };
+    match linux_graphics_descriptor(descriptor) {
+        Some(LinuxGraphicsDevice::Input(device)) => {
+            return if crate::linux_input::pending(device) {
+                requested & LINUX_POLLIN
+            } else {
+                0
+            };
+        }
+        Some(LinuxGraphicsDevice::Framebuffer) => {
+            return requested & (LINUX_POLLIN | LINUX_POLLOUT);
+        }
+        None => {}
+    }
+    // /proc/mounts reads at once, and a mount table change since it was
+    // last read is POLLPRI and POLLERR, as in Linux.
+    if linux_device_descriptor(descriptor) & !3 == LINUX_FILE_PROC_MOUNTS {
+        let readable = requested & (LINUX_POLLIN | LINUX_POLLRDNORM);
+        return if linux_proc_mounts_changed(descriptor) {
+            readable | LINUX_POLLPRI | LINUX_POLLERR
+        } else {
+            readable
+        };
+    }
+    if linux_pidfd_descriptor(descriptor) {
+        let Some(process) = linux_pidfd_process(descriptor) else {
+            return LINUX_POLLHUP;
+        };
+        return if linux_process::live_process_status(process)
+            .is_some_and(|status| status.state == linux_process::LiveProcessState::Zombie)
+        {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        };
+    }
+    if linux_signalfd_descriptor(descriptor) {
+        let mask = linux_descriptor_offset(descriptor).load(Ordering::SeqCst);
+        let dynamic = linux_dynamic_pending_masks().map_or(0, |(process, thread)| process | thread);
+        return if (X86_RUNTIME.ELF_PROBE_PENDING_SIGNALS.load(Ordering::SeqCst) | dynamic) & mask
+            != 0
+        {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        };
+    }
+    if linux_inotify_descriptor(descriptor) {
+        return if linux_inotify_ready(descriptor) {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        };
+    }
+    if linux_fanotify_descriptor(descriptor) {
+        return if linux_fanotify_ready(descriptor) {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        };
+    }
+    if let Some((end, index)) = linux_pty_descriptor(descriptor) {
+        return linux_pty_poll_events(end, index, requested);
+    }
+    if let Some((crate::linux_userfaultfd::CLASS_CONTEXT, id)) = linux_object_descriptor(descriptor)
+    {
+        return linux_userfaultfd_poll_events(descriptor, id, requested);
+    }
+    if let Some(id) = linux_tun_file(descriptor) {
+        return linux_tun_poll_events(id, requested);
+    }
+    if let Some(slot) = linux_socket_slot(descriptor) {
+        if let Some((class, id)) = crate::linux_socket::object(slot) {
+            return match class {
+                // A sync file is readable once its fence has signalled.
+                crate::linux_drm::CLASS_FENCE => {
+                    if crate::drivers::virtio_gpu::fence_signaled(id) {
+                        requested & LINUX_POLLIN
+                    } else {
+                        0
+                    }
+                }
+                crate::linux_drm::CLASS_DMABUF => requested & (LINUX_POLLIN | LINUX_POLLOUT),
+                // A render node has no DRM events to read.
+                _ => 0,
+            };
+        }
+        let Some((readable, writable, error)) = crate::linux_socket::readiness(slot) else {
+            return LINUX_POLLNVAL;
+        };
+        let device = linux_device_descriptor(descriptor);
+        let pipe = device & LINUX_DEVICE_PIPE != 0;
+        // A pipe's other end is gone: its read end hangs up (POLLHUP) when
+        // no writer is left, and its write end reports an error (POLLERR)
+        // when no reader is.
+        let peer_gone = pipe && crate::linux_socket::local_peer_write_closed(slot) == Some(true);
+        let write_end = device & 3 == LINUX_DESCRIPTOR_OUTPUT;
+        let hangup = peer_gone && !write_end;
+        let error = error || peer_gone && write_end;
+        // A pipe is readable only with data queued; end-of-file is POLLHUP
+        // alone, where a socket also reports POLLIN.
+        let readable = readable
+            && (!pipe
+                || crate::linux_socket::local_queued_bytes(slot).is_ok_and(|queued| queued != 0));
+        let writable = writable && (!pipe || crate::linux_socket::pipe_writable(slot));
+        return (if readable {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        }) | (if writable {
+            requested & LINUX_POLLOUT
+        } else {
+            0
+        }) | if error { LINUX_POLLERR } else { 0 }
+            | if hangup { LINUX_POLLHUP } else { 0 }
+            | if requested & LINUX_POLLRDHUP != 0 && crate::linux_socket::read_hung_up(slot) {
+                LINUX_POLLRDHUP
+            } else {
+                0
+            };
+    }
+    let console = u16::from(linux_console_descriptor(descriptor));
+    if console != 0 {
+        let readable = if console & LINUX_DESCRIPTOR_INPUT != 0 {
+            if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
+                if crate::serial_input_ready() {
+                    requested & LINUX_POLLIN
+                } else {
+                    0
+                }
+            } else {
+                LINUX_POLLHUP
+            }
+        } else {
+            0
+        };
+        let writable = if console & LINUX_DESCRIPTOR_OUTPUT != 0 {
+            requested & LINUX_POLLOUT
+        } else {
+            0
+        };
+        return readable | writable;
+    }
+    if linux_epoll_descriptor(descriptor) {
+        return if linux_epoll_event(descriptor, false)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            requested & LINUX_POLLIN
+        } else {
+            0
+        };
+    }
+    if linux_eventfd_descriptor(descriptor) {
+        let counter = linux_eventfd_state(descriptor)
+            .map(|(counter, _)| counter.load(Ordering::SeqCst))
+            .unwrap_or(0);
+        let mut returned = 0;
+        if counter != 0 {
+            returned |= requested & LINUX_POLLIN;
+        }
+        if counter < u64::MAX - 1 {
+            returned |= requested & LINUX_POLLOUT;
+        }
+        // The overflow state an AIO completion can reach (eventfd06).
+        if counter == u64::MAX {
+            returned |= LINUX_POLLERR;
+        }
+        return returned;
+    }
+    if let Some(state) = linux_timerfd_state(descriptor) {
+        let deadline = state.deadline.load(Ordering::SeqCst);
+        let ready = deadline != 0 && linux_elapsed_nanoseconds().is_some_and(|now| now >= deadline);
+        return if ready { requested & LINUX_POLLIN } else { 0 };
+    }
+    if linux_pipe_read_descriptor(descriptor) {
+        let mut returned = 0;
+        if X86_RUNTIME.ELF_PROBE_PIPE_LENGTH.load(Ordering::SeqCst) != 0 {
+            returned |= requested & LINUX_POLLIN;
+        }
+        if X86_RUNTIME
+            .ELF_PROBE_PIPE_WRITE_DESCRIPTOR
+            .load(Ordering::SeqCst)
+            == 0
+        {
+            returned |= LINUX_POLLHUP;
+        }
+        return returned;
+    }
+    if linux_pipe_write_descriptor(descriptor) {
+        if X86_RUNTIME
+            .ELF_PROBE_PIPE_READ_DESCRIPTOR
+            .load(Ordering::SeqCst)
+            == 0
+        {
+            return LINUX_POLLERR;
+        }
+        return if X86_RUNTIME.ELF_PROBE_PIPE_LENGTH.load(Ordering::SeqCst)
+            < LINUX_PIPE_CAPACITY as u32
+        {
+            requested & LINUX_POLLOUT
+        } else {
+            0
+        };
+    }
+    let device = linux_device_descriptor(descriptor);
+    if device == 0 {
+        return LINUX_POLLNVAL;
+    }
+    let access = device & 3;
+    let mut returned = 0;
+    if matches!(access, LINUX_DESCRIPTOR_INPUT | 3)
+        && (device & LINUX_DEVICE_CONSOLE == 0 || crate::serial_input_ready())
+    {
+        returned |= requested & LINUX_POLLIN;
+    }
+    if matches!(access, LINUX_DESCRIPTOR_OUTPUT | 3) {
+        returned |= requested & LINUX_POLLOUT;
+    }
+    returned
+}
