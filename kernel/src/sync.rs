@@ -167,6 +167,12 @@ impl LockRank {
     /// privilege checks ask it under whatever lock a system call holds, so
     /// it ranks above them all, below the frame allocator.
     pub(crate) const USER_NAMESPACES: Self = Self(194);
+    /// Each domain's file cache index (`linux_file_cache`): a leaf held
+    /// only to probe or fill a table that has room, never to allocate or
+    /// free. Copy-on-write faults ask it during copies to user memory under
+    /// whatever lock a system call holds, so it ranks above every such
+    /// lock (all below the heap), below the frame allocator.
+    pub(crate) const FILE_CACHE: Self = Self(196);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);

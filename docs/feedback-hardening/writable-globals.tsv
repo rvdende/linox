@@ -454,7 +454,6 @@ interior-mutable	kernel/src/lib.rs	HOST_CONTROL	platform-device	allowlist	none	e
 interior-mutable	kernel/src/lib.rs	CONSOLE_NONBLOCKING	domain-runtime	allowlist	none	atomic-console-file-status-flag
 static-mut	kernel/src/lib.rs	KERNEL_STACK	bootstrap-init	allowlist	none	explicit-bootstrap-kernel-stack-owner-root
 interior-mutable	kernel/src/linux_aio.rs	AIO_RUNTIME	domain-runtime	allowlist	none	ranked-aio-contexts
-interior-mutable	kernel/src/linux_file_cache.rs	FILE_CACHE_RUNTIME	domain-runtime	allowlist	none	explicit-domain-file-cache-owner-root
 interior-mutable	kernel/src/linux_keyring.rs	KEYRINGS	domain-runtime	allowlist	none	ranked-per-domain-keyrings
 interior-mutable	kernel/src/linux_drm.rs	DRM	domain-runtime	allowlist	none	ranked-drm-files-and-dmabufs
 interior-mutable	kernel/src/linux_drm.rs	MAKING_NODES	domain-runtime	allowlist	none	atomic-reentrancy-guard
@@ -681,6 +680,7 @@ interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_LENGTH	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_TEXT	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/drivers/clock.rs	TICKS_PER_MS	platform-device	allowlist	none	atomic-published-after-calibration
+interior-mutable	kernel/src/linux_file_cache.rs	FILE_CACHES	domain-runtime	allowlist	none	ranked-file-cache-leaf-per-domain
 interior-mutable	kernel/src/linux_user.rs	INSTALLED	domain-runtime	allowlist	none	atomic-set-once-install-flag
 interior-mutable	kernel/src/linux_user.rs	TABLES	domain-runtime	allowlist	none	ranked-user-namespace-table-leaves
 interior-mutable	kernel/src/trusted/msr.rs	REPORTED_APIC_BASE	platform-device	allowlist	none	atomic-published-at-discovery
