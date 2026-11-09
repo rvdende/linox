@@ -8,8 +8,8 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 829 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 829 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 801 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 801 to ${unsafe_blocks}" >&2
     exit 1
 fi
 if (( safety_comments < 390 )); then
@@ -28,13 +28,17 @@ fi
 per_file_limits=(
     "address_space.rs 80"
     "arch/x86_64/paging.rs 15"
+    "arch/x86_64/pci.rs 37"
+    "arch/x86_64/timer.rs 24"
     "image_store.rs 16"
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
+    "lib.rs 32"
     "memory.rs 38"
     "trusted/frame.rs 9"
     "trusted/page_table.rs 2"
+    "trusted/port.rs 8"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"
@@ -43,6 +47,18 @@ for limit in "${per_file_limits[@]}"; do
     sites="${sites:-0}"
     if (( sites > maximum )); then
         echo "kernel unsafe check: ${file} has ${sites} unsafe sites, more than its limit of ${maximum}" >&2
+        exit 1
+    fi
+done
+
+# Files moved onto the trusted layer's safe APIs that have no unsafe left
+# keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
+forbidding_files=(
+    "drivers/pci.rs"
+)
+for file in "${forbidding_files[@]}"; do
+    if ! rg -q '^#!\[forbid\(unsafe_code\)\]$' "${kernel_source}/${file}"; then
+        echo "kernel unsafe check: ${file} must keep #![forbid(unsafe_code)]" >&2
         exit 1
     fi
 done

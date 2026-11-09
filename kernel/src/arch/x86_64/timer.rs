@@ -8,6 +8,7 @@ use super::{
 use crate::{
     control_abi,
     scheduler::{self, RuntimeAction, UserInterruptFrame},
+    trusted::port::Port8,
 };
 
 const CPUID_BASIC_MAX: u32 = 0;
@@ -35,9 +36,6 @@ const APIC_TIMER_MASKED: u32 = 1 << 16;
 const APIC_DIVIDE_BY_16: u32 = 0x3;
 const PIT_FREQUENCY_HZ: u64 = 1_193_182;
 const PIT_CALIBRATION_TICKS: u16 = 11_932;
-const PIT_COMMAND: u16 = 0x43;
-const PIT_CHANNEL_2: u16 = 0x42;
-const PIT_SPEAKER_CONTROL: u16 = 0x61;
 const PIT_CHANNEL_2_MODE_0: u8 = 0xb0;
 const PIT_GATE_2: u8 = 1 << 0;
 const PIT_SPEAKER_ENABLE: u8 = 1 << 1;
@@ -274,20 +272,17 @@ pub(crate) unsafe fn calibrate_local_apic(
     apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
     apic.write(APIC_INITIAL_COUNT, u32::MAX);
 
-    let original_control = in_u8(PIT_SPEAKER_CONTROL);
-    out_u8(PIT_SPEAKER_CONTROL, original_control & !PIT_GATE_2);
-    out_u8(PIT_COMMAND, PIT_CHANNEL_2_MODE_0);
-    out_u8(PIT_CHANNEL_2, PIT_CALIBRATION_TICKS as u8);
-    out_u8(PIT_CHANNEL_2, (PIT_CALIBRATION_TICKS >> 8) as u8);
+    let original_control = Port8::SPEAKER_CONTROL.read();
+    Port8::SPEAKER_CONTROL.write(original_control & !PIT_GATE_2);
+    Port8::PIT_COMMAND.write(PIT_CHANNEL_2_MODE_0);
+    Port8::PIT_CHANNEL_2.write(PIT_CALIBRATION_TICKS as u8);
+    Port8::PIT_CHANNEL_2.write((PIT_CALIBRATION_TICKS >> 8) as u8);
     let tsc_start = timestamp_counter();
-    out_u8(
-        PIT_SPEAKER_CONTROL,
-        (original_control & !PIT_SPEAKER_ENABLE) | PIT_GATE_2,
-    );
+    Port8::SPEAKER_CONTROL.write((original_control & !PIT_SPEAKER_ENABLE) | PIT_GATE_2);
 
     let mut completed = false;
     for _ in 0..PIT_POLL_LIMIT {
-        if in_u8(PIT_SPEAKER_CONTROL) & PIT_OUTPUT_2 != 0 {
+        if Port8::SPEAKER_CONTROL.read() & PIT_OUTPUT_2 != 0 {
             completed = true;
             break;
         }
@@ -297,7 +292,7 @@ pub(crate) unsafe fn calibrate_local_apic(
     let tsc_end = timestamp_counter();
     let current = apic.read(APIC_CURRENT_COUNT);
     apic.write(APIC_INITIAL_COUNT, 0);
-    out_u8(PIT_SPEAKER_CONTROL, original_control);
+    Port8::SPEAKER_CONTROL.write(original_control);
     if !completed {
         return None;
     }
@@ -919,24 +914,4 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
             TIMER.preemption_count.fetch_add(1, Ordering::SeqCst);
         }
     }
-}
-
-unsafe fn in_u8(port: u16) -> u8 {
-    let value: u8;
-    asm!(
-        "in al, dx",
-        in("dx") port,
-        out("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
-    value
-}
-
-unsafe fn out_u8(port: u16, value: u8) {
-    asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
 }

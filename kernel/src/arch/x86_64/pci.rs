@@ -11,12 +11,10 @@ use super::{
 use crate::{
     control_abi,
     scheduler::{self, UserInterruptFrame},
+    trusted::pci_config,
     volume,
 };
 
-const CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
-const CONFIG_DATA_PORT: u16 = 0x0cfc;
-const CONFIG_ENABLE: u32 = 1 << 31;
 const CONFIG_SIZE: usize = 256;
 const CONFIG_DWORDS: usize = CONFIG_SIZE / 4;
 const VIRTIO_VENDOR: u16 = 0x1af4;
@@ -560,7 +558,7 @@ fn discover_virtio_device<T: Copy>(
 ) -> Option<T> {
     let mut found = None;
     for device in 0_u8..32 {
-        let identity = unsafe { read_config_u32(0, device, 0, 0) };
+        let identity = pci_config::read_u32(0, device, 0, 0);
         if identity as u16 == u16::MAX {
             continue;
         }
@@ -570,7 +568,7 @@ fn discover_virtio_device<T: Copy>(
         if found.is_some() {
             return None;
         }
-        let config = unsafe { read_config_space(0, device, 0) };
+        let config = read_config_space(0, device, 0);
         found = parse(&config, 0, device, 0);
         found?;
     }
@@ -587,31 +585,30 @@ pub(crate) fn network_msix_is_disabled(device: VirtioNetworkDevice) -> bool {
         .msix
         .capability_offset
         .checked_add(2)
-        .is_some_and(|offset| unsafe {
-            read_config_u16(device.bus, device.device, device.function, offset) & MSIX_ENABLE == 0
+        .is_some_and(|offset| {
+            pci_config::read_u16(device.bus, device.device, device.function, offset) & MSIX_ENABLE
+                == 0
         })
 }
 
 pub(crate) fn network_function_command(device: VirtioNetworkDevice) -> u16 {
-    unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) }
+    pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
 }
 
 pub(crate) fn revoke_network_function(device: VirtioNetworkDevice) -> bool {
     let command = network_function_command(device);
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            command & !(COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER),
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        command & !(COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER),
+    );
     network_function_is_disabled(device)
 }
 
 pub(crate) fn verify_parser_rejections(device: VirtioBlockDevice) -> bool {
-    let config = unsafe { read_config_space(device.bus, device.device, device.function) };
+    let config = read_config_space(device.bus, device.device, device.function);
     verify_parser_rejections_for(
         &config,
         VIRTIO_BLOCK_DEVICE,
@@ -622,7 +619,7 @@ pub(crate) fn verify_parser_rejections(device: VirtioBlockDevice) -> bool {
 }
 
 pub(crate) fn verify_network_parser_rejections(device: VirtioNetworkDevice) -> bool {
-    let config = unsafe { read_config_space(device.bus, device.device, device.function) };
+    let config = read_config_space(device.bus, device.device, device.function);
     verify_parser_rejections_for(
         &config,
         VIRTIO_NETWORK_DEVICE,
@@ -736,7 +733,7 @@ fn program_masked_msix_vector_raw(
         Some(offset) => offset,
         None => return false,
     };
-    if unsafe { read_config_u16(target.bus, target.device, target.function, control_offset) }
+    if pci_config::read_u16(target.bus, target.device, target.function, control_offset)
         & MSIX_ENABLE
         != 0
     {
@@ -776,7 +773,7 @@ fn program_masked_msix_vector_raw(
         && read_mmio_u32(entry + 4) == 0
         && read_mmio_u32(entry + 8) == u32::from(vector)
         && read_mmio_u32(entry + 12) == MSIX_VECTOR_MASK
-        && unsafe { read_config_u16(target.bus, target.device, target.function, control_offset) }
+        && pci_config::read_u16(target.bus, target.device, target.function, control_offset)
             & MSIX_ENABLE
             == 0
 }
@@ -847,15 +844,13 @@ pub(crate) fn program_masked_network_msix_vectors(
     if !network_function_is_disabled(device) {
         return false;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            COMMAND_MEMORY_SPACE,
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        COMMAND_MEMORY_SPACE,
+    );
     let programmed = network_function_command(device) == COMMAND_MEMORY_SPACE
         && device.msix.vector_count >= 2
         && program_masked_msix_vector_raw(
@@ -884,15 +879,13 @@ pub(crate) fn network_msix_vectors_are_masked(
     if !network_function_is_disabled(device) {
         return false;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            COMMAND_MEMORY_SPACE,
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        COMMAND_MEMORY_SPACE,
+    );
     let matched = network_function_command(device) == COMMAND_MEMORY_SPACE
         && network_msix_vectors_match(device, mapping, apic_id);
     matched && revoke_network_function(device)
@@ -935,7 +928,7 @@ fn set_msix_control_raw(target: MsixTarget, enabled: bool, function_masked: bool
     let Some(offset) = target.capability.capability_offset.checked_add(2) else {
         return false;
     };
-    let current = unsafe { read_config_u16(target.bus, target.device, target.function, offset) };
+    let current = pci_config::read_u16(target.bus, target.device, target.function, offset);
     let desired = (current & !(MSIX_ENABLE | MSIX_FUNCTION_MASK))
         | if enabled { MSIX_ENABLE } else { 0 }
         | if function_masked {
@@ -943,10 +936,8 @@ fn set_msix_control_raw(target: MsixTarget, enabled: bool, function_masked: bool
         } else {
             0
         };
-    unsafe {
-        write_config_u16(target.bus, target.device, target.function, offset, desired);
-    }
-    (unsafe { read_config_u16(target.bus, target.device, target.function, offset) }) == desired
+    pci_config::write_u16(target.bus, target.device, target.function, offset, desired);
+    pci_config::read_u16(target.bus, target.device, target.function, offset) == desired
 }
 
 fn set_msix_entry_mask(
@@ -1172,19 +1163,16 @@ pub(crate) fn initialize_without_dma(
         return None;
     }
 
-    let command =
-        unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) };
+    let command = pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND);
     let safe_command = (command | COMMAND_MEMORY_SPACE) & !COMMAND_BUS_MASTER;
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            safe_command,
-        );
-    }
-    if unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        safe_command,
+    );
+    if pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
         & (COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         != COMMAND_MEMORY_SPACE
     {
@@ -1194,7 +1182,7 @@ pub(crate) fn initialize_without_dma(
     let result = negotiate(common);
 
     if reset(common).is_none()
-        || unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) }
+        || pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
             & COMMAND_BUS_MASTER
             != 0
     {
@@ -1220,15 +1208,13 @@ pub(crate) fn initialize_network_without_dma(
     }
 
     let command = network_function_command(device);
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            (command | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        (command | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
+    );
     let memory_enabled = network_function_command(device)
         & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         == COMMAND_MEMORY_SPACE;
@@ -1280,7 +1266,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
     };
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
     let command = network_function_command(device);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -1335,7 +1321,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
         {
             return None;
         }
-        write_config_u16(
+        pci_config::write_u16(
             device.bus,
             device.device,
             device.function,
@@ -1350,7 +1336,7 @@ pub(crate) unsafe fn activate_network_queues_without_io(
     .is_some();
 
     let current = network_function_command(device);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -1394,7 +1380,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
         return false;
     };
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -1438,7 +1424,7 @@ pub(crate) unsafe fn activate_kernel_network_queues(
         COMMON_DEVICE_STATUS,
         STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
     );
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -1469,15 +1455,13 @@ pub(crate) fn prepare_network_for_isolated_service(
     {
         return false;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            COMMAND_MEMORY_SPACE,
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        COMMAND_MEMORY_SPACE,
+    );
     network_function_command(device)
         & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         == COMMAND_MEMORY_SPACE
@@ -1500,15 +1484,13 @@ pub(crate) fn activate_isolated_network_empty_queues(
     {
         return false;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
+    );
     network_function_command(device)
         & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         == COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER
@@ -1607,15 +1589,13 @@ pub(crate) fn activate_isolated_network_interrupt_queues(
     {
         return false;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
+    );
     network_function_command(device)
         & (COMMAND_IO_SPACE | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         == COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER
@@ -2249,15 +2229,13 @@ pub(crate) fn quiesce_isolated_network(
         return false;
     };
     let current = network_function_command(device);
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
-        );
-    }
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        (current | COMMAND_MEMORY_SPACE) & !(COMMAND_IO_SPACE | COMMAND_BUS_MASTER),
+    );
     network_function_command(device) & COMMAND_BUS_MASTER == 0
         && reset(common).is_some()
         && revoke_network_function(device)
@@ -2300,7 +2278,7 @@ pub(crate) unsafe fn transmit_network_probe(
         return None;
     }
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -2392,7 +2370,7 @@ pub(crate) unsafe fn transmit_network_probe(
         {
             return None;
         }
-        write_config_u16(
+        pci_config::write_u16(
             device.bus,
             device.device,
             device.function,
@@ -2438,7 +2416,7 @@ pub(crate) unsafe fn transmit_network_probe(
     let msix_disabled = set_msix_control_raw(device.msix_target(), false, true);
     PCI_INTERRUPTS.virtio_active.store(false, Ordering::SeqCst);
     let current = network_function_command(device);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -2583,7 +2561,7 @@ unsafe fn network_arp_exchange(
     }
 
     core::ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_PAGE_SIZE);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -2736,7 +2714,7 @@ unsafe fn network_arp_exchange(
         {
             return None;
         }
-        write_config_u16(
+        pci_config::write_u16(
             device.bus,
             device.device,
             device.function,
@@ -2833,7 +2811,7 @@ unsafe fn network_arp_exchange(
     let msix_disabled = set_msix_control_raw(device.msix_target(), false, true);
     PCI_INTERRUPTS.virtio_active.store(false, Ordering::SeqCst);
     let current = network_function_command(device);
-    write_config_u16(
+    pci_config::write_u16(
         device.bus,
         device.device,
         device.function,
@@ -3660,37 +3638,33 @@ fn notification_byte_offset(offset: u16, multiplier: u32, length: usize) -> Opti
 }
 
 fn set_pci_command(device: VirtioBlockDevice, bus_master: bool) -> bool {
-    let command =
-        unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) };
+    let command = pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND);
     let mut requested = command | COMMAND_MEMORY_SPACE;
     if bus_master {
         requested |= COMMAND_BUS_MASTER;
     } else {
         requested &= !COMMAND_BUS_MASTER;
     }
-    unsafe {
-        write_config_u16(
-            device.bus,
-            device.device,
-            device.function,
-            PCI_COMMAND,
-            requested,
-        );
-    }
-    let observed =
-        unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) };
+    pci_config::write_u16(
+        device.bus,
+        device.device,
+        device.function,
+        PCI_COMMAND,
+        requested,
+    );
+    let observed = pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND);
     observed & (COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER)
         == COMMAND_MEMORY_SPACE | if bus_master { COMMAND_BUS_MASTER } else { 0 }
 }
 
 pub(crate) fn bus_master_is_disabled(device: VirtioBlockDevice) -> bool {
-    (unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) })
+    pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
         & COMMAND_BUS_MASTER
         == 0
 }
 
 fn bus_master_is_enabled(device: VirtioBlockDevice) -> bool {
-    (unsafe { read_config_u16(device.bus, device.device, device.function, PCI_COMMAND) })
+    pci_config::read_u16(device.bus, device.device, device.function, PCI_COMMAND)
         & COMMAND_BUS_MASTER
         != 0
 }
@@ -4533,75 +4507,11 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0; 4]))
 }
 
-unsafe fn read_config_space(bus: u8, device: u8, function: u8) -> ConfigSpace {
+fn read_config_space(bus: u8, device: u8, function: u8) -> ConfigSpace {
     let mut bytes = [0_u8; CONFIG_SIZE];
     for index in 0..CONFIG_DWORDS {
-        let value = read_config_u32(bus, device, function, (index * 4) as u8);
+        let value = pci_config::read_u32(bus, device, function, (index * 4) as u8);
         bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
     ConfigSpace { bytes }
-}
-
-unsafe fn read_config_u32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    let address = CONFIG_ENABLE
-        | (u32::from(bus) << 16)
-        | (u32::from(device) << 11)
-        | (u32::from(function) << 8)
-        | u32::from(offset & 0xfc);
-    asm!(
-        "out dx, eax",
-        in("dx") CONFIG_ADDRESS_PORT,
-        in("eax") address,
-        options(nomem, nostack, preserves_flags)
-    );
-    let value: u32;
-    asm!(
-        "in eax, dx",
-        in("dx") CONFIG_DATA_PORT,
-        out("eax") value,
-        options(nomem, nostack, preserves_flags)
-    );
-    value
-}
-
-unsafe fn read_config_u16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
-    let address = CONFIG_ENABLE
-        | (u32::from(bus) << 16)
-        | (u32::from(device) << 11)
-        | (u32::from(function) << 8)
-        | u32::from(offset & 0xfc);
-    asm!(
-        "out dx, eax",
-        in("dx") CONFIG_ADDRESS_PORT,
-        in("eax") address,
-        options(nomem, nostack, preserves_flags)
-    );
-    let value: u16;
-    asm!(
-        "in ax, dx",
-        in("dx") CONFIG_DATA_PORT + u16::from(offset & 2),
-        out("ax") value,
-        options(nomem, nostack, preserves_flags)
-    );
-    value
-}
-
-unsafe fn write_config_u16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
-    let address = CONFIG_ENABLE
-        | (u32::from(bus) << 16)
-        | (u32::from(device) << 11)
-        | (u32::from(function) << 8)
-        | u32::from(offset & 0xfc);
-    asm!(
-        "out dx, eax",
-        in("dx") CONFIG_ADDRESS_PORT,
-        in("eax") address,
-        options(nomem, nostack, preserves_flags)
-    );
-    asm!(
-        "out dx, ax",
-        in("dx") CONFIG_DATA_PORT + u16::from(offset & 2),
-        in("ax") value,
-        options(nomem, nostack, preserves_flags)
-    );
 }

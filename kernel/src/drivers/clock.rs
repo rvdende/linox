@@ -18,10 +18,10 @@
 //!   left the counter halted it is started (ENABLE_CNF), with no timer
 //!   interrupts routed.
 
-use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::timer::timestamp_counter;
+use crate::trusted::port::PmTimer;
 
 /// Ticks per millisecond assumed before calibration: a 5 GHz counter.
 const ASSUMED_TICKS_PER_MS: u64 = 5_000_000;
@@ -113,7 +113,7 @@ impl Counter {
         // reading its counter has no side effects.
         let value = unsafe {
             match self.reference {
-                Reference::PmTimerPort { port, .. } => u64::from(inl(port)),
+                Reference::PmTimerPort { port, .. } => u64::from(PmTimer::new(port).read()),
                 Reference::PmTimerMemory { address, .. } => {
                     u64::from((address as *const u32).read_volatile())
                 }
@@ -188,10 +188,4 @@ pub(crate) fn ticks_per_ms() -> u64 {
 /// Milliseconds since the counter read `start`.
 pub(crate) fn elapsed_ms(start: u64) -> u64 {
     timestamp_counter().wrapping_sub(start) / ticks_per_ms().max(1)
-}
-
-unsafe fn inl(port: u16) -> u32 {
-    let value: u32;
-    asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack, preserves_flags));
-    value
 }

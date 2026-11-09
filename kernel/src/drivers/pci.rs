@@ -1,10 +1,10 @@
-//! PCI configuration access through the legacy 0xcf8/0xcfc ports and a
-//! device inventory with human-readable class names.
+//! PCI configuration access (through `trusted::pci_config`) and a device
+//! inventory with human-readable class names.
 
-use core::arch::asm;
+#![forbid(unsafe_code)]
 
-const CONFIG_ADDRESS: u16 = 0xcf8;
-const CONFIG_DATA: u16 = 0xcfc;
+use crate::trusted::pci_config;
+
 const COMMAND: u8 = 0x04;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
@@ -39,30 +39,12 @@ impl Function {
     }
 
     pub(crate) fn read_u32(self, offset: u8) -> u32 {
-        let address = 0x8000_0000
-            | u32::from(self.bus) << 16
-            | u32::from(self.device) << 11
-            | u32::from(self.function) << 8
-            | u32::from(offset & 0xfc);
-        // SAFETY: configuration mechanism #1 is present on every x86-64 PC
-        // chipset; the address register selects one dword of this function.
-        unsafe {
-            outl(CONFIG_ADDRESS, address);
-            inl(CONFIG_DATA)
-        }
+        pci_config::read_u32(self.bus, self.device, self.function, offset)
     }
 
+    /// Callers write only registers of a function they drive.
     pub(crate) fn write_u32(self, offset: u8, value: u32) {
-        let address = 0x8000_0000
-            | u32::from(self.bus) << 16
-            | u32::from(self.device) << 11
-            | u32::from(self.function) << 8
-            | u32::from(offset & 0xfc);
-        // SAFETY: as for read_u32; callers write only registers they own.
-        unsafe {
-            outl(CONFIG_ADDRESS, address);
-            outl(CONFIG_DATA, value);
-        }
+        pci_config::write_u32(self.bus, self.device, self.function, offset, value);
     }
 
     /// Returns the physical address of a memory BAR, combining 64-bit pairs.
@@ -312,14 +294,4 @@ pub(crate) fn for_each_reachable_function(mut visit: impl FnMut(Identity)) {
             }
         }
     }
-}
-
-unsafe fn outl(port: u16, value: u32) {
-    asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags));
-}
-
-unsafe fn inl(port: u16) -> u32 {
-    let value: u32;
-    asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack, preserves_flags));
-    value
 }

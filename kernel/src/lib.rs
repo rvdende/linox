@@ -92,11 +92,11 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use trusted::port::Port8;
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
 
-const COM1: u16 = 0x3f8;
 struct HostControlOwner {
     operator_console_ready: AtomicBool,
     background_domain_output: AtomicBool,
@@ -4739,27 +4739,24 @@ static SERIAL_PRESENT: AtomicBool = AtomicBool::new(false);
 fn serial_init() {
     // Physical machines often have no COM1; reads from an absent UART float to
     // 0xff, which would otherwise look like a permanently ready receiver.
-    // SAFETY: probing the scratch register has no side effects on other devices.
-    let present = unsafe {
-        outb(COM1 + 7, 0xa5);
-        let first = inb(COM1 + 7) == 0xa5;
-        outb(COM1 + 7, 0x5a);
-        first && inb(COM1 + 7) == 0x5a
-    };
+    // Probing the scratch register has no side effects on other devices.
+    let scratch = Port8::com1(7);
+    scratch.write(0xa5);
+    let first = scratch.read() == 0xa5;
+    scratch.write(0x5a);
+    let present = first && scratch.read() == 0x5a;
     SERIAL_PRESENT.store(present, Ordering::Release);
     if !present {
         return;
     }
-    // SAFETY: COM1 answered the scratch-register probe.
-    unsafe {
-        outb(COM1 + 1, 0x00);
-        outb(COM1 + 3, 0x80);
-        outb(COM1, 0x03);
-        outb(COM1 + 1, 0x00);
-        outb(COM1 + 3, 0x03);
-        outb(COM1 + 2, 0xc7);
-        outb(COM1 + 4, 0x0b);
-    }
+    // COM1 answered the scratch-register probe.
+    Port8::com1(1).write(0x00);
+    Port8::com1(3).write(0x80);
+    Port8::com1(0).write(0x03);
+    Port8::com1(1).write(0x00);
+    Port8::com1(3).write(0x03);
+    Port8::com1(2).write(0xc7);
+    Port8::com1(4).write(0x0b);
 }
 
 fn serial_write(message: &str) {
@@ -4794,7 +4791,7 @@ pub(crate) fn serial_write_raw(bytes: &[u8]) {
         // scratch-register probe cannot rule out on a physical board) must
         // not stop the framebuffer console: give it up after ~10 ms.
         let mut spins = 0_u32;
-        while unsafe { inb(COM1 + 5) } & 0x20 == 0 {
+        while Port8::com1(5).read() & 0x20 == 0 {
             spins += 1;
             if spins == 10_000 {
                 SERIAL_PRESENT.store(false, Ordering::Release);
@@ -4803,8 +4800,7 @@ pub(crate) fn serial_write_raw(bytes: &[u8]) {
             core::hint::spin_loop();
         }
 
-        // SAFETY: COM1 was initialized above and is the pinned serial device.
-        unsafe { outb(COM1, byte) };
+        Port8::com1(0).write(byte);
     }
 }
 
@@ -4813,7 +4809,7 @@ pub(crate) fn serial_write_raw(bytes: &[u8]) {
 pub(crate) fn serial_read_byte_blocking() -> u8 {
     loop {
         if serial_byte_waiting() {
-            return unsafe { inb(COM1) };
+            return Port8::com1(0).read();
         }
         if let Some(byte) = linux_input::take_console_byte() {
             return byte;
@@ -4840,7 +4836,7 @@ pub(crate) fn set_console_nonblocking(nonblocking: bool) {
 }
 
 fn serial_byte_waiting() -> bool {
-    SERIAL_PRESENT.load(Ordering::Acquire) && (unsafe { inb(COM1 + 5) } & 0x01) != 0
+    SERIAL_PRESENT.load(Ordering::Acquire) && (Port8::com1(5).read() & 0x01) != 0
 }
 
 fn serial_write_usize(value: usize) {
@@ -5308,24 +5304,4 @@ pub(crate) fn serial_write_u64(mut value: u64) {
             serial_write(text);
         }
     }
-}
-
-unsafe fn outb(port: u16, value: u8) {
-    asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
-}
-
-unsafe fn inb(port: u16) -> u8 {
-    let value: u8;
-    asm!(
-        "in al, dx",
-        in("dx") port,
-        out("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
-    value
 }
