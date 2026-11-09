@@ -1,14 +1,13 @@
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
-};
+#![forbid(unsafe_code)]
+
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use crate::{
     arch::x86_64::cpu,
     control_abi, domain,
     initramfs::{self, PublishedRootHandle},
     published_rootfs,
+    sync::{LockRank, SpinLock},
 };
 
 const NAMESPACE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 4;
@@ -21,23 +20,24 @@ const ROOT_FLAGS: u32 = ROOT_READ_ONLY | ROOT_NOSUID | ROOT_NODEV;
 pub(crate) const MOUNTS: &[u8] = b"rootfs / linox-root ro,nosuid,nodev 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\ncgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime 0 0\n";
 pub(crate) const MOUNTINFO: &[u8] = b"1 0 0:1 / / ro,nosuid,nodev - linox-root rootfs ro\n2 1 0:2 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n3 1 0:3 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw\n";
 
-struct MountRuntimeOwner {
-    installed: AtomicBool,
+/// The namespace `switch_to` last installed, published word by word; a
+/// reader checks the handle it assembles against the table.
+struct InstalledNamespace {
     current_slot: AtomicU8,
     current_generation: AtomicU32,
     current_id: AtomicU32,
-    table: UnsafeCell<MaybeUninit<MountNamespaceTable>>,
 }
 
-unsafe impl Sync for MountRuntimeOwner {}
-
-static MOUNT_RUNTIME: MountRuntimeOwner = MountRuntimeOwner {
-    installed: AtomicBool::new(false),
+static MOUNT_RUNTIME: InstalledNamespace = InstalledNamespace {
     current_slot: AtomicU8::new(EMPTY_SLOT),
     current_generation: AtomicU32::new(0),
     current_id: AtomicU32::new(0),
-    table: UnsafeCell::new(MaybeUninit::uninit()),
 };
+
+/// The mount namespace table, made once at boot (`install_initial`). Its
+/// records are copied out; nothing else is called while it is held.
+static MOUNT_TABLE: SpinLock<Option<MountNamespaceTable>> =
+    SpinLock::new(LockRank::MOUNT_NAMESPACES, None);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MountNamespaceHandle {
@@ -207,20 +207,22 @@ pub(crate) fn verify_contract() -> bool {
 }
 
 pub(crate) fn install_initial() -> bool {
-    if MOUNT_RUNTIME.installed.load(Ordering::Acquire) {
-        return false;
-    }
     let Some(root) = initramfs::published_root_handle().map(NamespaceRoot::Embedded) else {
         return false;
     };
-    let table = MOUNT_RUNTIME.table.get().cast::<MountNamespaceTable>();
-    unsafe { table.write(MountNamespaceTable::new()) };
-    let table = unsafe { &mut *table };
-    let Some(handle) = table.create(0, root, ROOT_FLAGS, true) else {
-        return false;
+    let handle = {
+        let mut installed = MOUNT_TABLE.lock();
+        if installed.is_some() {
+            return false;
+        }
+        let mut table = MountNamespaceTable::new();
+        let Some(handle) = table.create(0, root, ROOT_FLAGS, true) else {
+            return false;
+        };
+        table.boot_initial = Some(handle);
+        *installed = Some(table);
+        handle
     };
-    table.boot_initial = Some(handle);
-    MOUNT_RUNTIME.installed.store(true, Ordering::Release);
     live_namespace(handle).is_some()
 }
 
@@ -253,18 +255,19 @@ pub(crate) fn activate_initial() -> bool {
 }
 
 fn activate_domain_root(owner_domain: u64, root: NamespaceRoot) -> bool {
-    let Some(table) = live_table_mut() else {
+    let handle = with_table(|table| {
+        table
+            .namespaces
+            .iter()
+            .flatten()
+            .find(|namespace| namespace.owner_domain == owner_domain && namespace.domain_root)
+            .map(|namespace| namespace.handle)
+            .or_else(|| (owner_domain == 0).then_some(table.boot_initial).flatten())
+            .or_else(|| table.create(owner_domain, root, ROOT_FLAGS, true))
+    });
+    let Some(handle) = handle.flatten() else {
         return false;
     };
-    let handle = table
-        .namespaces
-        .iter()
-        .flatten()
-        .find(|namespace| namespace.owner_domain == owner_domain && namespace.domain_root)
-        .map(|namespace| namespace.handle)
-        .or_else(|| (owner_domain == 0).then_some(table.boot_initial).flatten())
-        .or_else(|| table.create(owner_domain, root, ROOT_FLAGS, true));
-    let Some(handle) = handle else { return false };
     if MOUNT_RUNTIME
         .current_slot
         .compare_exchange(EMPTY_SLOT, handle.slot, Ordering::AcqRel, Ordering::Acquire)
@@ -314,13 +317,15 @@ pub(crate) fn current_handle() -> Option<MountNamespaceHandle> {
 
 pub(crate) fn clone_current() -> Option<MountNamespaceHandle> {
     let active = current()?;
-    let namespace = *live_namespace(active)?;
-    live_table_mut()?.create(
-        namespace.owner_domain,
-        namespace.root,
-        namespace.root_flags,
-        false,
-    )
+    let namespace = live_namespace(active)?;
+    with_table(|table| {
+        table.create(
+            namespace.owner_domain,
+            namespace.root,
+            namespace.root_flags,
+            false,
+        )
+    })?
 }
 
 pub(crate) fn switch_to(handle: MountNamespaceHandle) -> bool {
@@ -356,12 +361,16 @@ pub(crate) fn vacate(handle: MountNamespaceHandle) -> bool {
     let replacement = cpu::current_process_mount_namespace()
         .filter(|own| *own != handle && live_namespace(*own).is_some())
         .or_else(|| {
-            live_table()?
-                .namespaces
-                .iter()
-                .flatten()
-                .find(|namespace| namespace.owner_domain == owner_domain && namespace.domain_root)
-                .map(|namespace| namespace.handle)
+            with_table(|table| {
+                table
+                    .namespaces
+                    .iter()
+                    .flatten()
+                    .find(|namespace| {
+                        namespace.owner_domain == owner_domain && namespace.domain_root
+                    })
+                    .map(|namespace| namespace.handle)
+            })?
         });
     replacement.is_some_and(switch_to)
 }
@@ -370,7 +379,7 @@ pub(crate) fn retire(handle: MountNamespaceHandle) -> bool {
     if current() == Some(handle) || installed() == Some(handle) {
         return false;
     }
-    live_table_mut().is_some_and(|table| table.retire(handle))
+    with_table(|table| table.retire(handle)).unwrap_or(false)
 }
 
 pub(crate) fn current_mountinfo() -> Option<&'static [u8]> {
@@ -424,22 +433,15 @@ fn installed() -> Option<MountNamespaceHandle> {
     live_namespace(handle).map(|_| handle)
 }
 
-fn live_namespace(handle: MountNamespaceHandle) -> Option<&'static MountNamespace> {
-    live_table()?.namespace(handle)
+/// A copy of the live namespace `handle` names.
+fn live_namespace(handle: MountNamespaceHandle) -> Option<MountNamespace> {
+    with_table(|table| table.namespace(handle).copied())?
 }
 
-fn live_table() -> Option<&'static MountNamespaceTable> {
-    if !MOUNT_RUNTIME.installed.load(Ordering::Acquire) {
-        return None;
-    }
-    Some(unsafe { &*MOUNT_RUNTIME.table.get().cast::<MountNamespaceTable>() })
-}
-
-fn live_table_mut() -> Option<&'static mut MountNamespaceTable> {
-    if !MOUNT_RUNTIME.installed.load(Ordering::Acquire) {
-        return None;
-    }
-    Some(unsafe { &mut *MOUNT_RUNTIME.table.get().cast::<MountNamespaceTable>() })
+/// Runs `f` on the mount namespace table under its lock, once installed.
+/// `f` only reads and writes the table's records.
+fn with_table<R>(f: impl FnOnce(&mut MountNamespaceTable) -> R) -> Option<R> {
+    MOUNT_TABLE.lock().as_mut().map(f)
 }
 
 impl MountNamespaceHandle {
@@ -451,15 +453,12 @@ impl MountNamespaceHandle {
 
 /// The live mount namespace that `to_word` gave `word` for.
 pub(crate) fn from_word(word: u64) -> Option<MountNamespaceHandle> {
-    let table = live_table()?;
-    let namespace = table
-        .namespaces
-        .get(usize::try_from(word >> 24).ok()?)?
-        .as_ref()?;
     // A descriptor never names another domain's namespace.
     let domain = cpu::current_container_slot()
         .and_then(cpu::container_domain_id)
         .unwrap_or(0);
+    let slot = usize::try_from(word >> 24).ok()?;
+    let namespace = with_table(|table| table.namespaces.get(slot).copied().flatten())??;
     (namespace.owner_domain == domain
         && u64::from(namespace.handle.generation & 0xff_ffff) == word & 0xff_ffff)
         .then_some(namespace.handle)

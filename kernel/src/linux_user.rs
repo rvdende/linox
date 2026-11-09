@@ -1,9 +1,12 @@
-use crate::{arch::x86_64::cpu, control_abi, domain};
-use alloc::vec::Vec;
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
+#![forbid(unsafe_code)]
+
+use crate::{
+    arch::x86_64::cpu,
+    control_abi, domain,
+    sync::{LockRank, SpinLock},
 };
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The most user namespaces one domain may hold at once.
 const NAMESPACE_LIMIT: usize = 64;
@@ -24,17 +27,15 @@ const SWITCHING_ID_MAP: &[u8] = b"0 100000 65536\n";
 
 pub(crate) use linox_credentials::{Authority, Credentials};
 
-struct UserRuntimeOwner {
-    installed: AtomicBool,
-    tables: UnsafeCell<[UserNamespaceTable; INSTANCE_LIMIT]>,
-}
+/// Set once the host's initial namespace exists (`install_initial`).
+static INSTALLED: AtomicBool = AtomicBool::new(false);
 
-unsafe impl Sync for UserRuntimeOwner {}
-
-static USER_RUNTIME: UserRuntimeOwner = UserRuntimeOwner {
-    installed: AtomicBool::new(false),
-    tables: UnsafeCell::new([const { UserNamespaceTable::new() }; INSTANCE_LIMIT]),
-};
+/// Each domain's user namespaces, and the host's at `HOST_INSTANCE`. A
+/// leaf: records are copied in and out, nothing is called and nothing is
+/// allocated while one is held (a table's storage is reserved before it
+/// is taken, `reserve_table`).
+static TABLES: [SpinLock<UserNamespaceTable>; INSTANCE_LIMIT] =
+    [const { SpinLock::new(LockRank::USER_NAMESPACES, UserNamespaceTable::new()) }; INSTANCE_LIMIT];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UserNamespaceHandle {
@@ -59,19 +60,20 @@ impl UserNamespaceHandle {
 /// The live user namespace of the current domain that `to_word` gave `word` for.
 pub(crate) fn from_word(word: u64) -> Option<UserNamespaceHandle> {
     let (index, owner_domain) = current_instance_and_owner()?;
-    let table = live_table_at(index)?;
-    if table.owner_domain != owner_domain {
-        return None;
-    }
     let slot = usize::try_from(word >> 24).ok()?;
-    let namespace = table.namespaces.get(slot)?.as_ref()?;
-    (u64::from(namespace.handle.generation & 0xff_ffff) == word & 0xff_ffff)
-        .then_some(namespace.handle)
+    with_table(index, |table| {
+        if table.owner_domain != owner_domain {
+            return None;
+        }
+        let namespace = table.namespaces.get(slot)?.as_ref()?;
+        (u64::from(namespace.handle.generation & 0xff_ffff) == word & 0xff_ffff)
+            .then_some(namespace.handle)
+    })?
 }
 
 /// The namespace `handle` was made in: `None` for the domain's initial one.
 pub(crate) fn parent(handle: UserNamespaceHandle) -> Option<UserNamespaceHandle> {
-    live_table_for_handle(handle)?.namespace(handle)?.parent
+    live_namespace(handle)?.parent
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,9 +167,12 @@ impl UserNamespaceTable {
         }
         let slot = match self.namespaces.iter().position(Option::is_none) {
             Some(slot) => slot,
-            None if self.namespaces.len() < NAMESPACE_LIMIT => {
-                self.namespaces.try_reserve(1).ok()?;
-                self.generations.try_reserve(1).ok()?;
+            // Within the reserved storage only: a table is grown before
+            // its lock is taken (`reserve_table`), never under it.
+            None if self.namespaces.len() < NAMESPACE_LIMIT
+                && self.namespaces.len() < self.namespaces.capacity()
+                && self.generations.len() < self.generations.capacity() =>
+            {
                 self.namespaces.push(None);
                 self.generations.push(0);
                 self.namespaces.len() - 1
@@ -210,10 +215,38 @@ impl UserNamespaceTable {
         self.namespaces[usize::from(handle.slot)] = None;
         true
     }
+
+    /// Takes over `namespaces` and `generations`, empty vectors with room
+    /// for the whole table, if this table has less room, and hands back
+    /// the storage it gave up (to be freed after the lock is released).
+    fn adopt_storage(
+        &mut self,
+        mut namespaces: Vec<Option<UserNamespace>>,
+        mut generations: Vec<u32>,
+    ) -> (Vec<Option<UserNamespace>>, Vec<u32>) {
+        if self.namespaces.capacity() >= NAMESPACE_LIMIT
+            && self.generations.capacity() >= NAMESPACE_LIMIT
+        {
+            return (namespaces, generations);
+        }
+        namespaces.extend_from_slice(&self.namespaces);
+        generations.extend_from_slice(&self.generations);
+        core::mem::swap(&mut self.namespaces, &mut namespaces);
+        core::mem::swap(&mut self.generations, &mut generations);
+        (namespaces, generations)
+    }
 }
 
 pub(crate) fn verify_contract() -> bool {
     let mut table = UserNamespaceTable::new();
+    let mut namespaces = Vec::new();
+    let mut generations = Vec::new();
+    if namespaces.try_reserve_exact(NAMESPACE_LIMIT).is_err()
+        || generations.try_reserve_exact(NAMESPACE_LIMIT).is_err()
+    {
+        return false;
+    }
+    let _ = table.adopt_storage(namespaces, generations);
     let invalid = IdMap {
         inside: 1,
         ..IdMap::ROOT
@@ -285,78 +318,76 @@ pub(crate) fn verify_contract() -> bool {
 }
 
 pub(crate) fn install_initial() -> bool {
-    if USER_RUNTIME.installed.load(Ordering::Acquire) {
+    if INSTALLED.load(Ordering::Acquire) || reserve_table(HOST_INSTANCE).is_none() {
         return false;
     }
-    let mut index = 0;
-    while index < INSTANCE_LIMIT {
-        unsafe {
-            USER_RUNTIME
-                .tables
-                .get()
-                .cast::<UserNamespaceTable>()
-                .add(index)
-                .write(UserNamespaceTable::new());
+    let handle = with_table_mut(HOST_INSTANCE, |table| {
+        if table.initial.is_some() {
+            return None;
         }
-        index += 1;
-    }
-    let Some(table) = live_table_mut_at(HOST_INSTANCE) else {
+        let handle = table.create(IdMap::ROOT, IdMap::ROOT, None)?;
+        table.initial = Some(handle);
+        Some(handle)
+    });
+    let Some(handle) = handle.flatten() else {
         return false;
     };
-    let Some(handle) = table.create(IdMap::ROOT, IdMap::ROOT, None) else {
-        return false;
-    };
-    table.initial = Some(handle);
-    USER_RUNTIME.installed.store(true, Ordering::Release);
+    INSTALLED.store(true, Ordering::Release);
     credentials(handle).is_some()
 }
 
 pub(crate) fn initial() -> Option<UserNamespaceHandle> {
     let (index, owner_domain) = current_instance_and_owner()?;
-    let table = live_table_mut_at(index)?;
-    if table.initial.is_none() {
-        table.owner_domain = owner_domain;
-        let handle = table.create(IdMap::ROOT, IdMap::ROOT, None)?;
-        table.initial = Some(handle);
+    if with_table_mut(index, |table| table.initial.is_none())? {
+        reserve_table(index)?;
     }
-    (table.owner_domain == owner_domain)
-        .then_some(table.initial)
-        .flatten()
+    with_table_mut(index, |table| {
+        if table.initial.is_none() {
+            table.owner_domain = owner_domain;
+            let handle = table.create(IdMap::ROOT, IdMap::ROOT, None)?;
+            table.initial = Some(handle);
+        }
+        (table.owner_domain == owner_domain)
+            .then_some(table.initial)
+            .flatten()
+    })?
 }
 
 pub(crate) fn clone_namespace(parent: UserNamespaceHandle) -> Option<UserNamespaceHandle> {
-    let namespace = *live_table_for_handle(parent)?.namespace(parent)?;
+    let namespace = live_namespace(parent)?;
     let (index, owner_domain) = current_instance_and_owner()?;
     if namespace.handle.owner_domain != owner_domain {
         return None;
     }
-    let table = live_table_mut_at(index)?;
-    if table.owner_domain != owner_domain {
-        return None;
-    }
-    table.create(namespace.uid_map, namespace.gid_map, Some(parent))
+    reserve_table(index)?;
+    with_table_mut(index, |table| {
+        if table.owner_domain != owner_domain {
+            return None;
+        }
+        table.create(namespace.uid_map, namespace.gid_map, Some(parent))
+    })?
 }
 
 pub(crate) fn may_signal(sender: UserNamespaceHandle, mut target: UserNamespaceHandle) -> bool {
     if sender.owner_domain != target.owner_domain {
         return false;
     }
-    let Some(table) = live_table_for_handle(sender) else {
-        return false;
-    };
-    for _ in 0..NESTING_LIMIT {
-        if target == sender {
-            return true;
+    with_table_for_handle(sender, |table| {
+        for _ in 0..NESTING_LIMIT {
+            if target == sender {
+                return true;
+            }
+            let Some(parent) = table
+                .namespace(target)
+                .and_then(|namespace| namespace.parent)
+            else {
+                return false;
+            };
+            target = parent;
         }
-        let Some(parent) = table
-            .namespace(target)
-            .and_then(|namespace| namespace.parent)
-        else {
-            return false;
-        };
-        target = parent;
-    }
-    false
+        false
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn retire(handle: UserNamespaceHandle) -> bool {
@@ -368,11 +399,11 @@ pub(crate) fn retire(handle: UserNamespaceHandle) -> bool {
         };
         index
     };
-    live_table_mut_at(index).is_some_and(|table| table.retire(handle))
+    with_table_mut(index, |table| table.retire(handle)).unwrap_or(false)
 }
 
 pub(crate) fn credentials(handle: UserNamespaceHandle) -> Option<Credentials> {
-    let namespace = live_table_for_handle(handle)?.namespace(handle)?;
+    let namespace = live_namespace(handle)?;
     if namespace.uid_map.outside(0) != Some(ROOT_OUTSIDE_ID)
         || namespace.gid_map.outside(0) != Some(ROOT_OUTSIDE_ID)
         || namespace.setgroups_allowed
@@ -448,9 +479,7 @@ pub(crate) fn privileged_operation_denied(
 ) -> bool {
     if operation != PrivilegedOperation::RawIo
         && domain_privileged(handle)
-        && live_table_for_handle(handle)
-            .and_then(|table| table.namespace(handle))
-            .is_some_and(|namespace| namespace.parent.is_none())
+        && live_namespace(handle).is_some_and(|namespace| namespace.parent.is_none())
     {
         return false;
     }
@@ -460,9 +489,8 @@ pub(crate) fn privileged_operation_denied(
     if operation == PrivilegedOperation::ManageMounts && handle.owner_domain != 0 {
         return false;
     }
-    live_table_for_handle(handle)
-        .and_then(|table| table.namespace(handle))
-        .is_some_and(|namespace| privileged_operation_denied_in(namespace, operation))
+    live_namespace(handle)
+        .is_some_and(|namespace| privileged_operation_denied_in(&namespace, operation))
 }
 
 fn privileged_operation_denied_in(
@@ -472,42 +500,65 @@ fn privileged_operation_denied_in(
     namespace.linux_capabilities == 0 && namespace.privileged_operations & operation.bit() == 0
 }
 
-fn live_table_for_handle(handle: UserNamespaceHandle) -> Option<&'static UserNamespaceTable> {
+/// A copy of the live namespace `handle` names.
+fn live_namespace(handle: UserNamespaceHandle) -> Option<UserNamespace> {
+    with_table_for_handle(handle, |table| table.namespace(handle).copied())?
+}
+
+/// Runs `f` on the table of `handle`'s domain, if it is that domain's.
+fn with_table_for_handle<R>(
+    handle: UserNamespaceHandle,
+    f: impl FnOnce(&UserNamespaceTable) -> R,
+) -> Option<R> {
     let index = if handle.owner_domain == 0 {
         HOST_INSTANCE
     } else {
         domain::container_slot_for_domain(handle.owner_domain)?
     };
-    let table = live_table_at(index)?;
-    (table.owner_domain == handle.owner_domain).then_some(table)
+    with_table(index, |table| {
+        (table.owner_domain == handle.owner_domain).then(|| f(table))
+    })?
 }
 
-fn live_table_at(index: usize) -> Option<&'static UserNamespaceTable> {
-    if !USER_RUNTIME.installed.load(Ordering::Acquire) {
+/// Runs `f` on table `index` under its lock, once the tables are
+/// installed.
+fn with_table<R>(index: usize, f: impl FnOnce(&UserNamespaceTable) -> R) -> Option<R> {
+    if !INSTALLED.load(Ordering::Acquire) {
         return None;
     }
-    let table = unsafe {
-        USER_RUNTIME
-            .tables
-            .get()
-            .cast::<UserNamespaceTable>()
-            .add(index)
-    };
-    Some(unsafe { &*table })
+    Some(f(&TABLES.get(index)?.lock()))
 }
 
-fn live_table_mut_at(index: usize) -> Option<&'static mut UserNamespaceTable> {
-    if !USER_RUNTIME.installed.load(Ordering::Acquire) && index != HOST_INSTANCE {
+/// Runs `f` on table `index` under its lock to change it: the host's at
+/// any time (`install_initial` makes the first namespace there), a
+/// domain's once the tables are installed.
+fn with_table_mut<R>(index: usize, f: impl FnOnce(&mut UserNamespaceTable) -> R) -> Option<R> {
+    if !INSTALLED.load(Ordering::Acquire) && index != HOST_INSTANCE {
         return None;
     }
-    let table = unsafe {
-        USER_RUNTIME
-            .tables
-            .get()
-            .cast::<UserNamespaceTable>()
-            .add(index)
-    };
-    Some(unsafe { &mut *table })
+    Some(f(&mut TABLES.get(index)?.lock()))
+}
+
+/// Makes sure table `index` has room for all its namespaces, allocating
+/// that room with no lock held, so `create` never allocates under the
+/// table's lock.
+fn reserve_table(index: usize) -> Option<()> {
+    let table = TABLES.get(index)?;
+    {
+        let table = table.lock();
+        if table.namespaces.capacity() >= NAMESPACE_LIMIT
+            && table.generations.capacity() >= NAMESPACE_LIMIT
+        {
+            return Some(());
+        }
+    }
+    let mut namespaces = Vec::new();
+    let mut generations = Vec::new();
+    namespaces.try_reserve_exact(NAMESPACE_LIMIT).ok()?;
+    generations.try_reserve_exact(NAMESPACE_LIMIT).ok()?;
+    let spare = table.lock().adopt_storage(namespaces, generations);
+    drop(spare);
+    Some(())
 }
 
 fn current_instance_and_owner() -> Option<(usize, u64)> {

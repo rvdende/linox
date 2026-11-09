@@ -1,6 +1,9 @@
+#![forbid(unsafe_code)]
+
 use crate::capability::{Handle, Rights, Table as CapabilityTable};
 use crate::manifest::Manifest;
 use crate::owned_state::OwnedState;
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard, LockRank};
 
 const NATIVE_DOMAIN_CAPACITY: usize = 8;
 const CONTAINER_DOMAIN_CAPACITY: usize = crate::control_abi::DOMAIN_LIMIT;
@@ -16,7 +19,9 @@ const EVENT_CAPACITY: usize = 4;
 pub(crate) const MAX_AUXILIARY_SERVICES: usize = NATIVE_DOMAIN_CAPACITY - 2;
 const MAX_SERVICE_IDENTITIES: usize = 1 + MAX_AUXILIARY_SERVICES;
 
-static DOMAIN_RUNTIME: OwnedState<Manager> = OwnedState::empty();
+/// The domain manager, published once at boot (`initialize_control_plane`)
+/// and then reached only under its lock (`global_manager`).
+static DOMAIN_RUNTIME: OwnedState<IrqSpinLock<Manager>> = OwnedState::empty();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DomainId {
@@ -1170,13 +1175,15 @@ pub(crate) fn initialize_control_plane(manifest: &Manifest) -> Option<u64> {
         return None;
     }
     let encoded = encode_id(id);
-    DOMAIN_RUNTIME.try_install(manager).ok()?;
+    DOMAIN_RUNTIME
+        .try_install(IrqSpinLock::new(LockRank::DOMAINS, manager))
+        .ok()?;
     control_plane_permits(0, HOST_CONTROL, Rights::MANAGE).then_some(encoded)
 }
 
 pub(crate) fn control_plane_permits(root_index: usize, object: u64, rights: Rights) -> bool {
     {
-        let Some(manager) = DOMAIN_RUNTIME.get() else {
+        let Some(manager) = global_manager() else {
             return false;
         };
         let Some(id) = manager.control_plane_id else {
@@ -1206,27 +1213,40 @@ pub(crate) fn control_plane_boot_handle(root_index: usize) -> Option<u64> {
 }
 
 pub(crate) fn initialize_boot_service() -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let id = manager.create_initial_service()?;
-    validate_boot_service(manager, id)
+    validate_boot_service(&manager, id)
 }
 
 pub(crate) fn initialize_boot_service_restart() -> Option<u64> {
-    let manager = global_manager_mut()?;
-    let service = manager.primary_service_identity?;
-    let slot = manager.service_identity_slot(service)?;
-    let quarantine = manager.quarantined_frame_owners[slot]?;
-    if quarantine.service != service {
-        return None;
-    }
+    let quarantine = primary_service_quarantine()?;
+    // The frame allocator is asked with the manager's lock released (the
+    // lock is a leaf); the quarantine is checked again under it.
     let owner = crate::memory::FrameOwner::domain(encode_id(quarantine.domain))?;
     if crate::memory::owner_live_frame_count(owner)
         != Some(crate::address_space::USER_ADDRESS_SPACE_FRAMES)
     {
         return None;
     }
+    let mut manager = global_manager_mut()?;
+    if manager.primary_service_quarantine() != Some(quarantine) {
+        return None;
+    }
     let id = manager.restart_service()?;
-    validate_boot_service(manager, id)
+    validate_boot_service(&manager, id)
+}
+
+/// The quarantine of the primary service's retired frames, if it has one.
+fn primary_service_quarantine() -> Option<FrameQuarantine> {
+    global_manager()?.primary_service_quarantine()
+}
+
+impl Manager {
+    fn primary_service_quarantine(&self) -> Option<FrameQuarantine> {
+        let service = self.primary_service_identity?;
+        let slot = self.service_identity_slot(service)?;
+        self.quarantined_frame_owners[slot].filter(|quarantine| quarantine.service == service)
+    }
 }
 
 pub(crate) fn initialize_boot_auxiliary_service(
@@ -1234,7 +1254,7 @@ pub(crate) fn initialize_boot_auxiliary_service(
     object: u64,
     rights: Rights,
 ) -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let control = manager.domain(manager.control_plane_id?)?;
     let source = control.boot_roots.get(root_index).copied().flatten()?;
     let id = manager.create_auxiliary_service_with_delegations(&[DelegationGrant {
@@ -1259,7 +1279,7 @@ pub(crate) fn initialize_boot_auxiliary_service_with_two_grants(
     second_object: u64,
     second_rights: Rights,
 ) -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let control = manager.domain(manager.control_plane_id?)?;
     let first_source = control
         .boot_roots
@@ -1295,7 +1315,7 @@ pub(crate) fn initialize_boot_auxiliary_service_with_two_grants(
 pub(crate) fn initialize_boot_auxiliary_service_with_four_grants(
     grants: [(usize, u64, Rights); 4],
 ) -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let control = manager.domain(manager.control_plane_id?)?;
     let placeholder = control.boot_roots.first().copied().flatten()?;
     let mut delegated = [DelegationGrant {
@@ -1321,7 +1341,7 @@ pub(crate) fn initialize_boot_auxiliary_service_with_four_grants(
 }
 
 pub(crate) fn initialize_boot_unprivileged_auxiliary_service() -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let id = manager.create_auxiliary_service_with_delegations(&[])?;
     let domain = manager.domain(id)?;
     (domain.role == Role::AuxiliaryService
@@ -1339,7 +1359,7 @@ pub(crate) fn initialize_boot_auxiliary_service_restart(
     service_raw: u64,
 ) -> Option<u64> {
     let service = decode_service_id(service_raw)?;
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let control = manager.domain(manager.control_plane_id?)?;
     let source = control.boot_roots.get(root_index).copied().flatten()?;
     let id = manager.restart_auxiliary_service_with_delegations(
@@ -1371,7 +1391,7 @@ pub(crate) fn initialize_boot_auxiliary_service_restart_with_two_grants(
     service_raw: u64,
 ) -> Option<u64> {
     let service = decode_service_id(service_raw)?;
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let control = manager.domain(manager.control_plane_id?)?;
     let first_source = control
         .boot_roots
@@ -1410,7 +1430,8 @@ pub(crate) fn initialize_boot_auxiliary_service_restart_with_two_grants(
 
 pub(crate) fn auxiliary_boot_handle(domain_raw: u64, root_index: usize) -> Option<u64> {
     let id = decode_id(domain_raw)?;
-    let domain = global_manager()?.domain(id)?;
+    let manager = global_manager()?;
+    let domain = manager.domain(id)?;
     if domain.role != Role::AuxiliaryService {
         return None;
     }
@@ -1451,7 +1472,7 @@ pub(crate) fn create_container_domain(
     memory_limit_mib: u64,
 ) -> Option<u64> {
     let parent = decode_id(parent_raw)?;
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let id =
         manager.create_container_domain(parent, container_slot, cpu_limit, memory_limit_mib)?;
     let domain = manager.domain(id)?;
@@ -1475,7 +1496,8 @@ pub(crate) fn container_domain_for_slot(container_slot: usize) -> Option<u64> {
 }
 
 pub(crate) fn container_domain_limits(domain_raw: u64) -> Option<(u16, u64)> {
-    let domain = global_manager()?.domain(decode_id(domain_raw)?)?;
+    let manager = global_manager()?;
+    let domain = manager.domain(decode_id(domain_raw)?)?;
     (domain.role == Role::Container).then_some((domain.cpu_limit, domain.memory_limit_mib))
 }
 
@@ -1490,7 +1512,7 @@ pub(crate) fn configure_container_domain_limits(
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     manager.configure_container_domain_limits(id, cpu_limit, memory_limit_mib)
@@ -1511,7 +1533,8 @@ pub(crate) fn cpu_service_class(domain_raw: u64) -> ResourceServiceClass {
 }
 
 pub(crate) fn container_slot_for_domain(domain_raw: u64) -> Option<usize> {
-    let domain = global_manager()?.domain(decode_id(domain_raw)?)?;
+    let manager = global_manager()?;
+    let domain = manager.domain(decode_id(domain_raw)?)?;
     (domain.role == Role::Container)
         .then_some(domain.container_slot)
         .flatten()
@@ -1519,7 +1542,8 @@ pub(crate) fn container_slot_for_domain(domain_raw: u64) -> Option<usize> {
 }
 
 pub(crate) fn container_network_mode(domain_raw: u64) -> Option<ContainerNetworkMode> {
-    let domain = global_manager()?.domain(decode_id(domain_raw)?)?;
+    let manager = global_manager()?;
+    let domain = manager.domain(decode_id(domain_raw)?)?;
     (domain.role == Role::Container)
         .then_some(domain.container_network)
         .flatten()
@@ -1532,12 +1556,9 @@ pub(crate) fn configure_container_network_mode(
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    let Some(manager) = DOMAIN_RUNTIME.get_mut_ptr() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
-    // SAFETY: Domain mutation is serialized on the bootstrap CPU until Gate 8
-    // supplies the runtime lock for this explicit owner root.
-    let manager = unsafe { &mut *manager };
     let Some(domain) = manager.domain_mut(id) else {
         return false;
     };
@@ -1583,7 +1604,7 @@ pub(crate) fn create_auxiliary_service(
     let host_capability = Handle::from_raw(host_capability_raw)?;
     let source = Handle::from_raw(source_raw)?;
     let rights = Rights::from_bits(rights_raw)?;
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     if manager.control_plane_id != Some(supervisor)
         || !manager.permits(supervisor, host_capability, 1, Rights::MANAGE)
     {
@@ -1613,7 +1634,7 @@ pub(crate) fn stop_auxiliary_service(
     if crate::memory::owner_live_frame_count(owner) != Some(0) {
         return false;
     }
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     manager.request_auxiliary_stop(supervisor, host_capability, target)
@@ -1632,22 +1653,23 @@ pub(crate) fn request_auxiliary_drain(
     ) else {
         return false;
     };
-    global_manager_mut()
-        .is_some_and(|manager| manager.request_auxiliary_drain(supervisor, host_capability, target))
+    global_manager_mut().is_some_and(|mut manager| {
+        manager.request_auxiliary_drain(supervisor, host_capability, target)
+    })
 }
 
 pub(crate) fn take_auxiliary_drain_request(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.take_auxiliary_drain_request(id, 1))
+    global_manager_mut().is_some_and(|mut manager| manager.take_auxiliary_drain_request(id, 1))
 }
 
 pub(crate) fn take_blocked_auxiliary_drain_request(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.take_auxiliary_drain_request(id, 0))
+    global_manager_mut().is_some_and(|mut manager| manager.take_auxiliary_drain_request(id, 0))
 }
 
 pub(crate) fn handle_permits(domain_raw: u64, raw: u64, object: u64, rights: Rights) -> bool {
@@ -2413,7 +2435,7 @@ pub(crate) fn charge_call(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(total_calls) = manager.total_calls.checked_add(1) else {
@@ -2439,21 +2461,21 @@ pub(crate) fn begin_operation(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.begin_operation(id))
+    global_manager_mut().is_some_and(|mut manager| manager.begin_operation(id))
 }
 
 pub(crate) fn end_operation(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.end_operation(id))
+    global_manager_mut().is_some_and(|mut manager| manager.end_operation(id))
 }
 
 pub(crate) fn renew_auxiliary_call_epoch(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.renew_auxiliary_call_epoch(id))
+    global_manager_mut().is_some_and(|mut manager| manager.renew_auxiliary_call_epoch(id))
 }
 
 pub(crate) fn operation_accounting_proof_complete() -> bool {
@@ -2480,14 +2502,14 @@ pub(crate) fn attach_thread(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.attach_thread(id))
+    global_manager_mut().is_some_and(|mut manager| manager.attach_thread(id))
 }
 
 pub(crate) fn detach_thread(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut().is_some_and(|manager| manager.detach_thread(id))
+    global_manager_mut().is_some_and(|mut manager| manager.detach_thread(id))
 }
 
 pub(crate) fn bind_auxiliary_address_space(domain_raw: u64, root: u64) -> bool {
@@ -2497,7 +2519,7 @@ pub(crate) fn bind_auxiliary_address_space(domain_raw: u64, root: u64) -> bool {
     if !address_space_root_is_owned(domain_raw, root) {
         return false;
     }
-    global_manager_mut().is_some_and(|manager| manager.bind_auxiliary_address_space(id, root))
+    global_manager_mut().is_some_and(|mut manager| manager.bind_auxiliary_address_space(id, root))
 }
 
 pub(crate) fn unbind_auxiliary_address_space(domain_raw: u64, root: u64) -> bool {
@@ -2507,7 +2529,7 @@ pub(crate) fn unbind_auxiliary_address_space(domain_raw: u64, root: u64) -> bool
     if !address_space_root_is_owned(domain_raw, root) {
         return false;
     }
-    global_manager_mut().is_some_and(|manager| manager.unbind_auxiliary_address_space(id, root))
+    global_manager_mut().is_some_and(|mut manager| manager.unbind_auxiliary_address_space(id, root))
 }
 
 fn address_space_root_is_owned(domain_raw: u64, root: u64) -> bool {
@@ -2547,9 +2569,7 @@ pub(crate) fn service_restart_budget_proof_complete() -> bool {
 
 pub(crate) fn service_failure_policy(domain_raw: u64) -> Option<ServiceFailurePolicy> {
     let id = decode_id(domain_raw)?;
-    global_manager()
-        .and_then(|manager| manager.domain(id))
-        .and_then(|domain| domain.failure_policy)
+    global_manager()?.domain(id)?.failure_policy
 }
 
 pub(crate) fn retire_service(domain_raw: u64) -> bool {
@@ -2564,7 +2584,7 @@ pub(crate) fn retire_service(domain_raw: u64) -> bool {
     {
         return false;
     }
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(service) = manager.domain(id).and_then(|domain| domain.service) else {
@@ -2595,7 +2615,7 @@ pub(crate) fn retire_clean_service(domain_raw: u64) -> bool {
     {
         return false;
     }
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(service) = manager.domain(id).and_then(|domain| domain.service) else {
@@ -2623,7 +2643,10 @@ pub(crate) fn adopt_quarantined_service_frames(retired_raw: u64, replacement_raw
     ) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    // Read before the manager's lock, which is a leaf.
+    let retired_frames = crate::memory::owner_live_frame_count(retired_owner);
+    let replacement_frames = crate::memory::owner_live_frame_count(replacement_owner);
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(service) = manager
@@ -2641,9 +2664,8 @@ pub(crate) fn adopt_quarantined_service_frames(retired_raw: u64, replacement_raw
             service,
         })
         || manager.service_id != Some(replacement)
-        || crate::memory::owner_live_frame_count(retired_owner) != Some(0)
-        || crate::memory::owner_live_frame_count(replacement_owner)
-            != Some(crate::address_space::USER_ADDRESS_SPACE_FRAMES)
+        || retired_frames != Some(0)
+        || replacement_frames != Some(crate::address_space::USER_ADDRESS_SPACE_FRAMES)
     {
         return false;
     }
@@ -2660,7 +2682,10 @@ pub(crate) fn restore_quarantined_service_frames(retired_raw: u64, replacement_r
     ) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    // Read before the manager's lock, which is a leaf.
+    let retired_frames = crate::memory::owner_live_frame_count(retired_owner);
+    let replacement_frames = crate::memory::owner_live_frame_count(replacement_owner);
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(service) = manager
@@ -2674,9 +2699,8 @@ pub(crate) fn restore_quarantined_service_frames(retired_raw: u64, replacement_r
     };
     if manager.quarantined_frame_owners[slot].is_some()
         || manager.service_id != Some(replacement)
-        || crate::memory::owner_live_frame_count(retired_owner)
-            != Some(crate::address_space::USER_ADDRESS_SPACE_FRAMES)
-        || crate::memory::owner_live_frame_count(replacement_owner) != Some(0)
+        || retired_frames != Some(crate::address_space::USER_ADDRESS_SPACE_FRAMES)
+        || replacement_frames != Some(0)
     {
         return false;
     }
@@ -2694,7 +2718,9 @@ pub(crate) fn complete_service_frame_quarantine(retired_raw: u64) -> bool {
     ) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    // Read before the manager's lock, which is a leaf.
+    let retired_frames = crate::memory::owner_live_frame_count(owner);
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some((slot, quarantine)) = manager
@@ -2710,8 +2736,7 @@ pub(crate) fn complete_service_frame_quarantine(retired_raw: u64) -> bool {
     else {
         return false;
     };
-    if manager.service_identity_slot(quarantine.service) != Some(slot)
-        || crate::memory::owner_live_frame_count(owner) != Some(0)
+    if manager.service_identity_slot(quarantine.service) != Some(slot) || retired_frames != Some(0)
     {
         return false;
     }
@@ -2734,7 +2759,7 @@ pub(crate) fn discard_unstarted_service(domain_raw: u64) -> bool {
     if crate::memory::owner_live_frame_count(owner) != Some(0) {
         return false;
     }
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     manager.discard_unstarted_service(id)
@@ -2750,23 +2775,25 @@ pub(crate) fn discard_unstarted_auxiliary_service(domain_raw: u64) -> bool {
     if crate::memory::owner_live_frame_count(owner) != Some(0) {
         return false;
     }
-    global_manager_mut().is_some_and(|manager| manager.discard_unstarted_auxiliary_service(id))
+    global_manager_mut().is_some_and(|mut manager| manager.discard_unstarted_auxiliary_service(id))
 }
 
 pub(crate) fn begin_auxiliary_runtime_exit(domain_raw: u64, status: u8) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut()
-        .is_some_and(|manager| manager.begin_auxiliary_runtime_stop(id, None, Some(status), true))
+    global_manager_mut().is_some_and(|mut manager| {
+        manager.begin_auxiliary_runtime_stop(id, None, Some(status), true)
+    })
 }
 
 pub(crate) fn begin_auxiliary_runtime_fault(domain_raw: u64, fault: FaultMetadata) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    global_manager_mut()
-        .is_some_and(|manager| manager.begin_auxiliary_runtime_stop(id, Some(fault), None, true))
+    global_manager_mut().is_some_and(|mut manager| {
+        manager.begin_auxiliary_runtime_stop(id, Some(fault), None, true)
+    })
 }
 
 pub(crate) fn retire_stopped_auxiliary_service(domain_raw: u64) -> bool {
@@ -2779,14 +2806,14 @@ pub(crate) fn retire_stopped_auxiliary_service(domain_raw: u64) -> bool {
     if crate::memory::owner_live_frame_count(owner) != Some(0) {
         return false;
     }
-    global_manager_mut().is_some_and(|manager| manager.retire_auxiliary_service(id))
+    global_manager_mut().is_some_and(|mut manager| manager.retire_auxiliary_service(id))
 }
 
 pub(crate) fn record_service_fault(domain_raw: u64, fault: FaultMetadata) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some(service) = manager
@@ -2813,7 +2840,7 @@ pub(crate) fn record_service_ready(domain_raw: u64) -> bool {
     let Some(id) = decode_id(domain_raw) else {
         return false;
     };
-    let Some(manager) = global_manager_mut() else {
+    let Some(mut manager) = global_manager_mut() else {
         return false;
     };
     let Some((service, readiness_published)) = manager
@@ -2856,7 +2883,7 @@ pub(crate) fn record_service_ready(domain_raw: u64) -> bool {
 }
 
 pub(crate) fn take_lifecycle_event() -> Option<u64> {
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let event = manager.lifecycle_events.pop()?;
     manager.last_delivered_lifecycle_event = Some(event);
     if event.fault.is_some() {
@@ -3149,7 +3176,7 @@ pub(crate) fn domain_is_retired(domain_raw: u64) -> bool {
 
 pub(crate) fn publish_controller_process(domain_raw: u64) -> Option<u32> {
     let id = decode_id(domain_raw)?;
-    let manager = global_manager_mut()?;
+    let mut manager = global_manager_mut()?;
     let pid = manager.next_host_pid;
     if pid == 0 {
         return None;
@@ -3215,14 +3242,18 @@ pub(crate) fn last_retired_service_domain() -> Option<u64> {
     Some(encode_id(global_manager()?.last_retired_service_id?))
 }
 
-fn global_manager() -> Option<&'static Manager> {
-    DOMAIN_RUNTIME.get()
+/// The domain manager under its lock, once published. The lock is a leaf
+/// (nothing else is taken while it is held: the frame counts some checks
+/// need are read before it is taken) and keeps interrupts off, so the
+/// scheduler may ask it from any context. A caller holding the guard must
+/// not call another function of this module that takes it.
+fn global_manager() -> Option<IrqSpinLockGuard<'static, Manager>> {
+    Some(DOMAIN_RUNTIME.get()?.lock())
 }
 
-fn global_manager_mut() -> Option<&'static mut Manager> {
-    // SAFETY: Domain mutation is serialized on the bootstrap CPU until Gate 8
-    // supplies the runtime lock for this explicit owner root.
-    Some(unsafe { &mut *DOMAIN_RUNTIME.get_mut_ptr()? })
+/// `global_manager`, named for the callers that change the manager.
+fn global_manager_mut() -> Option<IrqSpinLockGuard<'static, Manager>> {
+    global_manager()
 }
 
 const fn encode_id(id: DomainId) -> u64 {

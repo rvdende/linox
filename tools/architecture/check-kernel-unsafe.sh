@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 521 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 521 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 506 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 506 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 260 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 260 to ${undocumented}" >&2
+if (( undocumented > 248 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 248 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 6 )); then
@@ -78,13 +78,18 @@ forbidding_files=(
     "drivers/nvme.rs"
     "drivers/pci.rs"
     "drivers/realtek.rs"
+    "domain.rs"
     "drivers/virtio_gpu.rs"
     "drivers/xhci.rs"
+    "ipc.rs"
     "linux_aio.rs"
     "linux_input.rs"
+    "linux_mount.rs"
     "linux_sysv_ipc.rs"
     "linux_tmpfs.rs"
+    "linux_user.rs"
     "memory.rs"
+    "packet.rs"
     "volume.rs"
 )
 for file in "${forbidding_files[@]}"; do

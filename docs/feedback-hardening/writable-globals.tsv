@@ -446,10 +446,10 @@ interior-mutable	kernel/src/arch/x86_64/smp.rs	TLB_SHOOTDOWN_ADDRESS	per-cpu-arc
 interior-mutable	kernel/src/arch/x86_64/smp.rs	ACTIVE_ROOTS	per-cpu-arch	allowlist	none	per-cpu-loaded-page-table-root
 interior-mutable	kernel/src/arch/x86_64/smp.rs	TLB_SHOOTDOWN_ACKNOWLEDGED	per-cpu-arch	allowlist	none	serialized-cross-cpu-translation-acknowledgement
 interior-mutable	kernel/src/arch/x86_64/timer.rs	TIMER	platform-device	allowlist	none	explicit-host-timer-owner-root
-interior-mutable	kernel/src/domain.rs	DOMAIN_RUNTIME	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
+interior-mutable	kernel/src/domain.rs	DOMAIN_RUNTIME	shared-runtime	allowlist	none	set-once-ranked-domain-manager-lock
 interior-mutable	kernel/src/image_store.rs	IMAGE_STORE	platform-device	allowlist	none	ranked-image-store-and-atomic-rootfs-backings
 interior-mutable	kernel/src/initramfs.rs	PUBLISHED_ROOT	platform-device	allowlist	none	set-once-boot-initramfs-root
-interior-mutable	kernel/src/ipc.rs	CONTROL_CHANNEL	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
+interior-mutable	kernel/src/ipc.rs	CONTROL_CHANNEL	shared-runtime	allowlist	none	ranked-control-channel-lock
 interior-mutable	kernel/src/lib.rs	HOST_CONTROL	platform-device	allowlist	none	explicit-host-control-owner-root
 interior-mutable	kernel/src/lib.rs	CONSOLE_NONBLOCKING	domain-runtime	allowlist	none	atomic-console-file-status-flag
 static-mut	kernel/src/lib.rs	KERNEL_STACK	bootstrap-init	allowlist	none	explicit-bootstrap-kernel-stack-owner-root
@@ -500,7 +500,8 @@ interior-mutable	kernel/src/linux_tmpfs_quota.rs	COUNT	domain-runtime	allowlist	
 interior-mutable	kernel/src/linux_pidfs.rs	EXITS	domain-runtime	allowlist	none	ranked-reaped-process-exit-statuses
 interior-mutable	kernel/src/drivers/virtio_gpu.rs	THREE_D_CAPSETS	platform-device	allowlist	none	atomic-published-at-activation
 interior-mutable	kernel/src/drivers/virtio_gpu.rs	PCI_ADDRESS	platform-device	allowlist	none	atomic-published-at-activation
-interior-mutable	kernel/src/linux_mount.rs	MOUNT_RUNTIME	domain-runtime	allowlist	none	explicit-domain-mount-runtime-owner-root
+interior-mutable	kernel/src/linux_mount.rs	MOUNT_RUNTIME	domain-runtime	allowlist	none	atomic-installed-namespace-words
+interior-mutable	kernel/src/linux_mount.rs	MOUNT_TABLE	domain-runtime	allowlist	none	ranked-mount-namespace-table-leaf
 interior-mutable	kernel/src/linux_overlay.rs	OVERLAY_RUNTIME	domain-runtime	allowlist	none	explicit-domain-overlay-owner-root
 interior-mutable	kernel/src/linux_overlay.rs	NODE_HINTS	domain-runtime	allowlist	none	validated-lookup-hints-with-overlay-owner
 interior-mutable	kernel/src/linux_overlay.rs	PATH_HINTS	domain-runtime	allowlist	none	validated-lookup-hints-with-overlay-owner
@@ -511,10 +512,9 @@ interior-mutable	kernel/src/linux_socket.rs	SOCKETS	domain-runtime	allowlist	non
 interior-mutable	kernel/src/linux_socket.rs	CLOSING_PENDING	domain-runtime	allowlist	none	atomic-hint-checked-under-socket-lock
 interior-mutable	kernel/src/linux_sysv_ipc.rs	SYSV_IPC_RUNTIME	domain-runtime	allowlist	none	ranked-sysv-ipc-instances
 interior-mutable	kernel/src/linux_tmpfs.rs	TMPFS_RUNTIME	domain-runtime	allowlist	none	ranked-tmpfs-files-per-domain
-interior-mutable	kernel/src/linux_user.rs	USER_RUNTIME	domain-runtime	allowlist	none	explicit-domain-user-runtime-owner-root
 interior-mutable	kernel/src/memory.rs	PHYSICAL_MEMORY	platform-device	allowlist	none	explicit-host-physical-memory-owner-root
 interior-mutable	kernel/src/network.rs	NETWORKS	platform-device	allowlist	none	explicit-host-virtual-network-owner-root
-interior-mutable	kernel/src/packet.rs	PACKETS	platform-device	allowlist	none	explicit-host-packet-mailbox-owner-root
+interior-mutable	kernel/src/packet.rs	PACKETS	platform-device	allowlist	none	ranked-packet-mailbox-lock
 interior-mutable	kernel/src/published_rootfs.rs	PUBLISHED_ROOTFS	platform-device	allowlist	none	explicit-domain-rootfs-publication-owner-root
 interior-mutable	kernel/src/scheduler.rs	PROCESS_WORKSPACES	domain-runtime	allowlist	none	explicit-per-domain-lifecycle-owner-root
 interior-mutable	kernel/src/scheduler.rs	SCHEDULER_RUNTIME	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
@@ -681,6 +681,8 @@ interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_LENGTH	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_TEXT	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/drivers/clock.rs	TICKS_PER_MS	platform-device	allowlist	none	atomic-published-after-calibration
+interior-mutable	kernel/src/linux_user.rs	INSTALLED	domain-runtime	allowlist	none	atomic-set-once-install-flag
+interior-mutable	kernel/src/linux_user.rs	TABLES	domain-runtime	allowlist	none	ranked-user-namespace-table-leaves
 interior-mutable	kernel/src/trusted/msr.rs	REPORTED_APIC_BASE	platform-device	allowlist	none	atomic-published-at-discovery
 interior-mutable	kernel/src/arch/x86_64/iommu.rs	STANDING	platform-device	allowlist	none	set-once-owned-state-iommu-standing-device-admissions
 interior-mutable	kernel/src/drivers/amd_iommu.rs	COMMANDS	platform-device	allowlist	none	claimed-for-good-static-dma-pages

@@ -1,8 +1,11 @@
-use crate::owned_state::OwnedState;
+#![forbid(unsafe_code)]
+
+use crate::sync::{LockRank, SpinLock};
 
 const CAPACITY: usize = 4;
 
-static CONTROL_CHANNEL: OwnedState<Duplex> = OwnedState::empty();
+/// The control plane's channel to its service, made once at boot.
+static CONTROL_CHANNEL: SpinLock<Option<Duplex>> = SpinLock::new(LockRank::CONTROL_CHANNEL, None);
 
 struct Duplex {
     control_domain: u64,
@@ -349,13 +352,15 @@ impl Channel {
 }
 
 pub(crate) fn initialize_control_channel(control_domain: u64, service_domain: u64) -> bool {
-    if CONTROL_CHANNEL.get().is_some() {
+    let mut installed = CONTROL_CHANNEL.lock();
+    if installed.is_some() {
         return false;
     }
     let Some(channel) = Duplex::new(control_domain, service_domain) else {
         return false;
     };
-    CONTROL_CHANNEL.try_install(channel).is_ok()
+    *installed = Some(channel);
+    true
 }
 
 pub(crate) fn send_or_wake(
@@ -363,63 +368,65 @@ pub(crate) fn send_or_wake(
     message: u64,
     wake: impl FnOnce(bool, u64) -> bool,
 ) -> bool {
-    channel_mut().is_some_and(|channel| channel.send_with_direct(domain, message, wake))
+    with_channel(|channel| channel.send_with_direct(domain, message, wake)).unwrap_or(false)
 }
 
 pub(crate) fn receive(domain: u64) -> Receive {
-    channel_mut().map_or(Receive::Empty, |channel| channel.receive(domain))
+    with_channel(|channel| channel.receive(domain)).unwrap_or(Receive::Empty)
 }
 
 pub(crate) fn service_side(domain: u64) -> Option<bool> {
-    channel_mut()?.service_side(domain)
+    with_channel(|channel| channel.service_side(domain))?
 }
 
 pub(crate) fn peer_domain(domain: u64) -> Option<u64> {
-    channel_mut()?.peer_domain(domain)
+    with_channel(|channel| channel.peer_domain(domain))?
 }
 
 pub(crate) fn retire_service(domain: u64) -> bool {
-    channel_mut().is_some_and(|channel| channel.retire_service(domain))
+    with_channel(|channel| channel.retire_service(domain)).unwrap_or(false)
 }
 
 pub(crate) fn bind_service(domain: u64) -> bool {
-    channel_mut().is_some_and(|channel| channel.bind_service(domain))
+    with_channel(|channel| channel.bind_service(domain)).unwrap_or(false)
 }
 
 pub(crate) fn rollback_service_binding(domain: u64) -> bool {
-    channel_mut().is_some_and(|channel| channel.rollback_service_binding(domain))
+    with_channel(|channel| channel.rollback_service_binding(domain)).unwrap_or(false)
 }
 
 pub(crate) fn is_empty() -> bool {
-    channel_mut().is_some_and(|channel| channel.is_empty())
+    with_channel(|channel| channel.is_empty()).unwrap_or(false)
 }
 
 pub(crate) fn last_message_audit() -> Option<((u64, u64), (u64, u64))> {
-    let channel = channel_mut()?;
-    Some((
-        (
-            channel.last_control_message_source?,
-            channel.last_control_message_sequence,
-        ),
-        (
-            channel.last_service_message_source?,
-            channel.last_service_message_sequence,
-        ),
-    ))
+    with_channel(|channel| {
+        Some((
+            (
+                channel.last_control_message_source?,
+                channel.last_control_message_sequence,
+            ),
+            (
+                channel.last_service_message_source?,
+                channel.last_service_message_sequence,
+            ),
+        ))
+    })?
 }
 
 pub(crate) fn last_closure_audit() -> Option<(u64, u64)> {
-    let channel = channel_mut()?;
-    Some((
-        channel.last_control_closure_domain?,
-        channel.last_control_closure_sequence,
-    ))
+    with_channel(|channel| {
+        Some((
+            channel.last_control_closure_domain?,
+            channel.last_control_closure_sequence,
+        ))
+    })?
 }
 
 pub(crate) fn delivery_descriptor(
     domain: u64,
 ) -> Option<[u8; crate::control_abi::IPC_DELIVERY_DESCRIPTOR_SIZE]> {
-    let audit = channel_mut()?.delivery_audit(domain)?;
+    let audit = with_channel(|channel| channel.delivery_audit(domain))??;
     Some(crate::control_abi::ipc_delivery_descriptor(
         audit.kind,
         audit.source,
@@ -598,8 +605,9 @@ pub(crate) fn verify_channel_invariants() -> bool {
             })
 }
 
-fn channel_mut() -> Option<&'static mut Duplex> {
-    // SAFETY: IPC mutation is serialized on the bootstrap CPU until Gate 8
-    // supplies the runtime lock for this explicit owner root.
-    Some(unsafe { &mut *CONTROL_CHANNEL.get_mut_ptr()? })
+/// Runs `f` on the control channel under its lock, if it was made. `f` may
+/// wake the scheduler's waiters (`send_or_wake`) but must not reach the
+/// channel again.
+fn with_channel<R>(f: impl FnOnce(&mut Duplex) -> R) -> Option<R> {
+    CONTROL_CHANNEL.lock().as_mut().map(f)
 }

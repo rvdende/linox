@@ -24,6 +24,16 @@ impl LockRank {
     /// and while a root filesystem is unpacked and published, at system
     /// call or boot level, so it ranks just above system-call level.
     pub(crate) const IMAGE_STORE: Self = Self(102);
+    /// The control plane's IPC channel (`ipc`): taken by native service
+    /// calls at system-call level, never under another lock; a send wakes
+    /// the receiver through the scheduler while it is held, so it ranks
+    /// below the scheduler's locks.
+    pub(crate) const CONTROL_CHANNEL: Self = Self(103);
+    /// The native packet mailboxes (`packet`): taken by native service
+    /// calls at system-call level, never under another lock. A consume
+    /// copies the packet to user memory while it is held, so it ranks
+    /// just above system-call level, below anything a user copy may take.
+    pub(crate) const PACKET_MAILBOXES: Self = Self(104);
     /// The mounts domains made; ranks below the heap so the table may grow
     /// while held, and above ARCHITECTURE, which system calls run under.
     pub(crate) const MOUNTS: Self = Self(105);
@@ -145,9 +155,27 @@ impl LockRank {
     /// The kernel heap refills from the frame allocator while holding its
     /// lock, so it ranks just below it.
     pub(crate) const KERNEL_HEAP: Self = Self(190);
+    /// The mount namespace table (`linux_mount`): a leaf that copies its
+    /// fixed records in and out and calls nothing while held. Path walks
+    /// ask for the current namespace under the route, overlay and volume
+    /// tables, so it ranks above every lock a system call may hold, below
+    /// the frame allocator.
+    pub(crate) const MOUNT_NAMESPACES: Self = Self(192);
+    /// Each domain's user namespaces (`linux_user`): a leaf that copies its
+    /// records in and out, calls nothing and allocates nothing while held
+    /// (a table's room is reserved before it is taken). Credential and
+    /// privilege checks ask it under whatever lock a system call holds, so
+    /// it ranks above them all, below the frame allocator.
+    pub(crate) const USER_NAMESPACES: Self = Self(194);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);
+    /// The domain manager (`domain`): an interrupt-safe leaf that takes
+    /// nothing while held (frame counts are read before it is taken).
+    /// Capability and credential checks ask it under whatever lock a call
+    /// holds, and the scheduler asks it for service classes and CPU limits
+    /// while choosing what to run, so it ranks above the scheduler's locks.
+    pub(crate) const DOMAINS: Self = Self(450);
     pub(crate) const DOMAIN_PROCESS: Self = Self(500);
     pub(crate) const FILESYSTEM: Self = Self(600);
     pub(crate) const IPC_SIGNAL: Self = Self(700);

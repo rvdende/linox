@@ -1,8 +1,6 @@
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    sync::atomic::{AtomicBool, Ordering},
-};
+#![forbid(unsafe_code)]
+
+use crate::sync::{LockRank, SpinLock};
 
 pub(crate) const MAX_PACKET_SIZE: usize = 1514;
 pub(crate) const PACKET_CAPACITY: usize = crate::control_abi::PACKET_QUEUE_CAPACITY;
@@ -63,6 +61,14 @@ impl Mailbox {
             claim: None,
             last_delivery: None,
         }
+    }
+
+    /// The metadata of the packet at the head of the queue.
+    fn pending_metadata(&self) -> Option<PacketMetadata> {
+        if self.len == 0 {
+            return None;
+        }
+        self.metadata[self.head]
     }
 
     fn bind(&mut self, domain: u64, service: u64) -> bool {
@@ -236,71 +242,81 @@ impl Mailbox {
     }
 }
 
-struct PacketOwner {
-    installed: AtomicBool,
-    ingress: UnsafeCell<MaybeUninit<Mailbox>>,
-    egress: UnsafeCell<MaybeUninit<Mailbox>>,
+struct Mailboxes {
+    installed: bool,
+    ingress: Mailbox,
+    egress: Mailbox,
 }
 
-unsafe impl Sync for PacketOwner {}
-
-static PACKETS: PacketOwner = PacketOwner {
-    installed: AtomicBool::new(false),
-    ingress: UnsafeCell::new(MaybeUninit::uninit()),
-    egress: UnsafeCell::new(MaybeUninit::uninit()),
-};
+/// The ingress and egress mailboxes, installed once at boot.
+static PACKETS: SpinLock<Mailboxes> = SpinLock::new(
+    LockRank::PACKET_MAILBOXES,
+    Mailboxes {
+        installed: false,
+        ingress: Mailbox::new(),
+        egress: Mailbox::new(),
+    },
+);
 
 pub(crate) fn install() -> bool {
-    if PACKETS.installed.swap(true, Ordering::AcqRel) {
+    let mut packets = PACKETS.lock();
+    if packets.installed {
         return false;
     }
-    unsafe {
-        PACKETS
-            .ingress
-            .get()
-            .write(MaybeUninit::new(Mailbox::new()));
-        PACKETS.egress.get().write(MaybeUninit::new(Mailbox::new()));
-    }
+    // Both mailboxes start empty (the static's initial value); installing
+    // only opens them.
+    packets.installed = true;
     true
 }
 
+/// Runs `f` on the ingress mailbox under the lock, once installed. `f` may
+/// copy to user memory (the consumers' `deliver`), never reach the
+/// mailboxes again.
+fn with_ingress<R>(f: impl FnOnce(&mut Mailbox) -> R) -> Option<R> {
+    let mut packets = PACKETS.lock();
+    packets.installed.then(|| f(&mut packets.ingress))
+}
+
+/// As `with_ingress`, for the egress mailbox.
+fn with_egress<R>(f: impl FnOnce(&mut Mailbox) -> R) -> Option<R> {
+    let mut packets = PACKETS.lock();
+    packets.installed.then(|| f(&mut packets.egress))
+}
+
 pub(crate) fn bind_producer(domain: u64, service: u64) -> bool {
-    mailbox_mut().is_some_and(|mailbox| mailbox.bind(domain, service))
+    with_ingress(|mailbox| mailbox.bind(domain, service)).unwrap_or(false)
 }
 
 pub(crate) fn publish(domain: u64, input: &[u8]) -> Result<u64, PacketError> {
-    mailbox_mut()
-        .ok_or(PacketError::InvalidProducer)?
-        .publish(domain, input)
+    with_ingress(|mailbox| mailbox.publish(domain, input)).ok_or(PacketError::InvalidProducer)?
 }
 
 pub(crate) fn bind_egress_producer(domain: u64, service: u64) -> bool {
-    egress_mailbox_mut().is_some_and(|mailbox| mailbox.bind(domain, service))
+    with_egress(|mailbox| mailbox.bind(domain, service)).unwrap_or(false)
 }
 
 pub(crate) fn publish_egress(domain: u64, input: &[u8]) -> Result<u64, PacketError> {
-    egress_mailbox_mut()
-        .ok_or(PacketError::InvalidProducer)?
-        .publish(domain, input)
+    with_egress(|mailbox| mailbox.publish(domain, input)).ok_or(PacketError::InvalidProducer)?
 }
 
 pub(crate) fn retire_egress_producer(domain: u64) -> bool {
-    egress_mailbox_mut().is_some_and(|mailbox| mailbox.retire(domain))
+    with_egress(|mailbox| mailbox.retire(domain)).unwrap_or(false)
 }
 
 pub(crate) fn retire_egress_producer_if_bound(domain: u64) -> bool {
     domain != 0
-        && egress_mailbox_mut().is_some_and(|mailbox| {
+        && with_egress(|mailbox| {
             mailbox.retire_if_bound(domain) && mailbox.release_claim_if_bound(domain)
         })
+        .unwrap_or(false)
 }
 
 pub(crate) fn retire_producer(domain: u64) -> bool {
-    mailbox_mut().is_some_and(|mailbox| mailbox.retire(domain))
+    with_ingress(|mailbox| mailbox.retire(domain)).unwrap_or(false)
 }
 
 pub(crate) fn retire_producer_if_bound(domain: u64) -> bool {
-    domain != 0 && mailbox_mut().is_some_and(|mailbox| mailbox.retire_if_bound(domain))
+    domain != 0 && with_ingress(|mailbox| mailbox.retire_if_bound(domain)).unwrap_or(false)
 }
 
 pub(crate) fn consume_with(
@@ -308,9 +324,8 @@ pub(crate) fn consume_with(
     capacity: usize,
     deliver: impl FnOnce(PacketMetadata, &[u8]) -> bool,
 ) -> Result<PacketMetadata, PacketError> {
-    mailbox_mut()
+    with_ingress(|mailbox| mailbox.consume_with(expected_sequence, capacity, deliver))
         .ok_or(PacketError::Empty)?
-        .consume_with(expected_sequence, capacity, deliver)
 }
 
 pub(crate) fn consume_egress_with(
@@ -318,9 +333,8 @@ pub(crate) fn consume_egress_with(
     capacity: usize,
     deliver: impl FnOnce(PacketMetadata, &[u8]) -> bool,
 ) -> Result<PacketMetadata, PacketError> {
-    egress_mailbox_mut()
+    with_egress(|mailbox| mailbox.consume_with(expected_sequence, capacity, deliver))
         .ok_or(PacketError::Empty)?
-        .consume_with(expected_sequence, capacity, deliver)
 }
 
 pub(crate) fn claim_egress_with(
@@ -329,105 +343,68 @@ pub(crate) fn claim_egress_with(
     capacity: usize,
     deliver: impl FnOnce(PacketMetadata, &[u8]) -> bool,
 ) -> Result<PacketMetadata, PacketError> {
-    egress_mailbox_mut().ok_or(PacketError::Empty)?.claim_with(
-        domain,
-        expected_sequence,
-        capacity,
-        deliver,
-    )
+    with_egress(|mailbox| mailbox.claim_with(domain, expected_sequence, capacity, deliver))
+        .ok_or(PacketError::Empty)?
 }
 
 pub(crate) fn acknowledge_egress(
     domain: u64,
     expected_sequence: u64,
 ) -> Result<PacketMetadata, PacketError> {
-    egress_mailbox_mut()
+    with_egress(|mailbox| mailbox.acknowledge(domain, expected_sequence))
         .ok_or(PacketError::Empty)?
-        .acknowledge(domain, expected_sequence)
 }
 
 pub(crate) fn last_delivery() -> Option<PacketMetadata> {
-    mailbox_mut()?.last_delivery
+    with_ingress(|mailbox| mailbox.last_delivery)?
 }
 
 pub(crate) fn pending_metadata() -> Option<PacketMetadata> {
-    let mailbox = mailbox_mut()?;
-    if mailbox.len == 0 {
-        return None;
-    }
-    mailbox.metadata[mailbox.head]
+    with_ingress(|mailbox| mailbox.pending_metadata())?
 }
 
 pub(crate) fn egress_pending_metadata() -> Option<PacketMetadata> {
-    let mailbox = egress_mailbox_mut()?;
-    if mailbox.len == 0 {
-        return None;
-    }
-    mailbox.metadata[mailbox.head]
+    with_egress(|mailbox| mailbox.pending_metadata())?
 }
 
 pub(crate) fn egress_last_delivery() -> Option<PacketMetadata> {
-    egress_mailbox_mut()?.last_delivery
+    with_egress(|mailbox| mailbox.last_delivery)?
 }
 
 pub(crate) fn egress_claim() -> Option<(u64, u64)> {
-    egress_mailbox_mut()?.claim
+    with_egress(|mailbox| mailbox.claim)?
 }
 
 pub(crate) fn wait_state(expected_sequence: u64) -> PacketWait {
-    let Some(mailbox) = mailbox_mut() else {
-        return PacketWait::Stale;
-    };
-    mailbox.wait_state(expected_sequence)
+    with_ingress(|mailbox| mailbox.wait_state(expected_sequence)).unwrap_or(PacketWait::Stale)
 }
 
 pub(crate) fn egress_wait_state(expected_sequence: u64) -> PacketWait {
-    let Some(mailbox) = egress_mailbox_mut() else {
-        return PacketWait::Stale;
-    };
-    mailbox.wait_state(expected_sequence)
+    with_egress(|mailbox| mailbox.wait_state(expected_sequence)).unwrap_or(PacketWait::Stale)
 }
 
 pub(crate) fn space_state(domain: u64) -> PacketSpace {
-    mailbox_mut().map_or(PacketSpace::InvalidProducer, |mailbox| {
-        mailbox.space_state(domain)
-    })
+    with_ingress(|mailbox| mailbox.space_state(domain)).unwrap_or(PacketSpace::InvalidProducer)
 }
 
 pub(crate) fn egress_space_state(domain: u64) -> PacketSpace {
-    egress_mailbox_mut().map_or(PacketSpace::InvalidProducer, |mailbox| {
-        mailbox.space_state(domain)
-    })
+    with_egress(|mailbox| mailbox.space_state(domain)).unwrap_or(PacketSpace::InvalidProducer)
 }
 
 pub(crate) fn next_sequence() -> Option<u64> {
-    Some(mailbox_mut()?.next_sequence)
+    with_ingress(|mailbox| mailbox.next_sequence)
 }
 
 pub(crate) fn egress_next_sequence() -> Option<u64> {
-    Some(egress_mailbox_mut()?.next_sequence)
+    with_egress(|mailbox| mailbox.next_sequence)
 }
 
 pub(crate) fn egress_is_empty() -> bool {
-    egress_mailbox_mut().is_some_and(|mailbox| mailbox.len == 0)
+    with_egress(|mailbox| mailbox.len == 0).unwrap_or(false)
 }
 
 pub(crate) fn egress_producer_is_bound() -> bool {
-    egress_mailbox_mut().is_some_and(|mailbox| mailbox.producer.is_some())
-}
-
-fn mailbox_mut() -> Option<&'static mut Mailbox> {
-    PACKETS
-        .installed
-        .load(Ordering::Acquire)
-        .then(|| unsafe { &mut *PACKETS.ingress.get().cast::<Mailbox>() })
-}
-
-fn egress_mailbox_mut() -> Option<&'static mut Mailbox> {
-    PACKETS
-        .installed
-        .load(Ordering::Acquire)
-        .then(|| unsafe { &mut *PACKETS.egress.get().cast::<Mailbox>() })
+    with_egress(|mailbox| mailbox.producer.is_some()).unwrap_or(false)
 }
 
 pub(crate) fn verify_invariants() -> bool {
