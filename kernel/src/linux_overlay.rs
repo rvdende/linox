@@ -6,7 +6,7 @@ use crate::{
     sync::{LockRank, SpinLock},
     trusted::frame::Frame,
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use core::cell::UnsafeCell;
 
 const PAGE_SIZE: usize = 4096;
@@ -15,9 +15,15 @@ const PAGE_SIZE: usize = 4096;
 pub(crate) const PATH_CAPACITY: usize = 4096;
 /// NAME_MAX: the longest name a directory entry can have.
 pub(crate) const NAME_MAX: usize = 255;
+/// Nodes are allocated this many at a time, in a chunk that never moves.
 const NODE_COUNT: usize = 9;
-const DATA_CAPACITY: usize = PAGE_SIZE - core::mem::size_of::<FrameLease>();
-const FRAME_INDEX_CAPACITY: usize = PAGE_SIZE / core::mem::size_of::<FrameLease>() - 1;
+/// A frame lease as a data or index page stores it: the address and the
+/// generation, little-endian, with nothing between.
+const LEASE_SIZE: usize = core::mem::size_of::<FrameLease>();
+/// The file bytes a data page holds after its next-page lease.
+const DATA_CAPACITY: usize = PAGE_SIZE - LEASE_SIZE;
+/// The frame leases an index page holds after its next-page lease.
+const FRAME_INDEX_CAPACITY: usize = PAGE_SIZE / LEASE_SIZE - 1;
 const XATTR_NAME_CAPACITY: usize = 255;
 const HOST_INSTANCE: usize = control_abi::DOMAIN_LIMIT;
 const INSTANCE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 1;
@@ -107,20 +113,68 @@ impl Child {
     }
 }
 
-#[repr(C)]
-struct DataPage {
-    next: FrameLease,
-    bytes: [u8; DATA_CAPACITY],
+// A file's data lives in frames, which carry memory cgroup charges and
+// which shared mappings map, so they stay frames and are only ever copied
+// through `Frame`. A chain file's data pages each start with the lease of
+// the next page, then DATA_CAPACITY bytes of the file. memfd contents (and
+// every paged file's) are kept one file page per frame, listed in a chain
+// of index pages that starts at the node's first_page, so MAP_SHARED can
+// map the frames themselves into every process instead of copying them in
+// at mmap time: an index page is the next index page's lease, then
+// FRAME_INDEX_CAPACITY frame leases (EMPTY for a hole). A zeroed frame is
+// an empty data or index page.
+
+/// The frame of data or index page `page`, if it is one.
+fn page_frame(page: FrameLease) -> Option<Frame> {
+    (page != FrameLease::EMPTY).then_some(())?;
+    Frame::leased(page)
 }
 
-// memfd contents are kept one file page per frame, listed in a chain of
-// index pages that starts at the node's first_page, so MAP_SHARED can map
-// the frames themselves into every process instead of copying them in at
-// mmap time.
-#[repr(C)]
-struct FrameIndexPage {
-    next: FrameLease,
-    frames: [FrameLease; FRAME_INDEX_CAPACITY],
+/// The lease stored at byte `offset` of `frame`.
+fn read_lease(frame: Frame, offset: usize) -> FrameLease {
+    let mut bytes = [0_u8; LEASE_SIZE];
+    frame.read_bytes(offset, &mut bytes);
+    let mut address = [0_u8; 8];
+    let mut generation = [0_u8; 4];
+    address.copy_from_slice(&bytes[..8]);
+    generation.copy_from_slice(&bytes[8..]);
+    let (address, generation) = (u64::from_le_bytes(address), u32::from_le_bytes(generation));
+    if address == 0 && generation == 0 {
+        return FrameLease::EMPTY;
+    }
+    FrameLease::from_parts(address, generation).unwrap_or(FrameLease::EMPTY)
+}
+
+/// Stores `lease` at byte `offset` of `frame`.
+fn write_lease(frame: Frame, offset: usize, lease: FrameLease) {
+    let mut bytes = [0_u8; LEASE_SIZE];
+    bytes[..8].copy_from_slice(&lease.address().to_le_bytes());
+    bytes[8..].copy_from_slice(&lease.generation().to_le_bytes());
+    frame.write_bytes(offset, &bytes);
+}
+
+/// The page after data or index page `page`.
+fn next_page(page: FrameLease) -> Option<FrameLease> {
+    Some(read_lease(page_frame(page)?, 0))
+}
+
+fn set_next_page(page: FrameLease, next: FrameLease) -> Option<()> {
+    write_lease(page_frame(page)?, 0, next);
+    Some(())
+}
+
+/// Entry `slot` of index page `page`.
+fn index_entry(page: Frame, slot: usize) -> FrameLease {
+    read_lease(page, LEASE_SIZE * (slot + 1))
+}
+
+fn set_index_entry(page: Frame, slot: usize, lease: FrameLease) {
+    write_lease(page, LEASE_SIZE * (slot + 1), lease);
+}
+
+/// The entries of index page `page`.
+fn index_entries(page: Frame) -> impl Iterator<Item = (usize, FrameLease)> {
+    (0..FRAME_INDEX_CAPACITY).map(move |slot| (slot, index_entry(page, slot)))
 }
 
 /// An extended attribute of a file: its name and value, on the kernel
@@ -316,18 +370,14 @@ impl Node {
     }
 }
 
-#[repr(C)]
-struct NodePage {
-    next: FrameLease,
-    nodes: [Node; NODE_COUNT],
-}
-
-const _: () = assert!(core::mem::size_of::<DataPage>() == PAGE_SIZE);
-const _: () = assert!(core::mem::size_of::<FrameIndexPage>() <= PAGE_SIZE);
-const _: () = assert!(core::mem::size_of::<NodePage>() <= PAGE_SIZE);
+const _: () = assert!(LEASE_SIZE == 12);
+const _: () = assert!(LEASE_SIZE * (FRAME_INDEX_CAPACITY + 1) <= PAGE_SIZE);
 
 struct Overlay {
-    first_node_page: FrameLease,
+    /// The nodes, in chunks of NODE_COUNT on the kernel heap that are only
+    /// appended and never move, so a node's place (its index among all
+    /// slots) and address stay put until `teardown`.
+    nodes: Vec<Box<[Node]>>,
     /// The shared mappings processes registered; a removed one leaves its
     /// slot for the next.
     mappings: Vec<SharedMapping>,
@@ -342,8 +392,26 @@ struct Overlay {
 }
 
 impl Overlay {
+    fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter().flat_map(|chunk| chunk.iter())
+    }
+
+    fn nodes_mut(&mut self) -> impl Iterator<Item = &mut Node> {
+        self.nodes.iter_mut().flat_map(|chunk| chunk.iter_mut())
+    }
+
+    fn node_at(&self, index: usize) -> Option<&Node> {
+        self.nodes.get(index / NODE_COUNT)?.get(index % NODE_COUNT)
+    }
+
+    fn node_at_mut(&mut self, index: usize) -> Option<&mut Node> {
+        self.nodes
+            .get_mut(index / NODE_COUNT)?
+            .get_mut(index % NODE_COUNT)
+    }
+
     const EMPTY: Self = Self {
-        first_node_page: FrameLease::EMPTY,
+        nodes: Vec::new(),
         mappings: Vec::new(),
         next_generation: 0x8000_0000,
         next_inode: 0x10_000,
@@ -491,6 +559,11 @@ pub(crate) fn remove_process_shared_mappings(pid: u32) {
     }
 }
 
+/// Each instance's overlay. Still an owner cell, serialized by the
+/// kernel-entry lock: overlay operations call out to the volumes, the
+/// overlay mounts, the socket table and the tmpfs limits while they hold
+/// nodes, and are called under several of those, so no rank fits one lock
+/// held across an operation (docs/FRAMEKERNEL.md, step 6 notes).
 struct OverlayRuntimeOwner(UnsafeCell<[Overlay; INSTANCE_LIMIT]>);
 
 unsafe impl Sync for OverlayRuntimeOwner {}
@@ -521,24 +594,16 @@ fn linked_node(path: &[u8], whiteouts: bool) -> Option<&'static mut Node> {
     };
     let hints = path_hints();
     let hint = *hints.get(&path_key(path))?;
-    // SAFETY: as in `node_mut`: hints point into live node pages.
-    if let Some(node) = (hint != 0).then(|| unsafe { &mut *(hint as *mut Node) }) {
-        if wanted(node) {
-            return Some(node);
-        }
-    }
     let overlay = live_mut();
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let nodes = node_page_mut(page)?;
-        if let Some(index) = nodes.nodes.iter().position(&wanted) {
-            let node = nodes.nodes.get_mut(index)?;
-            hints.insert(path_key(path), core::ptr::from_mut(node) as usize);
-            return Some(node);
+    // A hint is a node's place plus one (0: not looked up yet).
+    if let Some(index) = hint.checked_sub(1) {
+        if overlay.node_at(index).is_some_and(wanted) {
+            return overlay.node_at_mut(index);
         }
-        page = nodes.next;
     }
-    None
+    let index = overlay.nodes().position(&wanted)?;
+    hints.insert(path_key(path), index + 1);
+    overlay.node_at_mut(index)
 }
 
 pub(crate) fn hidden_stored(path: &[u8]) -> bool {
@@ -642,21 +707,11 @@ pub(crate) fn huge_pages_in_use() -> u64 {
     let Some(overlay) = live() else {
         return 0;
     };
-    let mut total = 0;
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let Some(nodes) = node_page(page) else {
-            break;
-        };
-        total += nodes
-            .nodes
-            .iter()
-            .filter(|node| node.active && node.huge)
-            .map(|node| u64::from(node.huge_pages))
-            .sum::<u64>();
-        page = nodes.next;
-    }
-    total
+    overlay
+        .nodes()
+        .filter(|node| node.active && node.huge)
+        .map(|node| u64::from(node.huge_pages))
+        .sum()
 }
 
 /// Marks `handle` a file of an internal filesystem (secret memory): one
@@ -828,20 +883,19 @@ pub(crate) fn replace_paged_frame(
     }
     let mut page = node.first_page;
     for _ in 0..index / FRAME_INDEX_CAPACITY {
-        match frame_index_page_mut(page) {
-            Some(entries) if entries.next != FrameLease::EMPTY => page = entries.next,
+        match next_page(page) {
+            Some(next) if next != FrameLease::EMPTY => page = next,
             _ => return false,
         }
     }
-    let Some(entry) =
-        frame_index_page_mut(page).map(|entries| &mut entries.frames[index % FRAME_INDEX_CAPACITY])
-    else {
+    let Some(entries) = page_frame(page) else {
         return false;
     };
-    if *entry != expected {
+    let slot = index % FRAME_INDEX_CAPACITY;
+    if index_entry(entries, slot) != expected {
         return false;
     }
-    *entry = replacement;
+    set_index_entry(entries, slot, replacement);
     true
 }
 
@@ -907,31 +961,27 @@ pub(crate) fn create_shmem() -> Option<Handle> {
 /// page table.
 pub(crate) fn release_unmapped_shmem() {
     release_orphan_caches();
-    let Some(overlay) = live() else {
-        return;
-    };
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let Some(nodes) = node_page_mut(page) else {
-            return;
-        };
-        for node in nodes.nodes.iter_mut() {
-            if node.active
-                && node.data == Data::Shmem
-                && !handle_mapped(overlay, node.handle)
-                && release_node_data(node)
-            {
-                forget_node(node);
-            }
+    let Overlay {
+        nodes, mappings, ..
+    } = live_mut();
+    for node in nodes.iter_mut().flat_map(|chunk| chunk.iter_mut()) {
+        if node.active
+            && node.data == Data::Shmem
+            && !mapped_in(mappings, node.handle)
+            && release_node_data(node)
+        {
+            forget_node(node);
         }
-        page = nodes.next;
     }
 }
 
 /// Whether a process has a shared mapping of `handle` registered.
 fn handle_mapped(overlay: &Overlay, handle: Handle) -> bool {
-    overlay
-        .mappings
+    mapped_in(&overlay.mappings, handle)
+}
+
+fn mapped_in(mappings: &[SharedMapping], handle: Handle) -> bool {
+    mappings
         .iter()
         .any(|mapping| mapping.active && mapping.handle == handle)
 }
@@ -1041,20 +1091,17 @@ pub(crate) fn next_child_at_stored(directory: &[u8], cursor: usize) -> Option<Op
         }
     };
     // The cursor is a node slot's place among all slots, which stays put
-    // while nodes come and go (pages are only appended): unlinking the
+    // while nodes come and go (chunks are only appended): unlinking the
     // entries already read, as `rm -r` does between reads, moves none of
     // the rest past the cursor.
     let overlay = live()?;
-    let mut page = overlay.first_node_page;
     let mut ordinal = 0_usize;
-    while page != FrameLease::EMPTY {
-        let nodes = node_page(page)?;
-        if ordinal + nodes.nodes.len() <= cursor {
-            ordinal += nodes.nodes.len();
-            page = nodes.next;
+    for nodes in &overlay.nodes {
+        if ordinal + nodes.len() <= cursor {
+            ordinal += nodes.len();
             continue;
         }
-        for (index, node) in nodes.nodes.iter().enumerate() {
+        for (index, node) in nodes.iter().enumerate() {
             let place = ordinal + index;
             if place < cursor || !node.active || !node.linked || node.whiteout {
                 continue;
@@ -1079,8 +1126,7 @@ pub(crate) fn next_child_at_stored(directory: &[u8], cursor: usize) -> Option<Op
                 name,
             }));
         }
-        ordinal += nodes.nodes.len();
-        page = nodes.next;
+        ordinal += nodes.len();
     }
     Some(None)
 }
@@ -1375,7 +1421,7 @@ fn read_node(node: &mut Node, offset: usize, output: &mut [u8]) -> Option<usize>
             (node.first_page, 0)
         };
     while page_index < target_page {
-        page = data_page(page)?.next;
+        page = next_page(page)?;
         page_index += 1;
     }
     node.cached_page = page;
@@ -1383,14 +1429,16 @@ fn read_node(node: &mut Node, offset: usize, output: &mut [u8]) -> Option<usize>
     let mut skipped = page_index * DATA_CAPACITY;
     let mut copied = 0;
     while start + copied < end {
-        let data = data_page(page)?;
+        let data = page_frame(page)?;
         let page_offset = start + copied - skipped;
         let length = (end - start - copied).min(DATA_CAPACITY - page_offset);
-        output[copied..copied + length]
-            .copy_from_slice(&data.bytes[page_offset..page_offset + length]);
+        data.read_bytes(
+            LEASE_SIZE + page_offset,
+            &mut output[copied..copied + length],
+        );
         copied += length;
         skipped += DATA_CAPACITY;
-        page = data.next;
+        page = read_lease(data, 0);
     }
     Some(copied)
 }
@@ -1455,7 +1503,7 @@ fn write_data(handle: Handle, offset: usize, input: &[u8]) -> Option<usize> {
             (node.first_page, 0)
         };
     while page_index < target_page {
-        page = data_page(page)?.next;
+        page = next_page(page)?;
         page_index += 1;
     }
     node.cached_page = page;
@@ -1463,14 +1511,13 @@ fn write_data(handle: Handle, offset: usize, input: &[u8]) -> Option<usize> {
     let mut skipped = page_index * DATA_CAPACITY;
     let mut copied = 0;
     while copied < input.len() {
-        let data = data_page_mut(page)?;
+        let data = page_frame(page)?;
         let page_offset = offset + copied - skipped;
         let length = (input.len() - copied).min(DATA_CAPACITY - page_offset);
-        data.bytes[page_offset..page_offset + length]
-            .copy_from_slice(&input[copied..copied + length]);
+        data.write_bytes(LEASE_SIZE + page_offset, &input[copied..copied + length]);
         copied += length;
         skipped += DATA_CAPACITY;
-        page = data.next;
+        page = read_lease(data, 0);
     }
     node.size = node.size.max(end);
     Some(input.len())
@@ -1541,18 +1588,18 @@ pub(crate) fn truncate(handle: Handle, size: usize) -> bool {
         let mut position = size;
         while position < node.size {
             while page_index < position / DATA_CAPACITY {
-                let Some(data) = data_page(page) else {
+                let Some(next) = next_page(page) else {
                     return false;
                 };
-                page = data.next;
+                page = next;
                 page_index += 1;
             }
-            let Some(data) = data_page_mut(page) else {
+            let Some(data) = page_frame(page) else {
                 return false;
             };
             let within = position % DATA_CAPACITY;
             let length = (node.size - position).min(DATA_CAPACITY - within);
-            data.bytes[within..within + length].fill(0);
+            data.fill_bytes(LEASE_SIZE + within, length, 0);
             position += length;
         }
     }
@@ -1811,23 +1858,24 @@ pub(crate) fn rename_stored(handle: Handle, path: &[u8]) -> bool {
     }
     // The same walk in the same order, now moving each node.
     let mut new_paths = new_paths.into_iter();
-    let overlay = live_mut();
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let Some(nodes) = node_page_mut(page) else {
+    let mut moved = Vec::new();
+    for (place, candidate) in live().into_iter().flat_map(Overlay::nodes).enumerate() {
+        if renamed_suffix(candidate, handle, &old_path, directory).is_some() {
+            if moved.try_reserve(1).is_err() {
+                return false;
+            }
+            moved.push(place);
+        }
+    }
+    for place in moved {
+        let Some(new_path) = new_paths.next() else {
             return false;
         };
-        for candidate in &mut nodes.nodes {
-            if renamed_suffix(candidate, handle, &old_path, directory).is_none() {
-                continue;
-            }
-            let Some(new_path) = new_paths.next() else {
-                return false;
-            };
-            note_path(&new_path);
-            candidate.path = new_path;
-        }
-        page = nodes.next;
+        note_path(&new_path);
+        let Some(candidate) = live_mut().node_at_mut(place) else {
+            return false;
+        };
+        candidate.path = new_path;
     }
     true
 }
@@ -2024,14 +2072,9 @@ pub(crate) fn rename_path_stored(from: &[u8], to: &[u8]) -> bool {
 /// from it drops what was created there. Open files stay readable until
 /// closed, as after unlink.
 pub(crate) fn unlink_below_stored(path: &[u8]) {
-    let overlay = live_mut();
-    let mut page = overlay.first_node_page;
     let mut symlinks_removed = 0;
-    while page != FrameLease::EMPTY {
-        let Some(nodes) = node_page_mut(page) else {
-            return;
-        };
-        for node in &mut nodes.nodes {
+    {
+        for node in live_mut().nodes_mut() {
             let below = node.active
                 && node.linked
                 && node
@@ -2051,7 +2094,6 @@ pub(crate) fn unlink_below_stored(path: &[u8]) {
                 note_unlinked(node.handle);
             }
         }
-        page = nodes.next;
     }
     let overlay = live_mut();
     overlay.symlinks = overlay.symlinks.saturating_sub(symlinks_removed);
@@ -2231,24 +2273,26 @@ fn take_paged_frame(node: &mut Node, index: usize) -> Option<bool> {
         return Some(false);
     }
     for _ in 0..index / FRAME_INDEX_CAPACITY {
-        page = frame_index_page_mut(page)?.next;
+        page = next_page(page)?;
         if page == FrameLease::EMPTY {
             return Some(false);
         }
     }
-    let entry = &mut frame_index_page_mut(page)?.frames[index % FRAME_INDEX_CAPACITY];
-    if *entry == FrameLease::EMPTY {
+    let entries = page_frame(page)?;
+    let slot = index % FRAME_INDEX_CAPACITY;
+    let entry = index_entry(entries, slot);
+    if entry == FrameLease::EMPTY {
         return Some(false);
     }
-    if let Some(swap) = swapped_entry(*entry) {
+    if let Some(swap) = swapped_entry(entry) {
         crate::linux_swap::free(swap);
-        *entry = FrameLease::EMPTY;
+        set_index_entry(entries, slot, FrameLease::EMPTY);
         return Some(true);
     }
-    if !memory::scrub_and_release_frames(FrameOwner::KERNEL, core::slice::from_ref(entry)) {
+    if !memory::scrub_and_release_frames(FrameOwner::KERNEL, &[entry]) {
         return None;
     }
-    *entry = FrameLease::EMPTY;
+    set_index_entry(entries, slot, FrameLease::EMPTY);
     Some(true)
 }
 
@@ -2258,17 +2302,15 @@ fn paged_frames(node: &Node, pages: usize) -> usize {
     let mut page = node.first_page;
     let mut first = 0;
     while page != FrameLease::EMPTY && first < pages {
-        let Some(entries) = frame_index_page_mut(page) else {
+        let Some(entries) = page_frame(page) else {
             break;
         };
-        count += entries
-            .frames
-            .iter()
+        count += index_entries(entries)
             .take(pages - first)
-            .filter(|frame| **frame != FrameLease::EMPTY)
+            .filter(|(_, frame)| *frame != FrameLease::EMPTY)
             .count();
         first += FRAME_INDEX_CAPACITY;
-        page = entries.next;
+        page = read_lease(entries, 0);
     }
     count
 }
@@ -2423,22 +2465,19 @@ pub(crate) fn release_unmapped_cached_pages(handle: Handle, file: Handle) -> usi
     let mut released = 0;
     let mut page = node.first_page;
     while page != FrameLease::EMPTY {
-        let Some(entries) = frame_index_page_mut(page) else {
+        let Some(entries) = page_frame(page) else {
             break;
         };
-        for entry in &mut entries.frames {
-            if *entry != FrameLease::EMPTY
-                && !memory::frame_is_shared(*entry)
-                && memory::scrub_and_release_frames(
-                    FrameOwner::KERNEL,
-                    core::slice::from_ref(entry),
-                )
+        for (slot, entry) in index_entries(entries) {
+            if entry != FrameLease::EMPTY
+                && !memory::frame_is_shared(entry)
+                && memory::scrub_and_release_frames(FrameOwner::KERNEL, &[entry])
             {
-                *entry = FrameLease::EMPTY;
+                set_index_entry(entries, slot, FrameLease::EMPTY);
                 released += 1;
             }
         }
-        page = entries.next;
+        page = read_lease(entries, 0);
     }
     released
 }
@@ -2457,27 +2496,24 @@ pub(crate) fn release_charged_cached_pages(
     let mut released = 0;
     let mut page = node.first_page;
     while page != FrameLease::EMPTY && released < budget {
-        let Some(entries) = frame_index_page_mut(page) else {
+        let Some(entries) = page_frame(page) else {
             break;
         };
-        for entry in &mut entries.frames {
+        for (slot, entry) in index_entries(entries) {
             if released >= budget {
                 break;
             }
-            if *entry != FrameLease::EMPTY
-                && swapped_entry(*entry).is_none()
-                && !memory::frame_is_shared(*entry)
-                && wanted(memory::frame_charge(*entry))
-                && memory::scrub_and_release_frames(
-                    FrameOwner::KERNEL,
-                    core::slice::from_ref(entry),
-                )
+            if entry != FrameLease::EMPTY
+                && swapped_entry(entry).is_none()
+                && !memory::frame_is_shared(entry)
+                && wanted(memory::frame_charge(entry))
+                && memory::scrub_and_release_frames(FrameOwner::KERNEL, &[entry])
             {
-                *entry = FrameLease::EMPTY;
+                set_index_entry(entries, slot, FrameLease::EMPTY);
                 released += 1;
             }
         }
-        page = entries.next;
+        page = read_lease(entries, 0);
     }
     released
 }
@@ -2495,16 +2531,12 @@ pub(crate) fn lent_frames(handle: Handle) -> Option<Vec<u64>> {
     let mut frames = Vec::new();
     let mut page = node.first_page;
     while page != FrameLease::EMPTY {
-        let entries = frame_index_page_mut(page)?;
-        for frame in entries
-            .frames
-            .iter()
-            .filter(|frame| **frame != FrameLease::EMPTY)
-        {
+        let entries = page_frame(page)?;
+        for (_, frame) in index_entries(entries).filter(|(_, frame)| *frame != FrameLease::EMPTY) {
             frames.try_reserve(1).ok()?;
             frames.push(frame.address());
         }
-        page = entries.next;
+        page = read_lease(entries, 0);
     }
     frames.sort_unstable();
     Some(frames)
@@ -2618,23 +2650,13 @@ pub(crate) fn teardown() -> bool {
     let overlay = live_mut();
     *node_hints() = BTreeMap::new();
     *path_hints() = BTreeMap::new();
-    let mut page = core::mem::replace(&mut overlay.first_node_page, FrameLease::EMPTY);
-    while page != FrameLease::EMPTY {
-        let Some(nodes) = node_page_mut(page) else {
-            return false;
-        };
-        let next = nodes.next;
-        for node in &mut nodes.nodes {
-            if node.active && !release_node_data(node) {
-                return false;
-            }
-            *node = Node::EMPTY;
-        }
-        if !memory::scrub_and_release_frames(FrameOwner::KERNEL, core::slice::from_ref(&page)) {
+    let nodes = core::mem::take(&mut overlay.nodes);
+    for node in nodes.iter().flat_map(|chunk| chunk.iter()) {
+        if node.active && !release_node_data(node) {
             return false;
         }
-        page = next;
     }
+    drop(nodes);
     overlay.mappings = Vec::new();
     overlay.next_generation = 0x8000_0000;
     overlay.next_inode = 0x10_000;
@@ -2685,51 +2707,22 @@ fn node_by_path_mut<'a>(_overlay: &'a mut Overlay, path: &[u8]) -> Option<&'a mu
 }
 
 fn empty_node_slot(overlay: &mut Overlay) -> Option<&mut Node> {
-    let mut page = overlay.first_node_page;
-    let mut last = FrameLease::EMPTY;
-    while page != FrameLease::EMPTY {
-        let nodes = node_page_mut(page)?;
-        if let Some(index) = nodes.nodes.iter().position(|node| !node.active) {
-            return nodes.nodes.get_mut(index);
-        }
-        last = page;
-        page = nodes.next;
+    let free = overlay.nodes().position(|node| !node.active);
+    if let Some(index) = free {
+        return overlay.node_at_mut(index);
     }
-    let page = allocate_node_page()?;
-    if last == FrameLease::EMPTY {
-        overlay.first_node_page = page;
-    } else {
-        node_page_mut(last)?.next = page;
-    }
-    node_page_mut(page)?.nodes.first_mut()
-}
-
-fn allocate_node_page() -> Option<FrameLease> {
-    let [page] = memory::allocate_frames::<1>(FrameOwner::KERNEL)?;
-    let address = page.direct_map_address()?;
-    unsafe {
-        core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
-        core::ptr::write(
-            address as *mut NodePage,
-            NodePage {
-                next: FrameLease::EMPTY,
-                nodes: [Node::EMPTY; NODE_COUNT],
-            },
-        );
-    }
-    Some(page)
+    let mut chunk = Vec::new();
+    chunk.try_reserve_exact(NODE_COUNT).ok()?;
+    chunk.extend((0..NODE_COUNT).map(|_| Node::EMPTY));
+    overlay.nodes.try_reserve(1).ok()?;
+    overlay.nodes.push(chunk.into_boxed_slice());
+    overlay.nodes.last_mut()?.first_mut()
 }
 
 fn allocate_zeroed_frame() -> Option<FrameLease> {
     let [page] = memory::allocate_frames::<1>(FrameOwner::KERNEL)?;
     Frame::leased(page)?.fill(0);
     Some(page)
-}
-
-fn frame_index_page_mut(page: FrameLease) -> Option<&'static mut FrameIndexPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &mut *(address as *mut FrameIndexPage) })
 }
 
 // A zeroed frame is an index page whose entries are all FrameLease::EMPTY.
@@ -2740,34 +2733,39 @@ fn memfd_page(node: &mut Node, index: usize, allocate: bool) -> Option<FrameLeas
     }
     let mut page = node.first_page;
     for _ in 0..index / FRAME_INDEX_CAPACITY {
-        let entries = frame_index_page_mut(page)?;
-        if entries.next == FrameLease::EMPTY {
+        let mut next = next_page(page)?;
+        if next == FrameLease::EMPTY {
             allocate.then_some(())?;
-            entries.next = allocate_zeroed_frame()?;
+            next = allocate_zeroed_frame()?;
+            set_next_page(page, next)?;
         }
-        page = entries.next;
+        page = next;
     }
-    let entry = &mut frame_index_page_mut(page)?.frames[index % FRAME_INDEX_CAPACITY];
+    let entries = page_frame(page)?;
+    let slot = index % FRAME_INDEX_CAPACITY;
+    let mut entry = index_entry(entries, slot);
     // A volume's page cache is file memory; tmpfs, memfd and shmem pages
     // are shared memory (memory.stat).
     let shmem = !(node.origin == Origin::Pseudo && matches!(node.data, Data::Paged));
-    if *entry == FrameLease::EMPTY {
+    if entry == FrameLease::EMPTY {
         allocate.then_some(())?;
-        *entry = allocate_zeroed_frame()?;
-        memory::charge_cache_frame(*entry, shmem);
+        entry = allocate_zeroed_frame()?;
+        set_index_entry(entries, slot, entry);
+        memory::charge_cache_frame(entry, shmem);
     }
     // A page out in swap comes back first, whatever wants it.
-    if let Some(swap) = swapped_entry(*entry) {
+    if let Some(swap) = swapped_entry(entry) {
         let frame = allocate_zeroed_frame()?;
         memory::charge_cache_frame(frame, shmem);
         if !crate::arch::x86_64::cpu::linux_swap_read_page(swap, frame) {
             let _ = memory::scrub_and_release_frames(FrameOwner::KERNEL, &[frame]);
             return None;
         }
-        *entry = frame;
+        entry = frame;
+        set_index_entry(entries, slot, entry);
         crate::linux_swap::free(swap);
     }
-    Some(*entry)
+    Some(entry)
 }
 
 /// Marks a paged file's page out in swap: the index holds this in place of
@@ -2780,13 +2778,14 @@ fn swapped_entry(lease: FrameLease) -> Option<u64> {
         .then_some((lease.address() & !SWAPPED_TAG) >> 12)
 }
 
-/// The index slot of page `index` of paged `node`, if its index reaches it.
-fn paged_slot(node: &Node, index: usize) -> Option<&'static mut FrameLease> {
+/// The index page and slot of page `index` of paged `node`, if its index
+/// reaches it.
+fn paged_slot(node: &Node, index: usize) -> Option<(Frame, usize)> {
     let mut page = node.first_page;
     for _ in 0..index / FRAME_INDEX_CAPACITY {
-        page = frame_index_page_mut(page)?.next;
+        page = next_page(page)?;
     }
-    frame_index_page_mut(page).map(|entries| &mut entries.frames[index % FRAME_INDEX_CAPACITY])
+    Some((page_frame(page)?, index % FRAME_INDEX_CAPACITY))
 }
 
 /// The frame holding page `index` of shared memory `handle` (an unnamed
@@ -2797,7 +2796,8 @@ pub(crate) fn paged_frame_for_swap(handle: Handle, index: usize) -> Option<Frame
         return None;
     }
     let node = node_mut(handle).filter(|node| node.paged())?;
-    let frame = *paged_slot(node, index)?;
+    let (entries, slot) = paged_slot(node, index)?;
+    let frame = index_entry(entries, slot);
     (frame != FrameLease::EMPTY && swapped_entry(frame).is_none()).then_some(frame)
 }
 
@@ -2813,16 +2813,16 @@ pub(crate) fn mark_paged_page_swapped(
     let Some(mark) = FrameLease::from_parts(SWAPPED_TAG | entry << 12, SWAPPED_GENERATION) else {
         return false;
     };
-    let Some(slot) = node_mut(handle)
+    let Some((entries, slot)) = node_mut(handle)
         .filter(|node| node.paged())
         .and_then(|node| paged_slot(node, index))
     else {
         return false;
     };
-    if *slot != frame {
+    if index_entry(entries, slot) != frame {
         return false;
     }
-    *slot = mark;
+    set_index_entry(entries, slot, mark);
     true
 }
 
@@ -2832,7 +2832,7 @@ pub(crate) fn paged_page_swapped(handle: Handle, index: usize) -> bool {
         && node_mut(handle)
             .filter(|node| node.paged())
             .and_then(|node| paged_slot(node, index))
-            .is_some_and(|slot| swapped_entry(*slot).is_some())
+            .is_some_and(|(entries, slot)| swapped_entry(index_entry(entries, slot)).is_some())
 }
 
 fn release_node_data(node: &Node) -> bool {
@@ -2845,20 +2845,16 @@ fn release_node_data(node: &Node) -> bool {
 
 fn release_frame_index(mut page: FrameLease) -> bool {
     while page != FrameLease::EMPTY {
-        let Some(entries) = frame_index_page_mut(page) else {
+        let Some(entries) = page_frame(page) else {
             return false;
         };
-        let next = entries.next;
-        for frame in entries
-            .frames
-            .iter()
-            .filter(|frame| **frame != FrameLease::EMPTY)
-        {
-            if let Some(swap) = swapped_entry(*frame) {
+        let next = read_lease(entries, 0);
+        for (_, frame) in index_entries(entries).filter(|(_, frame)| *frame != FrameLease::EMPTY) {
+            if let Some(swap) = swapped_entry(frame) {
                 crate::linux_swap::free(swap);
                 continue;
             }
-            if !memory::scrub_and_release_frames(FrameOwner::KERNEL, core::slice::from_ref(frame)) {
+            if !memory::scrub_and_release_frames(FrameOwner::KERNEL, &[frame]) {
                 return false;
             }
         }
@@ -2870,20 +2866,9 @@ fn release_frame_index(mut page: FrameLease) -> bool {
     true
 }
 
+/// A data page: a zeroed frame, whose next-page lease is EMPTY.
 fn allocate_data_page() -> Option<FrameLease> {
-    let [page] = memory::allocate_frames::<1>(FrameOwner::KERNEL)?;
-    let address = page.direct_map_address()?;
-    unsafe {
-        core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
-        core::ptr::write(
-            address as *mut DataPage,
-            DataPage {
-                next: FrameLease::EMPTY,
-                bytes: [0; DATA_CAPACITY],
-            },
-        );
-    }
-    Some(page)
+    allocate_zeroed_frame()
 }
 
 impl Node {
@@ -2926,7 +2911,7 @@ fn ensure_data_pages(node: &mut Node, required: usize) -> Option<()> {
             node.cached_page = next;
             node.cached_page_index = 0;
         } else {
-            data_page_mut(node.last_page)?.next = next;
+            set_next_page(node.last_page, next)?;
         }
         node.last_page = next;
         node.page_count += 1;
@@ -2936,10 +2921,9 @@ fn ensure_data_pages(node: &mut Node, required: usize) -> Option<()> {
 
 fn release_data_pages(mut page: FrameLease) -> bool {
     while page != FrameLease::EMPTY {
-        let Some(data) = data_page(page) else {
+        let Some(next) = next_page(page) else {
             return false;
         };
-        let next = data.next;
         if !memory::scrub_and_release_frames(FrameOwner::KERNEL, core::slice::from_ref(&page)) {
             return false;
         }
@@ -2952,11 +2936,10 @@ fn node(handle: Handle) -> Option<&'static Node> {
     node_mut(handle).map(|node| &*node)
 }
 
-/// Where each instance's nodes were last found, by inode: a hint checked on
-/// every use (the slot must still hold that handle), so a stale entry only
-/// costs the scan it would have saved. Node pages are freed only in
-/// `teardown`, which clears the instance's hints, so a hint always points
-/// into a live node page. Without it every read, write and page fault of a
+/// Where each instance's nodes were last found, by inode: the node's place
+/// among the instance's node slots, checked on every use (the slot must
+/// still hold that handle), so a stale entry only costs the scan it would
+/// have saved. Without it every read, write and page fault of a
 /// file scanned all nodes: rustc mapping its 150 MB driver library from a
 /// domain with tens of thousands of files took minutes.
 struct NodeHints(UnsafeCell<[BTreeMap<u64, usize>; INSTANCE_LIMIT]>);
@@ -2976,11 +2959,12 @@ fn node_hints() -> &'static mut BTreeMap<u64, usize> {
 }
 
 /// Every path an instance's nodes were ever given, by `path_key`, with
-/// where that node was last found (0 when not yet looked up). A path
-/// missing here names no node, which spares path lookups of files that do
-/// not exist (the dynamic loader's, cargo's while it unpacks crates) a scan
-/// of every node; a present one is checked like a node hint. Every place
-/// that gives a node a path notes it (`note_path`); teardown clears them.
+/// where that node was last found (its place plus one; 0 when not yet
+/// looked up). A path missing here names no node, which spares path
+/// lookups of files that do not exist (the dynamic loader's, cargo's while
+/// it unpacks crates) a scan of every node; a present one is checked like
+/// a node hint. Every place that gives a node a path notes it
+/// (`note_path`); teardown clears them.
 static PATH_HINTS: NodeHints =
     NodeHints(UnsafeCell::new([const { BTreeMap::new() }; INSTANCE_LIMIT]));
 
@@ -3018,10 +3002,9 @@ fn note_path(path: &[u8]) {
     }
     let mut rebuilt = BTreeMap::new();
     rebuilt.insert(path_key(path), 0);
-    let _ = for_each_node(overlay, |node| {
-        rebuilt.insert(path_key(node.path()), core::ptr::from_ref(node) as usize);
-        None::<()>
-    });
+    for (place, node) in overlay.nodes().enumerate().filter(|(_, node)| node.active) {
+        rebuilt.insert(path_key(node.path()), place + 1);
+    }
     overlay.path_hint_limit = rebuilt.len().saturating_mul(2).max(PATH_HINT_FLOOR);
     *hints = rebuilt;
 }
@@ -3033,70 +3016,22 @@ const PATH_HINT_FLOOR: usize = 4096;
 fn node_mut(handle: Handle) -> Option<&'static mut Node> {
     let overlay = live_mut();
     let hints = node_hints();
-    if let Some(address) = hints.get(&handle.inode).copied() {
-        // SAFETY: hints point at node slots in this instance's node pages,
-        // which stay allocated until `teardown` clears the hints.
-        let node = unsafe { &mut *(address as *mut Node) };
-        if node.active && node.handle == handle {
-            return Some(node);
+    let wanted = |node: &Node| node.active && node.handle == handle;
+    if let Some(index) = hints.get(&handle.inode).copied() {
+        if overlay.node_at(index).is_some_and(wanted) {
+            return overlay.node_at_mut(index);
         }
     }
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let nodes = node_page_mut(page)?;
-        if let Some(index) = nodes
-            .nodes
-            .iter()
-            .position(|node| node.active && node.handle == handle)
-        {
-            let node = nodes.nodes.get_mut(index)?;
-            hints.insert(handle.inode, core::ptr::from_mut(node) as usize);
-            return Some(node);
-        }
-        page = nodes.next;
-    }
-    None
+    let index = overlay.nodes().position(wanted)?;
+    hints.insert(handle.inode, index);
+    overlay.node_at_mut(index)
 }
 
-fn for_each_node<T>(
-    overlay: &Overlay,
-    mut select: impl FnMut(&'static Node) -> Option<T>,
+fn for_each_node<'a, T>(
+    overlay: &'a Overlay,
+    select: impl FnMut(&'a Node) -> Option<T>,
 ) -> Option<T> {
-    let mut page = overlay.first_node_page;
-    while page != FrameLease::EMPTY {
-        let nodes = node_page(page)?;
-        for node in &nodes.nodes {
-            if node.active {
-                if let Some(value) = select(node) {
-                    return Some(value);
-                }
-            }
-        }
-        page = nodes.next;
-    }
-    None
-}
-
-fn node_page(page: FrameLease) -> Option<&'static NodePage> {
-    let address = page.direct_map_address()?;
-    Some(unsafe { &*(address as *const NodePage) })
-}
-
-fn node_page_mut(page: FrameLease) -> Option<&'static mut NodePage> {
-    let address = page.direct_map_address()?;
-    Some(unsafe { &mut *(address as *mut NodePage) })
-}
-
-fn data_page(page: FrameLease) -> Option<&'static DataPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &*(address as *const DataPage) })
-}
-
-fn data_page_mut(page: FrameLease) -> Option<&'static mut DataPage> {
-    (page != FrameLease::EMPTY).then_some(())?;
-    let address = page.direct_map_address()?;
-    Some(unsafe { &mut *(address as *mut DataPage) })
+    overlay.nodes().filter(|node| node.active).find_map(select)
 }
 
 fn live() -> Option<&'static Overlay> {
