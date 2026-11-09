@@ -23,22 +23,36 @@
 //!   core.
 //! - [`image`]: the boot loader's handoff images and published root
 //!   filesystem images, read in place as `'static` byte slices.
+//! - [`interrupts`]: this CPU's interrupt flag, and halting.
+//! - [`entry`]: the entry stubs of the device, timer and inter-processor
+//!   interrupt vectors.
+//! - [`ap_start`]: the application processors' start-up trampoline.
+//! - [`tsc`]: the timestamp counter.
+//! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
+//!   ranks).
+//! - [`owned_state`]: set-once owners for long-lived kernel objects.
 //!
 //! Each module says who may construct its types; the constructors from a
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
+pub(crate) mod ap_start;
 pub(crate) mod boot;
 pub(crate) mod claim;
 pub(crate) mod dma;
+pub(crate) mod entry;
 pub(crate) mod firmware;
 pub(crate) mod frame;
 pub(crate) mod frame_tables;
 pub(crate) mod image;
+pub(crate) mod interrupts;
+pub(crate) mod lock;
 pub(crate) mod mmio;
 pub(crate) mod msr;
+pub(crate) mod owned_state;
 pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod pixels;
 pub(crate) mod port;
 pub(crate) mod root;
+pub(crate) mod tsc;

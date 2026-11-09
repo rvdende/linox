@@ -308,10 +308,8 @@ fn u64_at(table: &[u8], offset: usize) -> u64 {
 }
 
 fn halt() -> ! {
-    loop {
-        // SAFETY: bring-up runs with interrupts disabled and never resumes.
-        unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)) };
-    }
+    // Bring-up runs with interrupts disabled and never resumes.
+    crate::trusted::interrupts::park()
 }
 
 /// Collects the PCI functions that satisfy `wanted`.

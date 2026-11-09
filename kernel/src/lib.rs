@@ -907,9 +907,9 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write_u64(apic_timer.tsc_hz);
     serial_write("\r\n");
 
-    // SAFETY: The timer vector and APIC are exclusively owned during this
+    // The timer vector and APIC are exclusively owned during this
     // single-processor boot test. The routine restores CLI state before return.
-    if !unsafe { arch::x86_64::timer::verify_local_apic_interrupt(&local_apic, &apic_timer) } {
+    if !arch::x86_64::timer::verify_local_apic_interrupt(&local_apic, &apic_timer) {
         kernel_fail("linox: local APIC timer interrupt failed\r\n");
     }
     serial_write("linox: local APIC timer interrupt handled\r\n");
@@ -2884,7 +2884,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             kernel_fail("\r\nlinox: ring-3 auxiliary fault invariant failed\r\n");
         }
         serial_write("\r\nlinox: stop-only auxiliary fault executed and contained");
-        if !unsafe { arch::x86_64::timer::verify_device_wait_timeout_interrupt() } {
+        if !arch::x86_64::timer::verify_device_wait_timeout_interrupt() {
             kernel_fail("\r\nlinox: device-wait timeout interrupt invariant failed\r\n");
         }
         serial_write("\r\nlinox: APIC device-wait timeout delivered");

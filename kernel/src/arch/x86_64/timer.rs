@@ -1,4 +1,6 @@
-use core::arch::{asm, global_asm, x86_64::__cpuid};
+#![forbid(unsafe_code)]
+
+use core::arch::x86_64::__cpuid;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use super::{
@@ -8,7 +10,7 @@ use super::{
 use crate::{
     control_abi,
     scheduler::{self, RuntimeAction, UserInterruptFrame},
-    trusted::port::Port8,
+    trusted::{entry, interrupts, port::Port8, tsc},
 };
 
 const CPUID_BASIC_MAX: u32 = 0;
@@ -92,71 +94,6 @@ static TIMER: TimerOwner = TimerOwner {
     calibrated_tsc_hz: AtomicU64::new(0),
 };
 
-global_asm!(
-    r#"
-    .text
-    .global linox_apic_timer_entry
-linox_apic_timer_entry:
-    test qword ptr [rsp + 8], 3
-    jz 1f
-    swapgs
-1:
-    clac
-    cld
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    mov rdi, r12
-    and rsp, -16
-    call {timer_handler}
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    test qword ptr [rsp + 8], 3
-    jz 2f
-    swapgs
-2:
-    iretq
-
-    .global linox_apic_spurious_entry
-linox_apic_spurious_entry:
-    clac
-    iretq
-"#,
-    timer_handler = sym timer_interrupt_handler,
-);
-
-extern "C" {
-    fn linox_apic_timer_entry();
-    fn linox_apic_spurious_entry();
-}
-
 pub(crate) struct LocalApicCalibration {
     pub(crate) counter_hz: u64,
     pub(crate) divider: u32,
@@ -229,20 +166,7 @@ pub(crate) fn discover() -> Capabilities {
 /// The bounded Linux clock profile uses this only on the bootstrap processor,
 /// with task migration and concurrent writers absent.
 pub(crate) fn timestamp_counter() -> u64 {
-    let low: u32;
-    let high: u32;
-    // SAFETY: LFENCE and RDTSC are unprivileged x86-64 instructions and do
-    // not access memory. LFENCE prevents an earlier read from passing RDTSC.
-    unsafe {
-        asm!(
-            "lfence",
-            "rdtsc",
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack)
-        );
-    }
-    (u64::from(high) << 32) | u64::from(low)
+    tsc::read()
 }
 
 pub(crate) fn monotonic_frequency() -> Option<u64> {
@@ -317,15 +241,12 @@ pub(crate) fn calibrate_local_apic(
 ///
 /// Interrupts are enabled only while waiting for the owned one-shot source and
 /// are disabled before this function returns.
-pub(crate) unsafe fn verify_local_apic_interrupt(
+pub(crate) fn verify_local_apic_interrupt(
     apic: &LocalApic,
     calibration: &LocalApicCalibration,
 ) -> bool {
-    if !cpu::install_interrupt_gate(TIMER_VECTOR, linox_apic_timer_entry as *const () as usize)
-        || !cpu::install_interrupt_gate(
-            SPURIOUS_VECTOR,
-            linox_apic_spurious_entry as *const () as usize,
-        )
+    if !cpu::install_interrupt_gate(TIMER_VECTOR, entry::timer_interrupt_entry())
+        || !cpu::install_interrupt_gate(SPURIOUS_VECTOR, entry::spurious_interrupt_entry())
     {
         return false;
     }
@@ -352,14 +273,14 @@ pub(crate) unsafe fn verify_local_apic_interrupt(
     let initial_count = (calibration.counter_hz / 100).clamp(1, u64::from(u32::MAX)) as u32;
     apic.write(APIC_INITIAL_COUNT, initial_count);
 
-    asm!("sti", options(nomem, nostack));
+    interrupts::enable();
     for _ in 0..INTERRUPT_POLL_LIMIT {
         if TIMER.fired.load(Ordering::SeqCst) {
             break;
         }
         core::hint::spin_loop();
     }
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
     apic.write(APIC_INITIAL_COUNT, 0);
     TIMER.fired.load(Ordering::SeqCst)
@@ -728,22 +649,24 @@ pub(crate) fn cancel_packet_wait_timer_for_domain(domain: u64) -> bool {
 }
 
 /// Proves the device-wait timeout source independently of a real device IRQ.
-pub(crate) unsafe fn verify_device_wait_timeout_interrupt() -> bool {
+pub(crate) fn verify_device_wait_timeout_interrupt() -> bool {
     if !arm_device_wait_timer(DEVICE_WAIT_TEST_DOMAIN, 1) {
         return false;
     }
-    asm!("sti", options(nomem, nostack));
+    interrupts::enable();
     for _ in 0..INTERRUPT_POLL_LIMIT {
         if device_wait_timed_out(DEVICE_WAIT_TEST_DOMAIN, 1) {
             break;
         }
         core::hint::spin_loop();
     }
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     finish_device_wait_timer(DEVICE_WAIT_TEST_DOMAIN, 1) == Some(true)
 }
 
-extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
+/// The local APIC timer's handler, called by its entry stub
+/// (`trusted::entry`) with the interrupted context.
+pub(crate) extern "sysv64" fn timer_interrupt_handler(frame: &mut UserInterruptFrame) {
     // An application processor's own tick: end it, count the next one and
     // let the runtime preempt what this CPU runs.
     if cpu::current_cpu_index_checked().is_some_and(|cpu| cpu != 0) {
@@ -754,17 +677,13 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
                 apic.write(APIC_INITIAL_COUNT, reload);
             }
         }
-        if let Some(frame) = unsafe { frame.as_mut() } {
-            cpu::linux_application_processor_tick(frame);
-        }
+        cpu::linux_application_processor_tick(frame);
         return;
     }
     // A SysRq `l` profile samples every tick, before the tick waits for
     // the kernel entry lock, so a CPU holding that lock shows up too.
     crate::linux_profile::tick();
-    if let Some(frame) = unsafe { frame.as_ref() } {
-        cpu::sample_linux_profile(frame);
-    }
+    cpu::sample_linux_profile(frame);
     let _kernel_entry = crate::sync::kernel_entry_lock();
     TIMER.fired.store(true, Ordering::SeqCst);
     let mode = if TIMER.interrupt_apic_mode.load(Ordering::SeqCst) == 1 {
@@ -793,9 +712,6 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
                     .fetch_add(1, Ordering::SeqCst);
                 TIMER.device_wait_timed_out.store(true, Ordering::SeqCst);
                 if scheduler::current_domain() != Some(domain) {
-                    let Some(frame) = (unsafe { frame.as_mut() }) else {
-                        return;
-                    };
                     if let RuntimeAction::Resume {
                         address_space_root,
                         fs_base,
@@ -826,9 +742,7 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
     if TIMER.linux_wait_armed.load(Ordering::SeqCst) {
         // A virtio-gpu display flushes what domains draw on this tick.
         crate::framebuffer::refresh();
-        if let Some(frame) = unsafe { frame.as_mut() } {
-            cpu::expire_linux_waits_from_timer(frame);
-        }
+        cpu::expire_linux_waits_from_timer(frame);
         let reload = TIMER.linux_wait_reload.load(Ordering::SeqCst);
         if reload != 0 && TIMER.linux_wait_armed.load(Ordering::SeqCst) {
             // The next tick comes at the earliest deadline a thread waits
@@ -852,9 +766,6 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
     if !TIMER.preemption_armed.swap(false, Ordering::SeqCst) {
         return;
     }
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
-        return;
-    };
     let action = scheduler::preempt_runtime(
         frame,
         cpu::USER_CODE_SELECTOR,

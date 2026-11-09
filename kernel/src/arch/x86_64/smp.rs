@@ -1,16 +1,16 @@
-use core::arch::{asm, global_asm};
-use core::ptr::copy_nonoverlapping;
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use super::{acpi::PlatformInfo, apic::LocalApic, cpu, paging};
 use crate::{
     memory::FrameLease,
     sync::{LockRank, SpinLock},
-    trusted::root,
+    trusted::{ap_start, entry, interrupts, page_table, root},
 };
 
 pub(crate) const CPU_LIMIT: usize = 4;
-pub(crate) const TRAMPOLINE_PHYSICAL: usize = 0x8000;
+pub(crate) const TRAMPOLINE_PHYSICAL: usize = ap_start::TRAMPOLINE_PHYSICAL;
 const TRAMPOLINE_VECTOR: u8 = (TRAMPOLINE_PHYSICAL >> 12) as u8;
 const STARTUP_WAIT_LIMIT: usize = 20_000_000;
 const IPI_WAIT_LIMIT: usize = 20_000_000;
@@ -40,10 +40,6 @@ pub(crate) struct LinuxProcessTicket {
 
 static ONLINE: [AtomicBool; CPU_LIMIT] = [const { AtomicBool::new(false) }; CPU_LIMIT];
 static ONLINE_COUNT: AtomicU32 = AtomicU32::new(1);
-static MAILBOX_CR3: AtomicU64 = AtomicU64::new(0);
-static MAILBOX_STACK: AtomicU64 = AtomicU64::new(0);
-static MAILBOX_ENTRY: AtomicU64 = AtomicU64::new(0);
-static MAILBOX_CPU: AtomicU32 = AtomicU32::new(0);
 static APIC_IDS: [AtomicU32; CPU_LIMIT] = [const { AtomicU32::new(u32::MAX) }; CPU_LIMIT];
 static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 static APIC_MODE: AtomicU8 = AtomicU8::new(0);
@@ -64,175 +60,16 @@ pub(super) static TLB_SHOOTDOWN_ADDRESS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_ROOTS: [AtomicU64; CPU_LIMIT] = [const { AtomicU64::new(0) }; CPU_LIMIT];
 pub(super) static TLB_SHOOTDOWN_ACKNOWLEDGED: AtomicU32 = AtomicU32::new(0);
 
-global_asm!(
-    r#"
-    .pushsection .text.linox_ap_trampoline,"ax"
-    .set linox_ap_gdt_pointer_physical, linox_ap_trampoline_gdt_pointer - linox_ap_trampoline_start + 0x8000
-    .set linox_ap_cr3_pointer_physical, linox_ap_trampoline_cr3_pointer - linox_ap_trampoline_start + 0x8000
-    .balign 16
-    .global linox_ap_trampoline_start
-linox_ap_trampoline_start:
-    .code16
-    cli
-    cld
-    xor ax, ax
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov si, offset linox_ap_gdt_pointer_physical
-    lgdt [si]
-    mov eax, cr0
-    or eax, 1
-    mov cr0, eax
-    .byte 0x66, 0xea
-    .long linox_ap_trampoline_protected - linox_ap_trampoline_start + 0x8000
-    .word 0x08
-
-linox_ap_trampoline_protected:
-    .code32
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov eax, cr4
-    or eax, 1 << 5
-    mov cr4, eax
-    mov esi, linox_ap_cr3_pointer_physical
-    mov eax, dword ptr [esi]
-    mov cr3, eax
-    mov ecx, 0xc0000080
-    rdmsr
-    or eax, (1 << 8) | (1 << 11)
-    wrmsr
-    mov eax, cr0
-    or eax, 0x80000001
-    mov cr0, eax
-    .byte 0xea
-    .long linox_ap_trampoline_long - linox_ap_trampoline_start + 0x8000
-    .word 0x18
-
-linox_ap_trampoline_long:
-    .code64
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov rbx, qword ptr [rip + linox_ap_trampoline_stack_pointer]
-    mov rsp, qword ptr [rbx]
-    and rsp, -16
-    mov rbx, qword ptr [rip + linox_ap_trampoline_cpu_pointer]
-    mov edi, dword ptr [rbx]
-    mov rbx, qword ptr [rip + linox_ap_trampoline_entry_pointer]
-    mov rax, qword ptr [rbx]
-    call rax
-    ud2
-
-    .balign 8
-linox_ap_trampoline_cr3_pointer:
-    .quad {mailbox_cr3}
-linox_ap_trampoline_stack_pointer:
-    .quad {mailbox_stack}
-linox_ap_trampoline_entry_pointer:
-    .quad {mailbox_entry}
-linox_ap_trampoline_cpu_pointer:
-    .quad {mailbox_cpu}
-
-    .balign 8
-linox_ap_trampoline_gdt:
-    .quad 0
-    .quad 0x00cf9a000000ffff
-    .quad 0x00cf92000000ffff
-    .quad 0x00af9a000000ffff
-linox_ap_trampoline_gdt_end:
-linox_ap_trampoline_gdt_pointer:
-    .word linox_ap_trampoline_gdt_end - linox_ap_trampoline_gdt - 1
-    .long linox_ap_trampoline_gdt - linox_ap_trampoline_start + 0x8000
-    .global linox_ap_trampoline_end
-linox_ap_trampoline_end:
-    .code64
-    .popsection
-
-    .text
-    .global linox_ipi_entry
-linox_ipi_entry:
-    test qword ptr [rsp + 8], 3
-    jz 1f
-    swapgs
-1:
-    clac
-    cld
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    and rsp, -16
-    call {ipi_handler}
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    test qword ptr [rsp + 8], 3
-    jz 2f
-    swapgs
-2:
-    iretq
-"#,
-    mailbox_cr3 = sym MAILBOX_CR3,
-    mailbox_stack = sym MAILBOX_STACK,
-    mailbox_entry = sym MAILBOX_ENTRY,
-    mailbox_cpu = sym MAILBOX_CPU,
-    ipi_handler = sym interprocessor_interrupt_handler,
-);
-
-unsafe extern "C" {
-    static linox_ap_trampoline_start: u8;
-    static linox_ap_trampoline_end: u8;
-    fn linox_ipi_entry();
-}
-
+/// Copies the application processors' start-up trampoline into place.
 pub(crate) fn prepare_trampoline() -> bool {
-    let start = core::ptr::addr_of!(linox_ap_trampoline_start) as usize;
-    let end = core::ptr::addr_of!(linox_ap_trampoline_end) as usize;
-    let size = end.saturating_sub(start);
-    if size == 0 || size > 4096 {
-        return false;
-    }
-    unsafe {
-        core::ptr::write_bytes(TRAMPOLINE_PHYSICAL as *mut u8, 0, 4096);
-        copy_nonoverlapping(start as *const u8, TRAMPOLINE_PHYSICAL as *mut u8, size);
-    }
-    true
+    ap_start::prepare()
 }
 
 pub(crate) fn start_application_processors(platform: PlatformInfo, apic: &LocalApic) -> bool {
     if platform.enabled_processors == 0 || platform.enabled_processors > CPU_LIMIT {
         return false;
     }
-    if !cpu::install_interrupt_gate(IPI_VECTOR, linox_ipi_entry as *const () as usize) {
+    if !cpu::install_interrupt_gate(IPI_VECTOR, entry::interprocessor_interrupt_entry()) {
         return false;
     }
     APIC_BASE.store(apic.physical_base, Ordering::Release);
@@ -249,16 +86,9 @@ pub(crate) fn start_application_processors(platform: PlatformInfo, apic: &LocalA
         .enumerate()
     {
         let cpu = cpu + 1;
-        let Some(stack) = cpu::kernel_stack_top_for_cpu(cpu) else {
+        if !ap_start::post(cpu, application_processor_main) {
             return false;
-        };
-        MAILBOX_CR3.store(paging::kernel_root_address(), Ordering::Release);
-        MAILBOX_STACK.store(stack as u64, Ordering::Release);
-        MAILBOX_ENTRY.store(
-            application_processor_main as *const () as u64,
-            Ordering::Release,
-        );
-        MAILBOX_CPU.store(cpu as u32, Ordering::Release);
+        }
         APIC_IDS[cpu].store(target, Ordering::Release);
         if !apic.start_processor(target, TRAMPOLINE_VECTOR) {
             return false;
@@ -532,7 +362,7 @@ pub(crate) fn invalidate_runtime_translation(address: u64) -> bool {
         }
         targets += 1;
     }
-    unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+    page_table::invalidate_page(address);
     let acknowledged = (0..IPI_WAIT_LIMIT).any(|_| {
         if TLB_SHOOTDOWN_ACKNOWLEDGED.load(Ordering::Acquire) >= targets {
             true
@@ -545,7 +375,9 @@ pub(crate) fn invalidate_runtime_translation(address: u64) -> bool {
     acknowledged
 }
 
-extern "sysv64" fn interprocessor_interrupt_handler() {
+/// The inter-processor interrupt's handler, called by its entry stub
+/// (`trusted::entry`).
+pub(crate) extern "sysv64" fn interprocessor_interrupt_handler() {
     let cpu = cpu::current_cpu_index();
     if cpu >= CPU_LIMIT {
         return;
@@ -560,7 +392,7 @@ extern "sysv64" fn interprocessor_interrupt_handler() {
         COMMAND_PING => {}
         COMMAND_INVALIDATE => {
             let address = IPI_ARGUMENT[cpu].load(Ordering::Acquire);
-            unsafe { asm!("invlpg [{}]", in(reg) address, options(nostack, preserves_flags)) };
+            page_table::invalidate_page(address);
         }
         COMMAND_HOLD => {
             CONCURRENT_CPUS.fetch_add(1, Ordering::AcqRel);
@@ -602,7 +434,7 @@ extern "sysv64" fn interprocessor_interrupt_handler() {
 }
 
 extern "sysv64" fn application_processor_main(cpu_index: u32) -> ! {
-    unsafe { asm!("cli", options(nomem, nostack)) };
+    interrupts::disable();
     let cpu = cpu_index as usize;
     if cpu == 0
         || cpu >= CPU_LIMIT
@@ -613,14 +445,14 @@ extern "sysv64" fn application_processor_main(cpu_index: u32) -> ! {
         || !cpu::enable_user_mode_instruction_prevention()
     {
         loop {
-            unsafe { asm!("hlt", options(nomem, nostack)) };
+            interrupts::halt();
         }
     }
     let _ = cpu::enable_extended_user_state();
     paging::install_page_attribute_table();
     let Some(apic) = saved_local_apic() else {
         loop {
-            unsafe { asm!("hlt", options(nomem, nostack)) };
+            interrupts::halt();
         }
     };
     apic.enable_software();
@@ -633,7 +465,7 @@ extern "sysv64" fn application_processor_main(cpu_index: u32) -> ! {
             cpu::run_application_processor_runtime(cpu);
         }
         IDLE[cpu].store(true, Ordering::Release);
-        unsafe { asm!("sti; hlt; cli", options(nomem, nostack)) };
+        interrupts::wait();
         // Whatever woke it, stale kernel stack translations go first.
         reload_root();
         IDLE[cpu].store(false, Ordering::Release);

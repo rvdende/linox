@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 462 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 462 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 448 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 448 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 212 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 212 to ${undocumented}" >&2
+if (( undocumented > 196 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 196 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 6 )); then
@@ -31,14 +31,12 @@ fi
 # sites; a file may not grow.
 per_file_limits=(
     "address_space.rs 80"
-    "bringup/mod.rs 5"
+    "bringup/mod.rs 4"
     "arch/x86_64/paging.rs 13"
-    "arch/x86_64/pci.rs 25"
-    "arch/x86_64/smp.rs 8"
-    "arch/x86_64/timer.rs 8"
+    "arch/x86_64/pci.rs 22"
     "framebuffer.rs 1"
     "image_store.rs 1"
-    "lib.rs 18"
+    "lib.rs 16"
     "linux_overlay.rs 6"
     "trusted/boot.rs 1"
     "trusted/claim.rs 4"
@@ -53,6 +51,13 @@ per_file_limits=(
     "trusted/pixels.rs 3"
     "trusted/root.rs 2"
     "trusted/port.rs 8"
+    "trusted/ap_start.rs 1"
+    "trusted/interrupts.rs 7"
+    "trusted/lock.rs 3"
+    "trusted/owned_state.rs 4"
+    "trusted/tsc.rs 1"
+    "linux_socket/virtio_net.rs 10"
+    "bringup/trap.rs 11"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"
@@ -71,6 +76,9 @@ forbidding_files=(
     "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
     "arch/x86_64/iommu.rs"
+    "arch/x86_64/smp.rs"
+    "arch/x86_64/timer.rs"
+    "domain.rs"
     "drivers/ahci.rs"
     "drivers/amd_iommu.rs"
     "drivers/clock.rs"
@@ -79,7 +87,6 @@ forbidding_files=(
     "drivers/nvme.rs"
     "drivers/pci.rs"
     "drivers/realtek.rs"
-    "domain.rs"
     "drivers/virtio_gpu.rs"
     "drivers/xhci.rs"
     "initramfs.rs"
@@ -93,9 +100,11 @@ forbidding_files=(
     "linux_user.rs"
     "manifest.rs"
     "memory.rs"
+    "owned_state.rs"
     "packet.rs"
     "pe.rs"
     "published_rootfs.rs"
+    "sync.rs"
     "volume.rs"
 )
 for file in "${forbidding_files[@]}"; do

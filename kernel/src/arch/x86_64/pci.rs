@@ -1,4 +1,3 @@
-use core::arch::{asm, global_asm};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicU8, Ordering};
 
@@ -8,7 +7,8 @@ use super::{
     paging::MmioMapping,
     timer,
 };
-use crate::trusted::mmio::Mmio;
+use crate::trusted::interrupts;
+use crate::trusted::{entry, mmio::Mmio};
 use crate::{
     control_abi,
     scheduler::{self, UserInterruptFrame},
@@ -140,65 +140,6 @@ pub(crate) enum IsolatedInterruptCompletion {
     Completed,
     TimedOut,
     Failed,
-}
-
-global_asm!(
-    r#"
-    .text
-    .global linox_virtio_interrupt_entry
-linox_virtio_interrupt_entry:
-    test qword ptr [rsp + 8], 3
-    jz 1f
-    swapgs
-1:
-    clac
-    cld
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    mov rdi, r12
-    and rsp, -16
-    call {interrupt_handler}
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    test qword ptr [rsp + 8], 3
-    jz 2f
-    swapgs
-2:
-    iretq
-"#,
-    interrupt_handler = sym virtio_interrupt_handler,
-);
-
-extern "C" {
-    fn linox_virtio_interrupt_entry();
 }
 
 #[derive(Clone, Copy)]
@@ -1036,9 +977,9 @@ fn drain_stale_msix_message(target: MsixTarget, mapping: MmioMapping, index: u16
     // Unmasking sends the message; let this CPU take it.
     let mut delivered = false;
     for _ in 0..QUEUE_POLL_LIMIT {
-        // SAFETY: the vector's handler is installed and only counts the
+        // The vector's handler is installed and only counts the
         // message, as no device wait is active.
-        unsafe { asm!("sti", "nop", "cli", options(nomem, nostack)) };
+        interrupts::admit_pending();
         if PCI_INTERRUPTS.virtio_count.load(Ordering::SeqCst) != 0
             && msix_entry_pending(target, mapping, index) == Some(false)
         {
@@ -1081,7 +1022,7 @@ fn install_virtio_interrupt_at(apic: &LocalApic, vector: u8) -> bool {
     PCI_INTERRUPTS
         .forced_timeout_object
         .store(0, Ordering::SeqCst);
-    cpu::install_interrupt_gate(vector, linox_virtio_interrupt_entry as *const () as usize)
+    cpu::install_interrupt_gate(vector, entry::virtio_interrupt_entry())
 }
 
 fn retire_virtio_interrupt(apic: &LocalApic) -> bool {
@@ -1112,7 +1053,9 @@ fn retire_virtio_interrupt_at(apic: &LocalApic, vector: u8) -> bool {
     cleared
 }
 
-extern "sysv64" fn virtio_interrupt_handler(_frame: *mut UserInterruptFrame) {
+/// The virtio vectors' handler, called by their entry stub
+/// (`trusted::entry`).
+pub(crate) extern "sysv64" fn virtio_interrupt_handler(_frame: &mut UserInterruptFrame) {
     let _kernel_entry = crate::sync::kernel_entry_lock();
     PCI_INTERRUPTS.virtio_count.fetch_add(1, Ordering::SeqCst);
     if PCI_INTERRUPTS.virtio_active.load(Ordering::SeqCst) {
@@ -1142,7 +1085,7 @@ extern "sysv64" fn virtio_interrupt_handler(_frame: *mut UserInterruptFrame) {
 }
 
 unsafe fn wait_for_one_virtio_interrupt() -> bool {
-    asm!("sti", options(nomem, nostack));
+    interrupts::enable();
     let mut interrupted = false;
     for _ in 0..QUEUE_POLL_LIMIT {
         if PCI_INTERRUPTS.virtio_fired.load(Ordering::SeqCst) {
@@ -1151,7 +1094,7 @@ unsafe fn wait_for_one_virtio_interrupt() -> bool {
         }
         core::hint::spin_loop();
     }
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     compiler_fence(Ordering::SeqCst);
     interrupted && PCI_INTERRUPTS.virtio_count.load(Ordering::SeqCst) == 1
 }
@@ -1799,7 +1742,7 @@ pub(crate) fn complete_isolated_network_interrupt_wait(
     while !PCI_INTERRUPTS.virtio_fired.load(Ordering::SeqCst)
         && !timer::device_wait_timed_out(domain, request)
     {
-        unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+        interrupts::wait();
     }
     let function_masked = set_msix_control_raw(device.msix_target(), true, true);
     let entry_masked = set_msix_entry_mask_raw(device.msix_target(), msix_mapping, queue, true);
@@ -2422,7 +2365,7 @@ pub(crate) unsafe fn transmit_network_probe(
             })
     })();
 
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     let function_masked = set_msix_control_raw(device.msix_target(), true, true);
     let entry_masked = set_msix_entry_mask_raw(device.msix_target(), msix_mapping, 1, true);
     let msix_disabled = set_msix_control_raw(device.msix_target(), false, true);
@@ -2818,7 +2761,7 @@ unsafe fn network_arp_exchange(
         }
     })();
 
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     let function_masked = set_msix_control_raw(device.msix_target(), true, true);
     let receive_masked = set_msix_entry_mask_raw(device.msix_target(), msix_mapping, 0, true);
     let transmit_masked = set_msix_entry_mask_raw(device.msix_target(), msix_mapping, 1, true);
@@ -3016,7 +2959,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
 
         compiler_fence(Ordering::SeqCst);
         write_mmio_u16(&notification, 0, 0);
-        asm!("sti", options(nomem, nostack));
+        interrupts::enable();
         let mut interrupted = false;
         for _ in 0..QUEUE_POLL_LIMIT {
             if PCI_INTERRUPTS.virtio_fired.load(Ordering::SeqCst) {
@@ -3025,7 +2968,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
             }
             core::hint::spin_loop();
         }
-        asm!("cli", options(nomem, nostack));
+        interrupts::disable();
         compiler_fence(Ordering::SeqCst);
         let device_status = read_common_u8(&common, COMMON_DEVICE_STATUS);
         if !interrupted
@@ -3046,7 +2989,7 @@ pub(crate) unsafe fn read_blank_sector_interrupt(
         })
     })();
 
-    asm!("cli", options(nomem, nostack));
+    interrupts::disable();
     let function_masked = set_msix_control(device, true, true);
     let entry_masked = set_msix_entry_mask(device, msix_mapping, 0, true);
     let msix_disabled = set_msix_control(device, false, true);
@@ -3882,7 +3825,7 @@ pub(crate) fn complete_isolated_interrupt_wait(
     {
         // STI's interrupt shadow covers the following HLT, so an interrupt
         // cannot be lost between the readiness test and sleeping.
-        unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+        interrupts::wait();
     }
     let function_masked = set_msix_control(device, true, true);
     let entry_masked = set_msix_entry_mask(device, msix_mapping, 0, true);

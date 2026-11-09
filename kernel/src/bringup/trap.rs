@@ -361,11 +361,9 @@ fn control_registers() -> [u64; 4] {
 }
 
 fn halt() -> ! {
-    loop {
-        // SAFETY: nothing runs after a fatal report; NMIs wake the halt and
-        // loop back into it.
-        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
-    }
+    // Nothing runs after a fatal report; NMIs wake the halt and loop back
+    // into it.
+    crate::trusted::interrupts::park()
 }
 
 /// Whether the live page tables map `address` (writable, if asked). The

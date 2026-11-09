@@ -1,12 +1,19 @@
-use core::arch::{asm, x86_64::__cpuid};
-use core::cell::UnsafeCell;
+//! Lock ranks, the kernel-entry lock and the spin locks.
+//!
+//! The spin locks themselves (`SpinLock`, `IrqSpinLock` and their guards)
+//! live in the trusted core (`trusted::lock`, which holds their `unsafe`)
+//! and are re-exported here; this module keeps what needs no `unsafe`: the
+//! per-CPU rank bookkeeping each lock acquire checks, and the kernel-entry
+//! lock, which serializes kernel work across CPUs and hands out no data.
+#![forbid(unsafe_code)]
+
+use core::arch::x86_64::__cpuid;
 use core::hint::spin_loop;
-use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
-use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
-const INTERRUPT_FLAG: u64 = 1 << 9;
+use crate::trusted::interrupts::{self, InterruptState};
+pub(crate) use crate::trusted::lock::{IrqSpinLock, IrqSpinLockGuard, SpinLock, SpinLockGuard};
+
 const CPU_SLOT_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -214,152 +221,6 @@ impl LockRank {
 static HELD_RANKS: [AtomicU16; CPU_SLOT_LIMIT] = [const { AtomicU16::new(0) }; CPU_SLOT_LIMIT];
 static KERNEL_ENTRY_LOCK: KernelEntryLock = KernelEntryLock::new();
 
-pub(crate) struct SpinLock<T> {
-    next: AtomicU32,
-    owner: AtomicU32,
-    rank: LockRank,
-    value: UnsafeCell<T>,
-}
-
-// SAFETY: the ticket lock grants one guard at a time and a guard exists only
-// while the protected value is exclusively borrowed.
-unsafe impl<T: Send> Sync for SpinLock<T> {}
-
-impl<T> SpinLock<T> {
-    pub(crate) const fn new(rank: LockRank, value: T) -> Self {
-        Self {
-            next: AtomicU32::new(0),
-            owner: AtomicU32::new(0),
-            rank,
-            value: UnsafeCell::new(value),
-        }
-    }
-
-    pub(crate) fn lock(&self) -> SpinLockGuard<'_, T> {
-        let previous_rank = enter_rank(self.rank);
-        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        while self.owner.load(Ordering::Acquire) != ticket {
-            spin_loop();
-        }
-        SpinLockGuard {
-            lock: self,
-            previous_rank,
-            _not_send: PhantomData,
-        }
-    }
-
-    pub(crate) fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        let owner = self.owner.load(Ordering::Acquire);
-        if self
-            .next
-            .compare_exchange(
-                owner,
-                owner.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return None;
-        }
-        let previous_rank = enter_rank(self.rank);
-        Some(SpinLockGuard {
-            lock: self,
-            previous_rank,
-            _not_send: PhantomData,
-        })
-    }
-}
-
-pub(crate) struct SpinLockGuard<'a, T> {
-    lock: &'a SpinLock<T>,
-    previous_rank: u16,
-    _not_send: PhantomData<*mut ()>,
-}
-
-impl<T> Deref for SpinLockGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: the guard owns the current ticket.
-        unsafe { &*self.lock.value.get() }
-    }
-}
-
-impl<T> DerefMut for SpinLockGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: the guard owns the current ticket exclusively.
-        unsafe { &mut *self.lock.value.get() }
-    }
-}
-
-impl<T> Drop for SpinLockGuard<'_, T> {
-    fn drop(&mut self) {
-        leave_rank(self.lock.rank, self.previous_rank);
-        self.lock.owner.fetch_add(1, Ordering::Release);
-    }
-}
-
-pub(crate) struct IrqSpinLock<T>(SpinLock<T>);
-
-unsafe impl<T: Send> Sync for IrqSpinLock<T> {}
-
-impl<T> IrqSpinLock<T> {
-    pub(crate) const fn new(rank: LockRank, value: T) -> Self {
-        Self(SpinLock::new(rank, value))
-    }
-
-    pub(crate) fn lock(&self) -> IrqSpinLockGuard<'_, T> {
-        let interrupt_state = disable_interrupts();
-        let guard = self.0.lock();
-        IrqSpinLockGuard {
-            guard: ManuallyDrop::new(guard),
-            interrupt_state,
-        }
-    }
-
-    pub(crate) fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
-        let interrupt_state = disable_interrupts();
-        match self.0.try_lock() {
-            Some(guard) => Some(IrqSpinLockGuard {
-                guard: ManuallyDrop::new(guard),
-                interrupt_state,
-            }),
-            None => {
-                restore_interrupts(interrupt_state);
-                None
-            }
-        }
-    }
-}
-
-pub(crate) struct IrqSpinLockGuard<'a, T> {
-    guard: ManuallyDrop<SpinLockGuard<'a, T>>,
-    interrupt_state: InterruptState,
-}
-
-impl<T> Deref for IrqSpinLockGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.guard
-    }
-}
-
-impl<T> DerefMut for IrqSpinLockGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
-    }
-}
-
-impl<T> Drop for IrqSpinLockGuard<'_, T> {
-    fn drop(&mut self) {
-        // Release the shared lock before reenabling local interrupts.
-        unsafe { ManuallyDrop::drop(&mut self.guard) };
-        restore_interrupts(self.interrupt_state);
-    }
-}
-
 pub(crate) fn kernel_entry_lock() -> KernelEntryGuard {
     KERNEL_ENTRY_LOCK.lock()
 }
@@ -506,7 +367,7 @@ impl KernelEntryLock {
     }
 
     fn lock(&'static self) -> KernelEntryGuard {
-        let interrupt_state = disable_interrupts();
+        let interrupt_state = interrupts::save_and_disable();
         let cpu = cpu_slot();
         if self.cpu_owner.load(Ordering::Acquire) == cpu as u16 + 1 {
             let previous = self.depths[cpu].fetch_add(1, Ordering::AcqRel);
@@ -531,7 +392,7 @@ impl KernelEntryLock {
     /// idle application processors re-queuing after every look would take
     /// three turns in four from the owner CPU's system calls.
     fn try_lock(&'static self) -> Option<KernelEntryGuard> {
-        let interrupt_state = disable_interrupts();
+        let interrupt_state = interrupts::save_and_disable();
         let cpu = cpu_slot();
         if self.cpu_owner.load(Ordering::Acquire) == cpu as u16 + 1 {
             let previous = self.depths[cpu].fetch_add(1, Ordering::AcqRel);
@@ -556,7 +417,7 @@ impl KernelEntryLock {
             )
             .is_err()
         {
-            restore_interrupts(interrupt_state);
+            interrupts::restore(interrupt_state);
             return None;
         }
         let previous_rank = enter_rank(LockRank::ARCHITECTURE);
@@ -617,33 +478,7 @@ impl Drop for KernelEntryGuard {
         if previous == 1 {
             self.lock.release(cpu);
         }
-        restore_interrupts(self.interrupt_state);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct InterruptState {
-    enabled: bool,
-}
-
-fn disable_interrupts() -> InterruptState {
-    let flags: u64;
-    // SAFETY: reading RFLAGS and clearing IF are privileged, local-CPU
-    // operations. The matching guard restores the prior IF state.
-    unsafe {
-        asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
-        asm!("cli", options(nomem, nostack));
-    }
-    InterruptState {
-        enabled: flags & INTERRUPT_FLAG != 0,
-    }
-}
-
-fn restore_interrupts(state: InterruptState) {
-    if state.enabled {
-        // SAFETY: this restores the IF state captured by disable_interrupts
-        // after the shared lock has been released.
-        unsafe { asm!("sti", options(nomem, nostack)) };
+        interrupts::restore(self.interrupt_state);
     }
 }
 
@@ -676,7 +511,10 @@ pub(crate) fn held_rank() -> u16 {
     HELD_RANKS[cpu_slot()].load(Ordering::Acquire)
 }
 
-fn enter_rank(rank: LockRank) -> u16 {
+/// Records that this CPU takes a lock of `rank`, failing closed if it
+/// holds one ranked at or above it; returns the rank it held before. Only
+/// the spin locks (`trusted::lock`) and the kernel-entry lock call this.
+pub(crate) fn enter_rank(rank: LockRank) -> u16 {
     crate::linux_profile::count_lock(rank.0);
     let held = &HELD_RANKS[cpu_slot()];
     let previous = held.load(Ordering::Acquire);
@@ -687,7 +525,9 @@ fn enter_rank(rank: LockRank) -> u16 {
     previous
 }
 
-fn leave_rank(rank: LockRank, previous: u16) {
+/// Records that this CPU released its lock of `rank`, back to `previous`
+/// (what `enter_rank` returned), failing closed on an out-of-order release.
+pub(crate) fn leave_rank(rank: LockRank, previous: u16) {
     let held = &HELD_RANKS[cpu_slot()];
     if held.load(Ordering::Acquire) != rank.0 {
         crate::kernel_fail("linox: synchronization unlock-order violation\r\n");
