@@ -453,7 +453,7 @@ interior-mutable	kernel/src/ipc.rs	CONTROL_CHANNEL	shared-runtime	allowlist	none
 interior-mutable	kernel/src/lib.rs	HOST_CONTROL	platform-device	allowlist	none	explicit-host-control-owner-root
 interior-mutable	kernel/src/lib.rs	CONSOLE_NONBLOCKING	domain-runtime	allowlist	none	atomic-console-file-status-flag
 static-mut	kernel/src/lib.rs	KERNEL_STACK	bootstrap-init	allowlist	none	explicit-bootstrap-kernel-stack-owner-root
-interior-mutable	kernel/src/linux_aio.rs	AIO_RUNTIME	domain-runtime	allowlist	none	explicit-domain-aio-runtime-owner-root
+interior-mutable	kernel/src/linux_aio.rs	AIO_RUNTIME	domain-runtime	allowlist	none	ranked-aio-contexts
 interior-mutable	kernel/src/linux_file_cache.rs	FILE_CACHE_RUNTIME	domain-runtime	allowlist	none	explicit-domain-file-cache-owner-root
 interior-mutable	kernel/src/linux_keyring.rs	KEYRINGS	domain-runtime	allowlist	none	ranked-per-domain-keyrings
 interior-mutable	kernel/src/linux_drm.rs	DRM	domain-runtime	allowlist	none	ranked-drm-files-and-dmabufs

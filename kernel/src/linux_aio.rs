@@ -1,21 +1,19 @@
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+//! Linux AIO contexts (io_setup, io_submit, io_getevents): each domain's
+//! and IPC namespace's contexts with the completion events queued on
+//! them, kept on the kernel heap under one lock per instance.
+#![forbid(unsafe_code)]
 
-use crate::{control_abi, linux_process, memory, trusted::frame::Frame};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
+use crate::sync::{LockRank, SpinLock, SpinLockGuard};
+use crate::{control_abi, linux_process};
 
 const INSTANCE_LIMIT: usize = control_abi::DOMAIN_LIMIT + 1;
-const WALK_LIMIT: usize = 262_144;
 
-struct AioRuntimeOwner {
-    locks: [AtomicBool; INSTANCE_LIMIT],
-    root_addresses: [AtomicU64; INSTANCE_LIMIT],
-    root_generations: [AtomicU32; INSTANCE_LIMIT],
-}
-
-static AIO_RUNTIME: AioRuntimeOwner = AioRuntimeOwner {
-    locks: [const { AtomicBool::new(false) }; INSTANCE_LIMIT],
-    root_addresses: [const { AtomicU64::new(0) }; INSTANCE_LIMIT],
-    root_generations: [const { AtomicU32::new(0) }; INSTANCE_LIMIT],
-};
+/// Each instance's contexts, newest last.
+static AIO_RUNTIME: [SpinLock<Vec<Context>>; INSTANCE_LIMIT] =
+    [const { SpinLock::new(LockRank::AIO_CONTEXTS, Vec::new()) }; INSTANCE_LIMIT];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
@@ -32,269 +30,104 @@ pub(crate) struct Event {
     pub(crate) result2: i64,
 }
 
-#[repr(C)]
 struct Context {
-    next: memory::FrameLease,
     /// The process whose io_setup made it: contexts are a process's (its
     /// ring is in that process's memory), so another process with a ring
     /// at the same address has a context of its own.
     owner: u32,
     id: u64,
     maximum: u64,
-    pending: u64,
     ring_pages: u64,
-    head: memory::FrameLease,
-    tail: memory::FrameLease,
+    events: VecDeque<Event>,
 }
 
-#[repr(C)]
-struct EventPage {
-    next: memory::FrameLease,
-    event: Event,
-}
-
-struct Guard {
-    instance: usize,
-}
-impl Guard {
-    fn acquire() -> Option<Self> {
-        let instance = linux_process::current_ipc_instance();
-        let lock = AIO_RUNTIME.locks.get(instance)?;
-        while lock
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        Some(Self { instance })
-    }
-}
-impl Drop for Guard {
-    fn drop(&mut self) {
-        AIO_RUNTIME.locks[self.instance].store(false, Ordering::Release);
+impl Context {
+    fn pending(&self) -> u64 {
+        self.events.len() as u64
     }
 }
 
-fn lease() -> Option<memory::FrameLease> {
-    memory::allocate_frames::<1>(memory::FrameOwner::KERNEL).map(|frames| frames[0])
-}
-fn zero(frame: memory::FrameLease) -> bool {
-    Frame::leased(frame).is_some_and(|page| {
-        page.fill(0);
-        true
-    })
-}
-fn root(instance: usize) -> Option<memory::FrameLease> {
-    memory::FrameLease::from_parts(
-        AIO_RUNTIME.root_addresses[instance].load(Ordering::Acquire),
-        AIO_RUNTIME.root_generations[instance].load(Ordering::Acquire),
-    )
-}
-fn publish(instance: usize, value: Option<memory::FrameLease>) {
-    let value = value.unwrap_or(memory::FrameLease::EMPTY);
-    AIO_RUNTIME.root_generations[instance].store(value.generation(), Ordering::Release);
-    AIO_RUNTIME.root_addresses[instance].store(value.address(), Ordering::Release);
-}
-fn context(frame: memory::FrameLease) -> Option<&'static Context> {
-    Some(unsafe { &*(frame.direct_map_address()? as *const Context) })
-}
-fn context_mut(frame: memory::FrameLease) -> Option<&'static mut Context> {
-    Some(unsafe { &mut *(frame.direct_map_address()? as *mut Context) })
-}
-fn event(frame: memory::FrameLease) -> Option<&'static EventPage> {
-    Some(unsafe { &*(frame.direct_map_address()? as *const EventPage) })
-}
-fn event_mut(frame: memory::FrameLease) -> Option<&'static mut EventPage> {
-    Some(unsafe { &mut *(frame.direct_map_address()? as *mut EventPage) })
+/// The calling process's instance's contexts, locked.
+fn contexts() -> Option<SpinLockGuard<'static, Vec<Context>>> {
+    AIO_RUNTIME
+        .get(linux_process::current_ipc_instance())
+        .map(SpinLock::lock)
 }
 
-fn find(
-    instance: usize,
-    owner: u32,
-    id: u64,
-) -> Option<(memory::FrameLease, Option<memory::FrameLease>)> {
-    find_where(instance, |item| item.owner == owner && item.id == id)
+fn find(contexts: &[Context], owner: u32, id: u64) -> Option<usize> {
+    contexts
+        .iter()
+        .position(|item| item.owner == owner && item.id == id)
 }
 
-fn find_where(
-    instance: usize,
-    matches: impl Fn(&Context) -> bool,
-) -> Option<(memory::FrameLease, Option<memory::FrameLease>)> {
-    let mut current = root(instance);
-    let mut previous = None;
-    for _ in 0..WALK_LIMIT {
-        let frame = current?;
-        let item = context(frame)?;
-        if matches(item) {
-            return Some((frame, previous));
-        }
-        previous = Some(frame);
-        current = (item.next != memory::FrameLease::EMPTY).then_some(item.next);
-    }
-    None
+fn find_mut(contexts: &mut [Context], owner: u32, id: u64) -> Result<&mut Context, Error> {
+    let index = find(contexts, owner, id).ok_or(Error::Invalid)?;
+    Ok(&mut contexts[index])
 }
 
 pub(crate) fn create(owner: u32, id: u64, maximum: u64, ring_pages: u64) -> Result<(), Error> {
     if id == 0 || maximum == 0 || ring_pages == 0 {
         return Err(Error::Invalid);
     }
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
     // The contexts of processes gone (their memory with them) go now.
-    while let Some((frame, previous)) = find_where(guard.instance, |item| {
-        linux_process::live_process_status(item.owner).is_none()
-    }) {
-        remove_locked(guard.instance, frame, previous)?;
-    }
-    if find(guard.instance, owner, id).is_some() {
+    contexts.retain(|item| linux_process::live_process_status(item.owner).is_some());
+    if find(&contexts, owner, id).is_some() {
         return Err(Error::Invalid);
     }
-    let frame = lease().ok_or(Error::NoMemory)?;
-    if !zero(frame) {
-        let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[frame]);
-        return Err(Error::NoMemory);
-    }
-    let old = root(guard.instance);
-    let item = context_mut(frame).ok_or(Error::NoMemory)?;
-    item.next = old.unwrap_or(memory::FrameLease::EMPTY);
-    item.owner = owner;
-    item.id = id;
-    // Linux sizes a context for at least four requests per CPU, doubled.
-    item.maximum = maximum.max(16) * 2;
-    item.ring_pages = ring_pages;
-    publish(guard.instance, Some(frame));
+    contexts.try_reserve(1).map_err(|_| Error::NoMemory)?;
+    contexts.push(Context {
+        owner,
+        id,
+        // Linux sizes a context for at least four requests per CPU, doubled.
+        maximum: maximum.max(16) * 2,
+        ring_pages,
+        events: VecDeque::new(),
+    });
     Ok(())
 }
 
 pub(crate) fn push(owner: u32, id: u64, value: Event) -> Result<(), Error> {
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
-    let (frame, _) = find(guard.instance, owner, id).ok_or(Error::Invalid)?;
-    let item = context(frame).ok_or(Error::Invalid)?;
-    if item.pending >= item.maximum {
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
+    let item = find_mut(&mut contexts, owner, id)?;
+    if item.pending() >= item.maximum {
         return Err(Error::Full);
     }
-    let node = lease().ok_or(Error::NoMemory)?;
-    if !zero(node) {
-        let _ = memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[node]);
-        return Err(Error::NoMemory);
-    }
-    event_mut(node).ok_or(Error::NoMemory)?.event = value;
-    let item = context_mut(frame).ok_or(Error::Invalid)?;
-    if item.tail != memory::FrameLease::EMPTY {
-        event_mut(item.tail).ok_or(Error::Invalid)?.next = node;
-    } else {
-        item.head = node;
-    }
-    item.tail = node;
-    item.pending += 1;
+    item.events.try_reserve(1).map_err(|_| Error::NoMemory)?;
+    item.events.push_back(value);
     Ok(())
 }
 
 pub(crate) fn pop(owner: u32, id: u64) -> Result<Option<Event>, Error> {
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
-    let (frame, _) = find(guard.instance, owner, id).ok_or(Error::Invalid)?;
-    let item = context_mut(frame).ok_or(Error::Invalid)?;
-    if item.head == memory::FrameLease::EMPTY {
-        return Ok(None);
-    }
-    let node = item.head;
-    let page = event(node).ok_or(Error::Invalid)?;
-    let value = page.event;
-    item.head = page.next;
-    if item.head == memory::FrameLease::EMPTY {
-        item.tail = memory::FrameLease::EMPTY;
-    }
-    item.pending = item.pending.checked_sub(1).ok_or(Error::Invalid)?;
-    memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[node])
-        .then_some(Some(value))
-        .ok_or(Error::Invalid)
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
+    Ok(find_mut(&mut contexts, owner, id)?.events.pop_front())
 }
 
 pub(crate) fn info(owner: u32, id: u64) -> Result<(u64, u64), Error> {
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
-    let (frame, _) = find(guard.instance, owner, id).ok_or(Error::Invalid)?;
-    let item = context(frame).ok_or(Error::Invalid)?;
-    Ok((item.pending, item.ring_pages))
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
+    let item = find_mut(&mut contexts, owner, id)?;
+    Ok((item.pending(), item.ring_pages))
 }
 
 pub(crate) fn can_submit(owner: u32, id: u64) -> Result<bool, Error> {
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
-    let (frame, _) = find(guard.instance, owner, id).ok_or(Error::Invalid)?;
-    let item = context(frame).ok_or(Error::Invalid)?;
-    Ok(item.pending < item.maximum)
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
+    let item = find_mut(&mut contexts, owner, id)?;
+    Ok(item.pending() < item.maximum)
 }
 
+/// Frees a context and its queued events; its ring's page count, for the
+/// caller to unmap.
 pub(crate) fn destroy(owner: u32, id: u64) -> Result<u64, Error> {
-    let guard = Guard::acquire().ok_or(Error::Invalid)?;
-    let (frame, previous) = find(guard.instance, owner, id).ok_or(Error::Invalid)?;
-    remove_locked(guard.instance, frame, previous)
+    let mut contexts = contexts().ok_or(Error::Invalid)?;
+    let index = find(&contexts, owner, id).ok_or(Error::Invalid)?;
+    Ok(contexts.swap_remove(index).ring_pages)
 }
 
-/// Frees context `frame` (after `previous` in the list) and its queued
-/// events; its ring's page count, for the caller to unmap.
-fn remove_locked(
-    instance: usize,
-    frame: memory::FrameLease,
-    previous: Option<memory::FrameLease>,
-) -> Result<u64, Error> {
-    let item = context(frame).ok_or(Error::Invalid)?;
-    let next = item.next;
-    let pages = item.ring_pages;
-    let mut node = item.head;
-    for _ in 0..WALK_LIMIT {
-        if node == memory::FrameLease::EMPTY {
-            break;
-        }
-        let following = event(node).ok_or(Error::Invalid)?.next;
-        if !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[node]) {
-            return Err(Error::Invalid);
-        }
-        node = following;
-    }
-    if node != memory::FrameLease::EMPTY {
-        return Err(Error::Invalid);
-    }
-    if let Some(previous) = previous {
-        context_mut(previous).ok_or(Error::Invalid)?.next = next;
-    } else {
-        publish(
-            instance,
-            (next != memory::FrameLease::EMPTY).then_some(next),
-        );
-    }
-    memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[frame])
-        .then_some(pages)
-        .ok_or(Error::Invalid)
-}
-
+/// Frees the instance's contexts when its runtime ends.
 pub(crate) fn teardown() -> bool {
-    let Some(guard) = Guard::acquire() else {
+    let Some(mut contexts) = contexts() else {
         return false;
     };
-    let mut current = root(guard.instance);
-    publish(guard.instance, None);
-    for _ in 0..WALK_LIMIT {
-        let Some(frame) = current else { return true };
-        let Ok(item) = context(frame).ok_or(Error::Invalid) else {
-            return false;
-        };
-        current = (item.next != memory::FrameLease::EMPTY).then_some(item.next);
-        let mut node = item.head;
-        for _ in 0..WALK_LIMIT {
-            let Some(page) = (node != memory::FrameLease::EMPTY)
-                .then(|| event(node))
-                .flatten()
-            else {
-                break;
-            };
-            let next = page.next;
-            if !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[node]) {
-                return false;
-            }
-            node = next;
-        }
-        if !memory::scrub_and_release_frames(memory::FrameOwner::KERNEL, &[frame]) {
-            return false;
-        }
-    }
-    false
+    *contexts = Vec::new();
+    true
 }
