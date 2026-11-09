@@ -129,8 +129,30 @@ nothing that takes a lock. Two such leaves are never held together.
   slots use them. Taken after the image store (102) and the published
   root filesystems; an image whose last user goes is freed after the lock
   is released.
+- `SUSPENDED_INIT_FRAMES` (193, `address_space`): one lock per domain
+  slot, holding the frame leases of the slot's suspended init (its
+  page-table hierarchy and runtime extent). Held only to copy the leases
+  in when init suspends and out when it resumes or ends.
+- `ADDRESS_SPACE_SCRATCH` (199, `address_space`): the work lists an
+  address-space clone or validation reuses. An operation takes its list
+  out whole under the lock and puts it back when done
+  (`address_space::take_scratch`), so the lock is never held across the
+  work, which allocates and takes the frame allocator; a nested operation
+  finds the slot empty and starts a list of its own, and a list displaced
+  on the way back is freed after the lock is released.
 
 ## Other new ranks
+
+- `AUXILIARY_ADDRESS_SPACES` (106, `address_space`): the native service
+  domains' address spaces and their device bindings. Taken by native
+  service calls and the user-fault path at system-call level, never under
+  another lock, and held while a domain's virtio device is bound,
+  checked or quiesced, so the domain manager (450), the frame allocator
+  (200), the I/O MMU and the scheduler are taken under it; it ranks just
+  above system-call level, below all of them. A staged service's payload
+  is copied from user memory before the lock is taken (a user copy may
+  fault into the memory layer), and a timed-out device wait releases it
+  before quiescing the device, which takes it again.
 
 - `CONTROL_CHANNEL` (103, `ipc`) and `PACKET_MAILBOXES` (104, `packet`):
   taken by native service calls at system-call level, never under another
