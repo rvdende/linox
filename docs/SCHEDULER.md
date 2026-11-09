@@ -502,7 +502,10 @@ Progress on step 1: every dispatched process is entered through
 `run_dispatched_linux_process` (cpu/linux_runtime_loop.rs), the place the loop will own.
 
 Progress on kernel stacks (2026-11-01): every activation already runs on a
-guarded 256 KiB kernel stack of its own (`cpu/activation.rs`), and the
+guarded 256 KiB kernel stack of its own (`cpu/activation.rs`; since
+2026-11-09 the stacks, records, switch and park/resume live in the
+trusted core, `trusted::switch`, and `cpu/activation.rs` keeps the pool),
+and the
 switch between kernel contexts now exists: `linox_switch_stack(save, load)`
 saves the callee-saved registers and stack pointer, loads another
 context's and returns into it, and `new_context` lays out a fresh stack

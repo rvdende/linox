@@ -750,30 +750,104 @@ hands it. `cpu/architecture.rs`, `cpu/linux_system.rs`, `heap.rs`,
 files); kernel `unsafe` blocks 410 -> 363, blocks without a SAFETY comment
 179 -> 121, `static mut` 3 -> 0.
 
-What these files keep, and why:
-- `boot_verify.rs` and `boot_verify_elf.rs` call `cpu.rs`'s `enter_user`,
-  whose user-entry stub overwrites the CPU's saved return stack, so a
-  nested entry would return to a dead frame; it becomes safe when the
-  entry moves into `trusted::entry` with a per-CPU "in user mode" guard
-  (`cpu.rs` is the scheduler rework's now). `boot_verify_elf.rs` also
-  reads and clears the signal context through `linux_signal_context()`,
-  an `UnsafeCell` in `cpu/linux_process_state.rs` (same).
-- `native_services.rs` (`dispatch_charged_call`, `exit_result`) and
-  `linux_user_memory.rs` (`handle_user_fault`) take the frame pointer
-  `cpu.rs`'s stubs pass; the stubs could pass a reference once they live in
-  `trusted::entry`.
+What these files keep, and why (the entry, CPU and switch items are done
+in the next paragraph):
+- `linux_user_memory.rs` (`handle_user_fault`) still takes the user-fault
+  frame as a raw pointer; `cpu.rs`'s handler now gets `&mut
+  UserFaultFrame` from `trusted::entry` and passes the pointer on.
 - `image_store.rs`'s `retire` frees a published root filesystem whose
   entries `published_rootfs` hands out as `Entry<'static>`, which `cpu/`
   (the exec and path-walk code among it) holds; a lifetime tied to the
   publication makes `PublishedImage::retire` safe. (Still open after the
   next paragraph's round: see there.)
-- `cpu_tables`' known gap: a gate above vector 31 takes the handler
-  address its caller names (the callers pass `trusted::entry`'s stubs and
-  `cpu.rs`'s system-call entry); a typed stub handle closes it once
-  `cpu.rs`'s stubs are in `trusted::entry`. `cpu/linux_system.rs` still
-  names `X86_RUNTIME.LINUX_BOOT_ID` (now an `OwnedState` of its own) so
-  that the unused cell in `cpu.rs`'s owner does not fail the build; both
-  go with the next change to that owner.
+
+**Done so far (2026-11-09, continued): every entry stub, the context
+switch and the CPU core's owner cells.** `cpu/` is unsafe-free apart
+from `linux_process_state.rs`'s process records (below) and the files of
+the memory-layer change (`linux_user_memory.rs`, `linux_mmap.rs`,
+`linux_process_vm.rs`, `linux_procfs.rs`, `linux_cgroupfs.rs`); `cpu.rs`
+keeps only the `Sync` impl of the owner that holds those records.
+- `trusted::entry` holds every stub: the native and Linux system-call
+  entries, the exception, NMI and breakpoint stubs, the interrupt stubs
+  and the two user-entry stubs. Handlers take their frame by reference
+  (`&mut UserTrapFrame`, `&mut UserFaultFrame`, `&FatalFrame`, sizes
+  asserted against the stubs). The Linux `syscall` frame, which code
+  reaches through many layers and across a park, is a
+  `LinuxSyscallFrameHandle`: an address that reads and writes only while
+  the CPU's entry state names it as the running call's frame. The stub
+  sets `kernel_frame` on entry and clears it on every way out, a parking
+  call's is cleared as it parks, and boot checks stand a frame of their
+  own in (`with_stand_in_frame`), so a kept or made-up handle reaches
+  nothing.
+- Entering user mode (`enter_native_user`, `enter_process_user`) is safe:
+  each enter stub pushes the return stack and kernel frame it found and
+  the return path puts them back, so nested entries (a native service's
+  auxiliary run inside a call) return to their own frames; that is the
+  per-CPU guard the previous note asked for. Every return to user mode
+  (SYSRET, IRETQ, the enter stubs) keeps only CF, PF, AF, ZF, SF, TF, DF,
+  OF, NT, AC and ID of the flags it is given and sets IF, so no context
+  Rust writes enters ring 3 with IOPL or VM; non-canonical targets return
+  to the kernel on the IRETQ path too.
+- `trusted::cpu_tables`: gates above vector 31 take an `entry::EntryStub`,
+  which only `trusted::entry` makes (the known gap is closed); the entry
+  state is reached only through field accessors that check GS names an
+  installed record (`set_user_return` validates the context it writes,
+  `set_iret_registers`, `live_kernel_frame`), never as a raw pointer.
+- `trusted::user_copy` holds the copy loops and SMAP-lifting closure
+  (re-exported by `cpu.rs` for `address_space.rs`'s unsafe callers) and
+  the fault-fixup self-test; `trusted::msr` FS_BASE, EFER.NXE and the
+  `syscall` MSRs (LSTAR only ever the stub); `trusted::control` CR4's
+  protection features, CR4.TSD and `int3`; `trusted::root` loads a
+  process root only as a `paging::ValidatedUserRootFrames`; `trusted::xstate`
+  the FPU/SSE/AVX enable, reset, XSAVE and XRSTOR to an `ExtendedState`.
+- `trusted::switch` is the activation core moved out of
+  `cpu/activation.rs`: `KernelStack` (made only by mapping fresh frames
+  into a window slot), the switch assembly, the activation records and
+  `park`/`resume`, with the invariants that make them sound (records
+  boxed and removed only by the context that ran them or by a discard of a
+  parked one, `Running` marked under the lock before a resume, entry state
+  taken off the CPU when a call parks). `cpu/activation.rs` keeps the
+  stack pool.
+- `trusted::pod`: a `Pod` trait implemented for structs only through
+  `crate::pod!`, which checks every field is listed, `Pod`, and that the
+  sizes add up; the signal frame copies use `bytes_of`/`bytes_of_mut`.
+- Owner cells: the per-CPU-bank signal context is words of atomics
+  (`current_linux_signal_context`, `set_current_linux_signal_context`;
+  `linux_mmap.rs` keeps a compatibility view whose `read` is an `unsafe
+  fn` until that file moves), the process snapshot lists and each domain's
+  saved extended state are `ClaimCell`s, fork copies records with slice
+  copies and exec's scratch buffers are heap `Vec`s. The scheduler's
+  per-process workspace is published whole, so
+  `OwnedStateClaim::publish_initialized` is gone. The unused
+  `LINUX_BOOT_ID` cell and its placeholder line are gone.
+- Site counts (from main at 02a8030f): `cpu.rs` 39 -> 1, `activation.rs`
+  15 -> 0, `linux_runtime_loop.rs` 14 -> 0, `linux_signal.rs` (cpu) 12 -> 0,
+  `linux_process_state.rs` 12 -> 8, `execution.rs` 10 -> 0,
+  `linux_domain_runtime.rs` 8 -> 0, `linux_exec.rs` 5 -> 0,
+  `linux_syscall.rs` 4 -> 0, `linux_process_lifecycle.rs` 4 -> 0,
+  `boot_verify_elf.rs` 3 -> 0, `native_services.rs` 2 -> 0,
+  `boot_verify.rs`, `linux_thread.rs`, `linux_scheduler.rs` 1 -> 0,
+  `scheduler.rs` 4 -> 3; all of these but `cpu.rs`,
+  `linux_process_state.rs` and `scheduler.rs` carry
+  `#![forbid(unsafe_code)]`. Kernel `unsafe` blocks 357 -> 284, blocks
+  without a SAFETY comment 117 -> 41.
+
+Still to do here, and why:
+- The process records (`linux_process_state.rs`, 8 sites, and the `Sync`
+  impl in `cpu.rs`): `linux_process_record` and the runtime-state
+  accessors return `&'static mut` into frame-allocated records, about 90
+  call sites hold them across calls (some fetch the same record twice),
+  and `linux_process_vm.rs` and `linux_procfs.rs` (the memory-layer
+  change's files) call them too. Making them sound means per-record
+  ownership: a record per slot in its own lock, taken by a guard that
+  lives for one operation, with the call sites restructured around it.
+- `scheduler.rs` (3): `active_process_scheduler_workspace` and
+  `runtime_mut` return `&'static mut` from an `OwnedState`, and
+  `linux_process.rs` (the memory-layer change's file) holds the
+  workspace that way at about 25 call sites; the same guard pattern, once
+  that file can change.
+- Splitting `kernel_entry_lock` (SCHEDULER.md step 6, M3) needs the two
+  items above first: they are the last owners whose soundness rests on it.
 
 **Done so far (2026-11-09, continued): roots, the address-space layer
 and generated files.** `trusted/root.rs` now has `Root`, a page-table
