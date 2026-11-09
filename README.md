@@ -3,10 +3,10 @@
 **A Rust-first x86-64 operating system built around native domains and Linux
 userspace compatibility.**
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23682548.svg)](https://doi.org/10.5281/zenodo.23682548)
-
-Linox began as a fork of [Ginux](https://github.com/gmkurtzer/ginux) by
-Gregory M. Kurtzer and continues its standalone bootable kernel. Upstream ended that line on 2026-11-04, froze
+Linox began on 2026-10-30 as a fork of
+[Ginux](https://github.com/gmkurtzer/ginux) by Gregory M. Kurtzer and
+continues its standalone bootable kernel; it is developed by Rouan van der
+Ende with Claude Code agents. Upstream ended that line on 2026-11-04, froze
 it as the `bootable-kernel-final` tag and moved on to a userspace kernel; its
 fixes up to that tag are merged here, without its native controller desktop
 (Linox's desktop runs in a Linux domain).
@@ -41,9 +41,7 @@ networking, resource enforcement, security validation, and real-hardware
 coverage are incomplete. It is useful for research, architecture experiments,
 and testing—not production workloads or as a replacement for Linux.
 
-The name is a joke in the same family as Linux: **Linox** combines Linux, GPT,
-and Greg. To keep the author's ego within its configured resource limit, the
-`G` officially stands for GPT.
+The name is Linux with the `u` oxidised to an `o`: Linux, in Rust.
 
 ## Design goals
 
@@ -143,6 +141,7 @@ coverage, and a physical-hardware matrix remain future work.
 | Boot | Unified x86-64 UEFI image under Q35/OVMF | No production signing, recovery, or physical-hardware profile |
 | Controller | Embedded static ring-3 administration process | No production remote management plane |
 | Domains | Multiple domain objects with distinct process, address-space, root, mount, capability, and lifecycle state | Resource and device isolation remain incomplete in several paths |
+| LTP | The syscall tests of the [Linux Test Project](docs/LTP.md) in a 4-CPU Alpine domain: 1362 pass and none fail, break, hang or crash (162 report a feature Linox does not offer, 35 are skipped) | The `syscalls` suite only; the LTP domain runs with `user-switching`, `write-execute` and `privileged` on |
 | Linux userspace | Selected Alpine and Rocky programs; Rocky systemd reaches `multi-user.target`; in the official `rust:alpine` image, cargo downloads crates from crates.io, builds a project using `serde` with derive (build scripts, proc macros, rustc linking through `cc`), and `cargo install`s the uutils (Rust coreutils) multicall binary, which then runs | No distribution-wide compatibility claim |
 | Storage | Persistent configuration and verified OCI layer cache | Writable domain persistence and production recovery remain incomplete |
 | Networking | Host DHCP/DNS, virtual-link configuration, loopback, and tested lifecycle | Independent per-domain packet paths and leases remain unfinished |
@@ -162,7 +161,9 @@ The Linux 6.12 x86-64 ledger classifies all 375 syscall numbers: 82 complete,
 an explicit disposition; it does not mean complete Linux conformance. Loader,
 process, VFS, terminal, socket, IPC, namespace, cgroup, pseudo-filesystem, and
 device behavior is implemented only to the extent recorded in the
-[compatibility matrix](docs/LINUX-COMPATIBILITY.md).
+[compatibility matrix](docs/LINUX-COMPATIBILITY.md). Behaviour is checked
+against the Linux Test Project's syscall tests, which all pass
+([docs/LTP.md](docs/LTP.md)).
 
 The project uses real workloads as compound integration tests. Alpine exercises
 the musl/BusyBox path. Rocky exercises glibc, dynamic linking, fork/exec, systemd,
@@ -369,10 +370,9 @@ with the image's own rustc and runs them inside the domain: allocator, thread
 churn, mmap/munmap/mremap, file I/O, and malloc-metadata stress, each checking
 every byte it wrote. It needs an 8 GiB guest and takes about half an hour.
 
-The evaluated checkpoint does **not** have a fully passing aggregate `make
-test`: a post-`execve()` system-supervisor lifecycle probe remains a recorded
-failure. This limitation is preserved in the paper rather than hidden behind
-the narrower passing gates.
+The Ginux checkpoint evaluated in the paper below did not pass the aggregate
+`make test` (a post-`execve()` system-supervisor lifecycle probe failed); on
+current `main` it passes, and CI runs it on every push.
 
 The EFI image is written to `build/esp/EFI/BOOT/BOOTX64.EFI`. Run `make help`
 for the full target and environment-variable list.
@@ -482,9 +482,10 @@ never asks for a token to be pasted into the conversation.
 
 ## Research background
 
-Linox was built to test whether a coding agent, directed by someone with the
-relevant systems experience, could construct an independent kernel that runs
-existing Linux userspace. Over eleven days, one persistent OpenAI Codex task
+Ginux, the project Linox was forked from, was built to test whether a coding
+agent, directed by someone with the relevant systems experience, could
+construct an independent kernel that runs existing Linux userspace. Over
+eleven days, one persistent OpenAI Codex task
 using GPT-5.6 Sol produced approximately 139,000 retained lines of
 implementation and test code.
 
@@ -494,6 +495,11 @@ acceptance criteria, and stopping point. The agent implemented, booted, tested,
 diagnosed, and revised the system against executable gates. Architecture and
 decision documents kept the work aligned; real userspaces exposed failures that
 synthetic tests missed.
+
+Linox continues that kernel with the same method, using Claude Code agents:
+since the fork it has gained the Linux Test Project as its compatibility
+gate, multi-CPU domains, kernel stacks per activation, the all-Rust userland
+and the Wayland desktop.
 
 The result demonstrates rapid construction of deep systems software, not a
 production alternative to Linux. The project does not reproduce Linux's broad

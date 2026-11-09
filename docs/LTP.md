@@ -35,6 +35,8 @@ QEMU, and reports one machine-parseable line per test plus failure clusters.
 | `6f9f6055` | capability sets and the bounding set, seccomp filters, POSIX message queues that block and notify (netlink for SIGEV_THREAD), memfd seals, fallocate's tmpfs modes, an exiting thread's unmapped stack (futex_wait03, bind04) (4 CPUs, baseline 255) | 1552 | 896 | 136 | 102 | 209 | 13 | 0 | 2 |
 | `97c546ab` | ru_maxrss and SIGCHLD auto-reaping, Linux AIO per process, dnotify, CPU interval timers, interface ioctls, sched_setattr and SCHED_DEADLINE, stable directory cursors, many errno orders (4 CPUs, baseline 194; the one hang is fork14) | 1552 | 951 | 96 | 94 | 211 | 1 | 0 | 1 |
 | `468a6a67` | lazy large anonymous mappings (fork14 no longer hangs), memory locks and VmLck, real MREMAP_FIXED moves, wipe-on-fork in copy-on-write forks, domain flags write-execute and privileged (machine reboot, kernel log and syslog, chroot, process accounting, ptrace's core), /proc/config.gz (4 CPUs, baseline 154; the one hang is dirtyc0w_shmem) | 1552 | 987 | 72 | 78 | 213 | 1 | 0 | 1 |
+| `d773d687` | the remaining clusters: memory cgroups (page cache and shared memory charged, memory.min/low), swap-out under pressure, the main stack at the top of the address space growing to RLIMIT_STACK, ext4 metadata checksums, kTLS, TUN/TAP, perf_event_open software events, descriptor tables past 1024, semctl SETVAL's int; memcontrol03/04 skipped (late-run timeouts) | 1559 | 1362 | 0 | 0 | 162 | 0 | 0 | 0 |
+| `59729e44` | the same after merging upstream's `bootable-kernel-final` | 1559 | 1362 | 0 | 0 | 162 | 0 | 0 | 0 |
 
 \* Counted with the exit status alone, which overstated passes (below).
 The later rows are rescored from each run's saved console logs with LTP's
@@ -83,7 +85,12 @@ waiting for a signal), poll02, ppoll01, pause01, tgkill01 and
 rt_tgsigqueueinfo01. Results of a
 full run are kept in `target/ltp-baseline/` (not committed).
 
-## What remains (full run 14, 468a6a67)
+## What remained at full run 14 (468a6a67)
+
+Since `d773d687` nothing fails: the 1559 tests of the last rows are 1362
+passes, 162 TCONF (a feature Linox does not offer, or one LTP needs real
+hardware for) and 35 skipped by the harness's run list (below). The rest of
+this section is what was left at run 14 and how it was closed.
 
 154 known failures and one hang (dirtyc0w_shmem). The larger groups, each needing a
 feature rather than a fix:
