@@ -762,18 +762,11 @@ What these files keep, and why:
   `linux_user_memory.rs` (`handle_user_fault`) take the frame pointer
   `cpu.rs`'s stubs pass; the stubs could pass a reference once they live in
   `trusted::entry`.
-- `linux_procfs.rs` and `linux_cgroupfs.rs` render /proc/uptime,
-  /proc/meminfo and /proc/self/cgroup into a `trusted::scratch` buffer
-  (no longer a `static mut`) and return it as `&'static [u8]`, valid until
-  the next read, which the kernel-entry lock orders after every reader's
-  copy. `linux_regular_file` returns that type to `linux_mmap.rs` and
-  `linux_syscall.rs`; an owned or guarded file (Linux's seq_file keeps a
-  buffer per open file) makes these safe. The check script keeps
-  `ScratchBuffer` to these two files.
 - `image_store.rs`'s `retire` frees a published root filesystem whose
   entries `published_rootfs` hands out as `Entry<'static>`, which `cpu/`
   (the exec and path-walk code among it) holds; a lifetime tied to the
-  publication makes `PublishedImage::retire` safe.
+  publication makes `PublishedImage::retire` safe. (Still open after the
+  next paragraph's round: see there.)
 - `cpu_tables`' known gap: a gate above vector 31 takes the handler
   address its caller names (the callers pass `trusted::entry`'s stubs and
   `cpu.rs`'s system-call entry); a typed stub handle closes it once
@@ -781,6 +774,70 @@ What these files keep, and why:
   names `X86_RUNTIME.LINUX_BOOT_ID` (now an `OwnedState` of its own) so
   that the unused cell in `cpu.rs`'s owner does not fail the build; both
   go with the next change to that owner.
+
+**Done so far (2026-11-09, continued): roots, the address-space layer
+and generated files.** `trusted/root.rs` now has `Root`, a page-table
+root only the memory layer makes (`Root::from_physical`, confined with
+`Frame`/`PageTable::from_physical` by the check script), which checks each
+time that the frame is direct-mapped, that its direct-map entry is the
+kernel root's and supervisor-only and that its low entry is present (a
+released root is scrubbed and fails); `root::activate(Root)` is the one
+safe CR3 load, and `address_space`'s loads fall back to the kernel's root
+for a root that fails instead of loading it. `trusted/programs.rs` holds
+the ring-3 test programs' assembly and hands each out as a `'static`
+slice. `address_space.rs`'s user copies and its verification read-backs go
+through `trusted::user_copy`, so `cpu::with_supervisor_user_access` (a
+closure that opened SMAP for arbitrary code) is gone; its owner cells are
+ranked locks (`AUXILIARY_ADDRESS_SPACES` 106, `SUSPENDED_INIT_FRAMES` 193,
+`ADDRESS_SPACE_SCRATCH` 199; SYNCHRONIZATION.md), and the interactive
+controller image is a set-once `OwnedState`. The virtio DMA pages reach
+`pci.rs` as their `FrameLease` and `DmaView::from_direct_map` is gone. The
+generated /proc files (/proc/meminfo, /proc/uptime, /proc/self/cgroup)
+own their bytes per read (`cpu/linux_descriptors.rs`'s `RegularFile`,
+from `linux_regular_file_contents`), so `trusted::scratch` is gone.
+`address_space.rs`, `cpu/linux_procfs.rs`, `cpu/linux_cgroupfs.rs` and
+`cpu/linux_process_vm.rs` carry `#![forbid(unsafe_code)]`, and `lib.rs`
+no longer allows unsafe code in `address_space`. Site counts:
+`address_space.rs` 78 -> 0, `linux_process_vm.rs` 1 -> 0,
+`linux_procfs.rs` 2 -> 0, `linux_cgroupfs.rs` 1 -> 0; `trusted/` gained
+`programs.rs` 1, `root.rs` 3 -> 4, `interrupts.rs` 7 -> 8 and lost
+`scratch.rs` 3.
+`linux_process.rs` is safe Rust too (52 sites -> 0, `#![forbid(unsafe_code)]`,
+off `lib.rs`'s allow list). Its owner cells became ranked locks: each
+domain instance's process table is an `IrqSpinLock` at PROCESS_TABLE
+(189, as high as the heap allows, because copy-on-write faults reach the
+table under the futex, socket, volume and unlinked-file locks); the table
+now holds its processes' address-space lists (raw pointers to leaked boxes
+before), and the fork work areas are taken out of and put back into a leaf
+lock (PROCESS_SCRATCH, 195). The table lock is held for short updates
+only: namespace bookkeeping is deferred until after the unlock, and a
+fork's page copy, page-table clone and System V inheritance, an exit's
+page-table teardown and System V detach, and the callbacks callers pass
+run between holds that look the process up again by handle (slot and
+generation). Its frames are reached only through `Frame::leased`. The
+kernel-entry lock still hides the windows between those holds (a process
+off the run queue with its tables retired but not yet a zombie; live-copy
+frames looked up under the lock and used after it), which splitting it
+(M3) must close with per-process (mm) exclusion. Kernel totals after this
+round (`check-kernel-unsafe.sh`, from main at b65ee6eb, after the
+overlay's leaf lock): `unsafe` blocks 353 -> 228, blocks without a SAFETY
+comment 115 -> 49, modules allowed unsafe code in `lib.rs` 7 -> 5.
+What is still open in this round's files, and why:
+- `image_store.rs`'s `retire` (1 site): the published root filesystem's
+  bytes reach `cpu/` as `'static` slices (`Entry<'static>`'s data, link
+  and name, `process_plan`'s segments, `LaunchArguments`,
+  `ProcessPlanFailure`), most of them in `linux_exec.rs` (37 uses) and
+  one in `linux_domain_runtime.rs` (`entry.link`). The fix is an entry
+  type that holds the slot's `Arc<Published>` (and so the image) with
+  accessors for the slices, and an exec plan that holds the same `Arc`;
+  `PublishedImage` then becomes an `Arc`-owned buffer freed with its last
+  reference, and `retire` an ordinary drop. It needs the exec code's
+  owner to take the new types.
+- `cpu/linux_mmap.rs` (1) reads the signal context through
+  `linux_process_state.rs`'s `UnsafeCell` (`linux_signal_context`), and
+  `cpu/linux_user_memory.rs` (1) takes the user-fault frame pointer
+  `cpu.rs`'s stub passes; both go with the entry and signal-state work in
+  those files.
 
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
