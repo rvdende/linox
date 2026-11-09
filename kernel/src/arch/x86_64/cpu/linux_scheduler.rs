@@ -1436,19 +1436,23 @@ pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
         } else {
             sync_live_linux_process_address_space(pid) && run_dispatched_linux_process(&selected)
         };
-        if !resumed || !X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
+        if !resumed {
             break resumed;
         }
-        // The parent of a fork goes on with the child's pid as its result.
-        if !execute_deferred_live_fork() {
-            break false;
+        if X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
+            // The parent of a fork goes on with the child's pid as its
+            // result.
+            if !execute_deferred_live_fork() {
+                break false;
+            }
+        } else if !linux_process_continues_in_place(pid) {
+            break resumed;
         }
         match linux_process::dispatch_live_process(pid) {
-            Some(parent) => selected = parent,
+            Some(again) => selected = again,
             None => break false,
         }
     };
-    let _ = take_linux_child_yield(pid);
     if pid == 1
         && (X86_RUNTIME.ELF_PROBE_COMPLETED.load(Ordering::SeqCst)
             || !X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst))
@@ -1474,6 +1478,35 @@ pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
     } else {
         LinuxRunOutcome::Failed
     }
+}
+
+/// Whether process `pid`, which came back to the kernel from this CPU (a
+/// yield, a preemption) and is ready, goes on in place: nothing else is
+/// ready to take the CPU, so its kernel state stays in this CPU's bank
+/// rather than being saved and restored again at once (docs/SCHEDULER.md,
+/// step 5). It does not when it exited, waits, stopped, ends the runtime
+/// (init), or the runtime is to suspend.
+fn linux_process_continues_in_place(pid: u32) -> bool {
+    if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
+        || X86_RUNTIME
+            .LINUX_RUNTIME_BACKGROUND_YIELD_REQUESTED
+            .load(Ordering::Acquire)
+        || linux_child_exited(pid)
+        || pid == 1
+            && (X86_RUNTIME.ELF_PROBE_COMPLETED.load(Ordering::SeqCst)
+                || !X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst))
+        || activation::is_parked(linux_activation_owner(pid))
+        || linux_process::live_process_status(pid)
+            .is_none_or(|status| status.state != linux_process::LiveProcessState::Running)
+    {
+        return false;
+    }
+    // Other CPUs' system calls go first, as between the loop's rounds; what
+    // they woke is ready before this one decides.
+    crate::sync::kernel_entry_yield();
+    deliver_linux_wakeups();
+    let now = linux_elapsed_nanoseconds().unwrap_or(0);
+    !linux_process::other_live_process_ready(pid, now)
 }
 
 /// Ends process `pid`, current on this CPU, which exited with `status`: its
@@ -1936,9 +1969,13 @@ pub(super) fn linux_complete_timer_preemption(
     if let Some(result) = linux_preempted_owner_switches_to_kept_thread(output, &preempted) {
         return Some(result);
     }
-    // With nobody to take a yield, the process carries on where the tick
-    // interrupted it.
+    // With nobody to take a yield, or nothing else ready to take the CPU,
+    // the process carries on where the tick interrupted it.
     let recorded = linux_preemption_yield_taken(pid)
+        && {
+            deliver_linux_wakeups();
+            linux_process::other_live_process_ready(pid, linux_elapsed_nanoseconds().unwrap_or(0))
+        }
         && live_runtime_linux_process_address_space_snapshot().is_some_and(|snapshot| {
             linux_process::refresh_validated_runtime_process_registry(
                 pid,
@@ -1966,12 +2003,6 @@ pub(super) fn linux_complete_timer_preemption(
             },
         );
     }
-    X86_RUNTIME
-        .LINUX_PROCESS_CHILD_YIELD_PID
-        .store(pid, Ordering::SeqCst);
-    X86_RUNTIME
-        .LINUX_PROCESS_CHILD_YIELDED
-        .store(true, Ordering::SeqCst);
     Some(LINUX_RETURN_TO_KERNEL)
 }
 

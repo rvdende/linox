@@ -747,17 +747,9 @@ pub(super) fn yield_current_linux_process(mut caller: LinuxUserContext, result: 
             park_linux_light_thread(handle, caller, true) == LINUX_RETURN_TO_KERNEL
         });
     }
-    let pid = current_linux_process_pid();
-    if !refresh_linux_process_registry_for_wait(caller) {
-        return false;
-    }
-    X86_RUNTIME
-        .LINUX_PROCESS_CHILD_YIELD_PID
-        .store(pid, Ordering::SeqCst);
-    X86_RUNTIME
-        .LINUX_PROCESS_CHILD_YIELDED
-        .store(true, Ordering::SeqCst);
-    true
+    // The registry holds where the process goes on: the loop that took the
+    // yield enters it there (a call that parks never comes back this way).
+    refresh_linux_process_registry_for_wait(caller)
 }
 
 /// Waits in poll(2) for a process with no other runnable thread: other

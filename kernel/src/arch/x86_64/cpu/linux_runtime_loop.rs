@@ -139,27 +139,12 @@ pub(crate) fn resume_live_linux_process(
     // stack installed by this entry stub.
     unsafe { enter_linux_runtime_process(entry, stack, general.as_ptr(), rflags) };
     let returned_fs = active_fs_base();
-    let scheduled_thread_fs = current_linux_thread_handle()
-        .and_then(linux_thread_context)
-        .map(|context| context.thread_pointer as u64);
+    // A runtime process that came back to the kernel (an exit, an exec, a
+    // fork, a yield or a preemption) may have left another thread current,
+    // or set its own thread pointer: any user address will do, and its next
+    // entry loads the one its context names.
     let preserved = returned_fs == fs_base
-        || X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-            && scheduled_thread_fs == Some(returned_fs)
-        || X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-            && returned_fs < 1 << 47
-            && (X86_RUNTIME
-                .LINUX_PROCESS_CHILD_EXITED
-                .load(Ordering::SeqCst)
-                || X86_RUNTIME
-                    .LINUX_PROCESS_CHILD_EXECUTED
-                    .load(Ordering::SeqCst)
-                || X86_RUNTIME
-                    .LINUX_PROCESS_CHILD_YIELDED
-                    .load(Ordering::SeqCst)
-                || X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst)
-                || X86_RUNTIME
-                    .LINUX_RUNTIME_BACKGROUND_SUSPENDED
-                    .load(Ordering::Acquire));
+        || X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) && returned_fs < 1 << 47;
     unsafe { write_msr(FS_BASE_MSR, saved_fs) };
     let restored = active_fs_base() == saved_fs;
     if !preserved
@@ -679,6 +664,10 @@ pub(super) fn linux_sched_yield_live_return(
         let due = now.wrapping_sub(LINUX_YIELD_ROTATED_AT.load(Ordering::Relaxed)) >= interval;
         if due
             && current_linux_runtime_cpu_index() == 0
+            && linux_process::other_live_process_ready(
+                current_linux_process_pid(),
+                linux_elapsed_nanoseconds().unwrap_or(0),
+            )
             && caller.is_some_and(|caller| {
                 LINUX_YIELD_ROTATED_AT.store(now, Ordering::Relaxed);
                 yield_current_linux_process(caller, 0)

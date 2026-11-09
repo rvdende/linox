@@ -1,9 +1,10 @@
 # Kernel stacks and scheduling: design
 
 Status: steps 1-4 below are done (2026-11-09: the scheduler loop owns the
-run queue and nothing runs nested); of step 5, real wakeups are done (wait
-queues, "Wait queues" below); activations per thread and cheaper switches
-are next, then step 6 (per-CPU loops, splitting the kernel-entry lock). Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
+run queue and nothing runs nested); of step 5, real wakeups (wait queues,
+"Wait queues" below) and the first cheap switches are done; activations
+per thread are next, then step 6 (per-CPU loops, splitting the
+kernel-entry lock). Step 1 of the core rebuild in CLAUDE.md, it replaces the nested
 execution model with Linux's: every thread has its own kernel stack,
 blocking switches stacks, and a scheduler decides who runs next on each CPU.
 
@@ -225,17 +226,61 @@ child-first path remains only for the boot verification probe.
 - **Wakeups instead of rechecks.** Done (2026-11-09, "Wait queues"
   below): every parked call is blocked on what it waits for, and the
   idle-round heuristic and `mark_linux_process_asleep` are gone.
-- **Activations per thread.** Activations are keyed by process
-  (`linux_activation_owner`): a multithreaded process's sibling threads
-  still switch inside its one activation. Each thread needs its own, and
-  the registry's single context per process becomes per thread.
-- **Per-process globals as task fields.** Every dispatch still copies the
-  process's kernel state in and out of the CPU's bank (save and restore in
-  `run_linux_process_here`); skipping the restore when the bank already
-  holds the process is a cheap first step.
-- **Yields.** `yield_current_linux_process` still records the
-  CHILD_YIELDED flags for a caller that no longer needs them; with real
-  blocking the restart contexts it writes go too.
+- **Activations per thread.** Not done: see "Activations per thread:
+  what is left of step 5" below.
+- **Per-process globals as task fields.** Partly done (2026-11-09): a
+  process that comes back to the kernel (a yield, a preemption) with
+  nothing else ready goes on in place, its state staying in the CPU's bank
+  instead of being saved and restored at once
+  (`linux_process_continues_in_place` in `run_linux_process_here`); a
+  preemption with nothing else ready carries on without even leaving its
+  call, and sched_yield gives the CPU away only to a ready process
+  (`linux_process::other_live_process_ready`). Moving the per-process
+  globals into task fields is left for the per-thread activations, which
+  change what a task is.
+- **Yields.** Done (2026-11-09): `yield_current_linux_process` and the
+  timer preemption no longer record the CHILD_YIELDED flags (only the boot
+  probe's child-first fork transaction reads them), and a returned
+  process's FS base is checked only for a user address. The restart
+  context a wait writes stays: it is the registry's context of the parked
+  process, which the dispatch validates and a failed park re-enters.
+
+### Activations per thread: what is left of step 5
+
+Not done yet. Today a process has one activation
+(`linux_activation_owner(pid)`) and its threads switch in user mode inside
+it: a thread that must wait either blocks as a *thread wait*
+(`block_current_linux_thread`, the `LINUX_THREAD_WAIT_*` kinds, which save
+its user context and return into a ready sibling's) or, with no sibling
+ready, parks the whole process in `run_other_linux_processes`. Only one
+thread of a process can be inside a parked call, a thread that must wait
+while a sibling is ready restarts its call later
+(`linux_retry_later_live_return`), and a blocked multithreaded process
+also waits for its threads' waits, which for a descriptor means every
+state change and tick (`linux_process_block`). What it takes:
+
+1. Key activations by domain instance, pid *and* tid, and let
+   `run_dispatched_linux_process` choose per thread: resume a woken
+   thread's parked call, or enter a ready thread at its saved user context
+   in a new activation. The per-thread kernel state a switch between them
+   moves (current thread slot, signal mask, FS base, extended state) is
+   what `switch_linux_thread` switches today.
+2. Blocks per thread: `Process::block` moves to the thread (the registry
+   gains thread records, or the thread table carries it), wakers wake a
+   thread, and a process is ready while any of its threads is. The
+   registry's single `ProcessExecutionContext` per process becomes one per
+   thread (the thread slots' saved contexts are most of it already).
+3. Thread waits become parks: `run_other_linux_processes` stops returning
+   `None` for a ready sibling, and the `LINUX_THREAD_WAIT_*` machinery,
+   `linux_retry_later_live_return`'s sibling hand-offs and
+   `LINUX_RETRY_SIBLING_HANDOFFS` go.
+4. exit_group, exec and fatal signals end the threads parked in the kernel
+   by resuming each with SIGKILL pending so its call unwinds
+   (`discard_parked` drops parked frames only when a runtime ends).
+5. The application processors' light path runs threads without
+   activations and migrates a thread that must wait to the owner; with
+   activations per thread it runs them like any thread and lets them park.
+
 
 ## Wait queues (step 5, done 2026-11-09)
 
@@ -290,6 +335,16 @@ The loop itself no longer counts idle rounds: with nothing ready it halts
 until an interrupt, at the latest the tick at the earliest deadline.
 `mark_linux_process_asleep`, its 2 ms nanosleep margin and the
 `futex_sleep` mark went; `Process::block` replaced them.
+
+Measured (2026-11-09): an idle all-Rust domain (brush at its prompt)
+cost QEMU 27-28% of a host CPU on the step 4 kernel and 13-14% with wait
+queues (QEMU's user and system time over 20 s). What is left is mostly
+the 1 kHz tick and brush's input thread, whose console read is looked at
+on every tick (the console is polled, and a multithreaded process blocks
+as a whole until threads have activations of their own). A serde `cargo
+build -j1` in rust:alpine took 1m02s before and 1m00-1m02s after: one
+rustc at a time, whose waits the old idle-round shortcut already kept
+cheap.
 
 What M3 (step 6) must do with them: wakeups are delivered by whichever
 CPU looks for work next, under the kernel-entry lock. With per-CPU run

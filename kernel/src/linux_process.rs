@@ -6403,6 +6403,26 @@ pub(crate) fn ready_live_process_after(
         .find(|pid| accept(*pid))
 }
 
+/// Whether a process other than `pid` is ready in the run queue and may
+/// run on this CPU (not blocked, not claimed by a CPU): `pid` has the CPU to
+/// itself otherwise.
+pub(crate) fn other_live_process_ready(pid: u32, now: u64) -> bool {
+    let (Some(table), Some(run_queue)) = (
+        live_process_table_mut(),
+        scheduler::active_process_scheduler_workspace(),
+    ) else {
+        return true;
+    };
+    table.processes.iter().flatten().any(|process| {
+        process.handle.pid != pid
+            && process.state == ProcessState::Running
+            && !process.is_asleep(now)
+            && process
+                .scheduler_thread
+                .is_some_and(|thread| run_queue.is_ready_here(thread))
+    })
+}
+
 /// The ready process to run next in turn, after the one the last call
 /// chose, that `accept` takes; it becomes the turn's.
 pub(crate) fn next_ready_live_process(now: u64, accept: impl FnMut(u32) -> bool) -> Option<u32> {

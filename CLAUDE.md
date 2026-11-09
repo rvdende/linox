@@ -54,10 +54,12 @@ through a Linux ABI personality. It is not a rewrite of Linux:
    wakeups are done too: a waiting call blocks on what it waits for
    (`linux_wait_queue`: futex, children, socket and pipe slots, state
    changes, ticks, its deadline, signals) and leaves the run queue until a
-   waker makes it ready, instead of being resumed to look again. Next: an
-   activation per thread and cheaper switches (the rest of step 5); then
-   step 6, per-CPU loops with IPI wakeups and load balancing, and
-   splitting `kernel_entry_lock`.
+   waker makes it ready, instead of being resumed to look again; a process
+   with nothing else ready goes on in place after a yield or preemption,
+   its state left in the CPU's bank. Next: an activation per thread (the
+   rest of step 5, planned in docs/SCHEDULER.md); then step 6, per-CPU
+   loops with IPI wakeups and load balancing, and splitting
+   `kernel_entry_lock`.
 3. **A real task and memory model:** per-process memory-area tracking (VMAs),
    a shared page cache, and dynamically sized tables in place of the fixed
    arrays (32 threads per process, kept in per-thread arrays that the
