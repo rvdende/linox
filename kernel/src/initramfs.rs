@@ -1,7 +1,6 @@
 use crate::memory;
-use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::owned_state::OwnedState;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const MAGIC: &[u8; 6] = b"070701";
 const HEADER_SIZE: usize = 110;
@@ -25,17 +24,14 @@ const SYMLINK: u32 = 0o120000;
 const SYSTEM_PROFILE_HEADER: &[u8] = b"LINOX_SYSTEM_PROFILE_V0\n";
 
 struct PublishedRootOwner {
-    published: AtomicBool,
     generation: AtomicU32,
-    root: UnsafeCell<MaybeUninit<ReadOnlyRoot>>,
+    /// Published once at boot and never changed or released after.
+    root: OwnedState<ReadOnlyRoot>,
 }
 
-unsafe impl Sync for PublishedRootOwner {}
-
 static PUBLISHED_ROOT: PublishedRootOwner = PublishedRootOwner {
-    published: AtomicBool::new(false),
     generation: AtomicU32::new(0),
-    root: UnsafeCell::new(MaybeUninit::uninit()),
+    root: OwnedState::empty(),
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -629,22 +625,11 @@ impl ReadOnlyRoot {
 }
 
 fn published_root() -> Option<&'static ReadOnlyRoot> {
-    if !PUBLISHED_ROOT.published.load(Ordering::Acquire) {
-        return None;
-    }
-    // SAFETY: publication writes the root exactly once before the release
-    // store. Bootstrap is single-core and never mutates or releases it.
-    Some(unsafe {
-        &*PUBLISHED_ROOT
-            .root
-            .get()
-            .cast_const()
-            .cast::<ReadOnlyRoot>()
-    })
+    PUBLISHED_ROOT.root.get()
 }
 
 pub(crate) fn publish_read_only_root(source: &[u8]) -> bool {
-    if PUBLISHED_ROOT.published.load(Ordering::Acquire) {
+    if PUBLISHED_ROOT.root.get().is_some() {
         return false;
     }
     let Some(image) = OwnedRoot::materialize(source) else {
@@ -657,12 +642,11 @@ pub(crate) fn publish_read_only_root(source: &[u8]) -> bool {
         let _ = root.release();
         return false;
     }
-    // SAFETY: the publication flag is still false and bootstrap is single-core.
-    unsafe {
-        PUBLISHED_ROOT.root.get().write(MaybeUninit::new(root));
+    if let Err(root) = PUBLISHED_ROOT.root.try_install(root) {
+        let _ = root.release();
+        return false;
     }
     PUBLISHED_ROOT.generation.store(1, Ordering::Release);
-    PUBLISHED_ROOT.published.store(true, Ordering::Release);
     true
 }
 
