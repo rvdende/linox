@@ -1097,3 +1097,165 @@ fn switch_from_blocked_linux_futex_waiter(
         .fetch_add(1, Ordering::SeqCst);
     LINUX_RETURN_FROM_IRET
 }
+
+/// Wakes up to `limit` waiters on the futex word at `address` from the
+/// kernel's own side (a thread's exit clearing its tid word, a robust mutex
+/// whose owner died): threads of this process blocked on it, then waits
+/// recorded at the process level, which is how a thread with no ready
+/// sibling waits while the rest of its process runs on other CPUs. A joiner
+/// waiting that way for musl's thread-list lock was never woken by the
+/// thread's exit, and its process slept on with the thread gone.
+pub(super) fn wake_linux_futex(address: u64, limit: u32) -> u32 {
+    if address == 0 || limit == 0 {
+        return 0;
+    }
+    let threads = wake_linux_futex_masked(address, u32::MAX, limit);
+    threads + wake_linux_process_futex_waits(linux_futex_key(address), u32::MAX, limit - threads)
+}
+
+fn wake_linux_futex_masked(address: u64, mask: u32, limit: u32) -> u32 {
+    let mut coordination = LINUX_FUTEX_COORDINATION.lock();
+    let woken = wake_linux_futex_masked_locked(address, mask, limit);
+    woken + wake_linux_futex_vector_threads(&mut coordination, address, mask, limit - woken)
+}
+
+fn wake_linux_futex_masked_locked(address: u64, mask: u32, limit: u32) -> u32 {
+    if address == 0 || limit == 0 {
+        return 0;
+    }
+    let mut woken = 0_u32;
+    for slot in 0..LINUX_THREAD_LIMIT {
+        if woken == limit {
+            break;
+        }
+        if X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) == LINUX_THREAD_BLOCKED
+            && X86_RUNTIME.LINUX_THREAD_WAIT_KINDS[slot].load(Ordering::SeqCst)
+                == LINUX_THREAD_WAIT_FUTEX
+            && X86_RUNTIME.LINUX_THREAD_WAIT_KEYS[slot].load(Ordering::SeqCst) == address
+            && X86_RUNTIME.LINUX_THREAD_WAIT_OUTPUTS[slot].load(Ordering::SeqCst) as u32 & mask != 0
+        {
+            X86_RUNTIME.LINUX_THREAD_WAIT_KINDS[slot]
+                .store(LINUX_THREAD_WAIT_NONE, Ordering::SeqCst);
+            X86_RUNTIME.LINUX_THREAD_WAIT_KEYS[slot].store(0, Ordering::SeqCst);
+            X86_RUNTIME.LINUX_THREAD_WAIT_OUTPUTS[slot].store(0, Ordering::SeqCst);
+            X86_RUNTIME.LINUX_THREAD_WAIT_DEADLINES[slot].store(0, Ordering::SeqCst);
+            X86_RUNTIME.LINUX_THREAD_STATES[slot].store(LINUX_THREAD_READY, Ordering::SeqCst);
+            linux_trace_futex(8, address, slot as u64);
+            woken += 1;
+        }
+    }
+    woken
+}
+
+pub(super) fn linux_thread_robust_list(tid: u64) -> Result<u64, u64> {
+    let tid = tid as i32;
+    let handle = if tid == 0 {
+        current_linux_thread_handle()
+    } else if tid > 0 {
+        linux_thread_handle_by_tid(tid as u64)
+    } else {
+        None
+    };
+    // Another process's thread: Linux finds it, then needs ptrace access to
+    // it (the same user, or CAP_SYS_PTRACE), else EPERM.
+    let Some(handle) = handle else {
+        let pid = u32::try_from(tid).map_err(|_| LINUX_ESRCH)?;
+        linux_process::live_process_status(pid).ok_or(LINUX_ESRCH)?;
+        let permitted = current_linux_credentials().is_some_and(|credentials| {
+            credentials.has(linox_credentials::capability::SYS_PTRACE)
+                || linux_process::live_process_credentials(pid)
+                    .is_some_and(|target| target.user.real == credentials.user.effective)
+        });
+        if !permitted {
+            return Err(LINUX_EPERM);
+        }
+        return Ok(linux_process_thread_runtime_state(pid)
+            .and_then(|threads| threads.iter().find(|thread| thread.tid == pid))
+            .map_or(0, |thread| thread.robust_list));
+    };
+    (linux_thread_handle(usize::from(handle.slot)) == Some(handle))
+        .then(|| {
+            X86_RUNTIME.LINUX_THREAD_ROBUST_LISTS[usize::from(handle.slot)].load(Ordering::SeqCst)
+        })
+        .ok_or(LINUX_ESRCH)
+}
+
+pub(super) fn linux_get_robust_list(tid: u64, head_address: u64, size_address: u64) -> u64 {
+    let head = match linux_thread_robust_list(tid) {
+        Ok(head) => head,
+        Err(error) => return error,
+    };
+    if !copy_to_linux_user(
+        size_address,
+        &(LINUX_ROBUST_LIST_HEAD_SIZE as u64).to_ne_bytes(),
+    ) || !copy_to_linux_user(head_address, &head.to_ne_bytes())
+    {
+        return LINUX_EFAULT;
+    }
+    0
+}
+
+fn linux_robust_futex_address(node: u64, offset: i64) -> Option<u64> {
+    if offset >= 0 {
+        node.checked_add(offset as u64)
+    } else {
+        node.checked_sub(offset.unsigned_abs())
+    }
+}
+
+fn exit_linux_robust_futex(tid: u32, node: u64, offset: i64, pi: bool) {
+    const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+    const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+    const FUTEX_WAITERS: u32 = 0x8000_0000;
+    if pi {
+        return;
+    }
+    let Some(address) = linux_robust_futex_address(node, offset) else {
+        return;
+    };
+    let mut bytes = [0_u8; size_of::<u32>()];
+    if !copy_from_linux_user(address, &mut bytes) {
+        return;
+    }
+    let value = u32::from_ne_bytes(bytes);
+    if value & FUTEX_TID_MASK != tid {
+        return;
+    }
+    let replacement = (value & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+    if copy_to_linux_user(address, &replacement.to_ne_bytes()) && value & FUTEX_WAITERS != 0 {
+        let _ = wake_linux_futex(address, 1);
+    }
+}
+
+pub(super) fn exit_linux_robust_list(tid: u32, head: u64) {
+    const ROBUST_LIST_LIMIT: usize = 2048;
+    if tid == 0 || head == 0 {
+        return;
+    }
+    let mut header = [0_u8; LINUX_ROBUST_LIST_HEAD_SIZE];
+    if !copy_from_linux_user(head, &mut header) {
+        return;
+    }
+    let mut next = u64::from_ne_bytes(header[..8].try_into().unwrap());
+    let offset = i64::from_ne_bytes(header[8..16].try_into().unwrap());
+    let pending = u64::from_ne_bytes(header[16..24].try_into().unwrap());
+    let pending_node = pending & !1;
+    for _ in 0..ROBUST_LIST_LIMIT {
+        let node = next & !1;
+        if node == head || node == 0 {
+            break;
+        }
+        let pi = next & 1 != 0;
+        let mut link = [0_u8; 8];
+        if !copy_from_linux_user(node, &mut link) {
+            break;
+        }
+        next = u64::from_ne_bytes(link);
+        if node != pending_node {
+            exit_linux_robust_futex(tid, node, offset, pi);
+        }
+    }
+    if pending_node != 0 {
+        exit_linux_robust_futex(tid, pending_node, offset, pending & 1 != 0);
+    }
+}

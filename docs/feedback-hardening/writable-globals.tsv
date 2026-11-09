@@ -14,7 +14,7 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_ABI_TEST_RESULTS	verificati
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_FUTEX_COORDINATION	process-runtime	allowlist	none	ranked-futex-wait-wake-coordination-lock
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_RESTART_DEADLINES	process-runtime	allowlist	none	ranked-restart-deadline-list
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_RETRY_SIBLING_HANDOFFS	process-runtime	allowlist	none	atomic-scheduling-heuristic-counter
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_MKWRITE_FAILED_PAGE	process-runtime	allowlist	none	atomic-page-mkwrite-sigbus-note
+interior-mutable	kernel/src/arch/x86_64/cpu/linux_mmap.rs	LINUX_MKWRITE_FAILED_PAGE	process-runtime	allowlist	none	atomic-page-mkwrite-sigbus-note
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	PRIVILEGE_ENTRY_NMI_PROBE_HITS	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	PRIVILEGE_ENTRY_NMI_PROBE_MASK	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SERVICE_FRAMES_TRANSFERRED	verification-only	allowlist	none	verification-build-only
@@ -388,7 +388,7 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_NICES	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_CPU_CYCLES	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_LAST_CPUS	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_FAULT_READ_FILE	process-runtime	allowlist	none	atomic-major-fault-flag-under-kernel-entry-lock
+interior-mutable	kernel/src/arch/x86_64/cpu/linux_user_memory.rs	LINUX_FAULT_READ_FILE	process-runtime	allowlist	none	atomic-major-fault-flag-under-kernel-entry-lock
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_TLS_EXTENTS	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_TLS_SIZES	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_THREAD_WAIT_DEADLINES	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing

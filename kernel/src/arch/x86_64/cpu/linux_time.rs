@@ -1269,3 +1269,32 @@ pub(super) fn linux_interval_timer_specification(
     }
     specification
 }
+
+pub(super) fn linux_clock_getres(clock: u64, output_address: u64) -> u64 {
+    let clock = u64::from(clock as u32);
+    if !linux_clock_supported(clock) {
+        return LINUX_EINVAL;
+    }
+    let frequency = X86_RUNTIME.ELF_PROBE_CLOCK_FREQUENCY.load(Ordering::SeqCst);
+    if frequency == 0 {
+        return LINUX_ENOSYS;
+    }
+    if output_address == 0 {
+        return 0;
+    }
+    let resolution = if matches!(
+        clock,
+        LINUX_CLOCK_REALTIME_COARSE | LINUX_CLOCK_MONOTONIC_COARSE
+    ) {
+        NANOSECONDS_PER_SECOND / LINUX_CLOCK_TICKS_PER_SECOND
+    } else {
+        NANOSECONDS_PER_SECOND.div_ceil(frequency)
+    };
+    let mut timespec = [0_u8; 16];
+    timespec[..8].copy_from_slice(&(resolution / NANOSECONDS_PER_SECOND).to_ne_bytes());
+    timespec[8..].copy_from_slice(&(resolution % NANOSECONDS_PER_SECOND).to_ne_bytes());
+    if !copy_to_linux_user(output_address, &timespec) {
+        return LINUX_EFAULT;
+    }
+    0
+}
