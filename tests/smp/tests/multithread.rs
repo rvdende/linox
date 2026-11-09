@@ -12,11 +12,13 @@
 //! 3. `sleep`: timed waits end on time while other threads run elsewhere;
 //! 4. `queue`: a channel feeds a pool of threads;
 //! 5. `spawn`: a thread other than the main one starts child processes;
-//! 6. `exit`: the main thread exits (status 7) while others spin on other
+//! 6. `tgkill`: three processes of 24 threads each signal their own 20th
+//!    thread; only that thread, in each, has the signal pending;
+//! 7. `exit`: the main thread exits (status 7) while others spin on other
 //!    CPUs, which must end them;
-//! 7. `segv`: a thread faults while others spin; the process dies (139).
-//!    Steps 6 and 7 run `EXIT_ROUNDS` times.
-//! 8. `linox-memtest returns` (userland/memtest): memory comes back after
+//! 8. `segv`: a thread faults while others spin; the process dies (139).
+//!    Steps 7 and 8 run `EXIT_ROUNDS` times.
+//! 9. `linox-memtest returns` (userland/memtest): memory comes back after
 //!    bursts of processes, fork-and-exec children and shared mappings of
 //!    removed files; `linox-memtest slab`: the kernel heap's slabs come
 //!    back after thousands of files with long paths are made and removed.
@@ -125,6 +127,9 @@ fn multithread() {
     // there: pinned to another CPU, one ran on in place and, asleep, was
     // never resumed.
     shell.expect("PIN", "linox-threadtest pin", 0, Some("THREADTEST OK pin"));
+    // A signal sent to a thread past the 16th reaches that thread's own
+    // queue, not one of another process's threads.
+    shell.expect("TGKILL", "linox-threadtest tgkill", 0, Some("THREADTEST OK tgkill"));
     // A few rounds: the process ends while its threads run elsewhere, and
     // the race that lets one of them outlive its memory takes a few tries
     // to show on a quiet host.
