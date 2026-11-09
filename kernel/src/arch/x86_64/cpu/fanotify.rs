@@ -694,7 +694,7 @@ fn linux_fanotify_object(path: &[u8]) -> Option<fanotify::Object<'_>> {
 pub(super) fn linux_fanotify_permission_check(
     number: u64,
     arguments: [u64; 3],
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
 ) -> Option<u64> {
     use crate::linux_fanotify::{Permission, FAN_ACCESS_PERM, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM};

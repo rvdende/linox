@@ -1713,7 +1713,7 @@ fn linux_descriptor_close_with_wake_inner(descriptor: u64, wake_waiters: bool) -
 }
 
 pub(super) fn linux_descriptor_close_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
 ) -> u64 {

@@ -1,8 +1,5 @@
 use alloc::vec::Vec;
-use core::arch::{
-    asm, global_asm,
-    x86_64::{__cpuid, __cpuid_count},
-};
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -10,6 +7,10 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, 
 use smoltcp::wire::IpAddress;
 
 use super::{paging, timer};
+use crate::trusted::control::{self, Cr4Feature};
+use crate::trusted::cpu_tables;
+use crate::trusted::entry::{EntryStub, FatalFrame, LinuxSyscallFrameHandle};
+use crate::trusted::msr::{self, configure_linux_syscall, restore_linux_syscall, SyscallMsrs};
 
 mod activation;
 mod architecture;
@@ -82,7 +83,7 @@ pub(crate) use architecture::{
     nmi_stack_top, privilege_stack_guard_page, privilege_stack_top, stack_guard_pages,
     task_register_denies_user_io, user_interrupt_surface_is_minimal,
 };
-use architecture::{current_entry_state, install_user_interrupt_gate, CPU_ARCHITECTURE};
+use architecture::{install_user_interrupt_gate, CPU_ARCHITECTURE};
 pub(crate) use boot_verify::*;
 pub(crate) use boot_verify_elf::*;
 pub(crate) use execution::enable_extended_user_state;
@@ -154,7 +155,7 @@ use linux_sockets::*;
 pub(crate) use linux_swapon::linux_swap_read_page;
 use linux_swapon::*;
 use linux_swapon::{linux_own_pages_reclaimable, linux_swap_out_current};
-use linux_syscall::linux_syscall_handler;
+pub(crate) use linux_syscall::linux_syscall_handler;
 pub(crate) use linux_system::*;
 use linux_thread::*;
 use linux_time::*;
@@ -179,8 +180,7 @@ use crate::{
 const KERNEL_CODE_SELECTOR: u16 = 0x08;
 const KERNEL_DATA_SELECTOR: u16 = 0x10;
 const TSS_SELECTOR: u16 = 0x18;
-pub(crate) const USER_DATA_SELECTOR: u16 = 0x2b;
-pub(crate) const USER_CODE_SELECTOR: u16 = 0x33;
+pub(crate) use crate::trusted::cpu_tables::{USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 const SYSCALL_VECTOR: u8 = 0x80;
 const CALL_BUDGET_EXHAUSTED: u64 = u64::MAX - 3;
 const DOUBLE_FAULT_IST: u8 = 1;
@@ -247,19 +247,8 @@ const CR0_NE: u64 = 1 << 5;
 const CR4_OSFXSR: u64 = 1 << 9;
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
 const CR4_OSXSAVE: u64 = 1 << 18;
-const CR4_UMIP: u64 = 1 << 11;
-const CR4_TSD: u64 = 1 << 2;
-const CR4_SMEP: u64 = 1 << 20;
-const CR4_SMAP: u64 = 1 << 21;
-const EFER_MSR: u32 = 0xc000_0080;
-const STAR_MSR: u32 = 0xc000_0081;
-const LSTAR_MSR: u32 = 0xc000_0082;
-const FMASK_MSR: u32 = 0xc000_0084;
-const FS_BASE_MSR: u32 = 0xc000_0100;
 const GS_BASE_MSR: u32 = 0xc000_0101;
 const KERNEL_GS_BASE_MSR: u32 = 0xc000_0102;
-const EFER_SCE: u64 = 1;
-const EFER_NXE: u64 = 1 << 11;
 
 static BREAKPOINT_HANDLED: AtomicBool = AtomicBool::new(false);
 static SYSCALL_STATE: AtomicU8 = AtomicU8::new(0);
@@ -519,7 +508,6 @@ struct X86RuntimeOwner {
     ELF_PROBE_TMP_FILE_GENERATIONS:
         RuntimeRef<CpuBankedAtomicArray<AtomicU32, LINUX_DEVICE_DESCRIPTOR_COUNT>>,
     ELF_PROBE_UMASK: RuntimeRef<CpuBankedAtomicU64>,
-    LINUX_BOOT_ID: RuntimeRef<LinuxBootIdCell>,
     LINUX_BOOT_ID_STATE: RuntimeRef<AtomicU8>,
     LINUX_BOOT_PROFILE_LIFECYCLE_COUNTS:
         RuntimeRef<[BankedAtomicU64; LINUX_BOOT_PROFILE_LIFECYCLE_PHASES]>,
@@ -1019,7 +1007,6 @@ static X86_RUNTIME: X86RuntimeOwner = X86RuntimeOwner {
     ELF_PROBE_TLS_SIZE: RuntimeRef(&X86_RUNTIME_BACKING_ELF_PROBE_TLS_SIZE),
     ELF_PROBE_TMP_FILE_GENERATIONS: RuntimeRef(&X86_RUNTIME_BACKING_ELF_PROBE_TMP_FILE_GENERATIONS),
     ELF_PROBE_UMASK: RuntimeRef(&X86_RUNTIME_BACKING_ELF_PROBE_UMASK),
-    LINUX_BOOT_ID: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_BOOT_ID),
     LINUX_BOOT_ID_STATE: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_BOOT_ID_STATE),
     LINUX_BOOT_PROFILE_LIFECYCLE_COUNTS: RuntimeRef(
         &X86_RUNTIME_BACKING_LINUX_BOOT_PROFILE_LIFECYCLE_COUNTS,
@@ -1723,13 +1710,7 @@ banked_atomic_integer!(
     linux_cpu_bank
 );
 
-struct LinuxBootIdCell(UnsafeCell<[u8; 37]>);
-
-unsafe impl Sync for LinuxBootIdCell {}
-
 static X86_RUNTIME_BACKING_LINUX_BOOT_ID_STATE: AtomicU8 = AtomicU8::new(0);
-static X86_RUNTIME_BACKING_LINUX_BOOT_ID: LinuxBootIdCell =
-    LinuxBootIdCell(UnsafeCell::new([0; 37]));
 static CONTROL_DISCOVERY_OVERRIDE_DOMAIN: AtomicU64 = AtomicU64::new(0);
 static CONTROL_DISCOVERY_OVERRIDE_WORD: AtomicU64 = AtomicU64::new(0);
 static CONTROL_DESCRIPTOR_OVERRIDE_DOMAIN: AtomicU64 = AtomicU64::new(0);
@@ -2597,604 +2578,19 @@ static X86_RUNTIME_BACKING_CONTAINER_CONSOLE_BYTES: [[AtomicU8; CONTAINER_CONSOL
 static X86_RUNTIME_BACKING_ELF_PROBE_SYSTEM_INIT: AtomicBool = AtomicBool::new(false);
 static SERVICE_STACK_SCRUBBED: AtomicBool = AtomicBool::new(false);
 static SERVICE_FRAMES_TRANSFERRED: AtomicBool = AtomicBool::new(false);
-const PRIVILEGE_ENTRY_NMI_STAGE_COUNT: u8 = 6;
+use crate::trusted::entry::{
+    PRIVILEGE_ENTRY_NMI_PROBE_HITS, PRIVILEGE_ENTRY_NMI_PROBE_MASK, PRIVILEGE_ENTRY_NMI_STAGE_COUNT,
+};
 const PRIVILEGE_ENTRY_NMI_STAGE_MASK: u64 = (1 << PRIVILEGE_ENTRY_NMI_STAGE_COUNT) - 1;
-static PRIVILEGE_ENTRY_NMI_PROBE_MASK: AtomicU64 = AtomicU64::new(0);
-static PRIVILEGE_ENTRY_NMI_PROBE_HITS: AtomicU8 = AtomicU8::new(0);
-global_asm!(
-    r#"
-    .text
-    .global linox_raw_copy_from_user
-    .global linox_copy_from_user_fault_begin
-    .global linox_copy_from_user_fault_end
-    .global linox_copy_from_user_fixup
-linox_raw_copy_from_user:
-    mov rax, rdx
-    test rax, rax
-    jz 2f
-    stac
-linox_copy_from_user_fault_begin:
-1:
-    mov cl, byte ptr [rsi]
-    mov byte ptr [rdi], cl
-    inc rsi
-    inc rdi
-    dec rax
-    jnz 1b
-linox_copy_from_user_fault_end:
-    clac
-2:
-    ret
-linox_copy_from_user_fixup:
-    clac
-    ret
-
-    .global linox_raw_copy_to_user
-    .global linox_copy_to_user_fault_begin
-    .global linox_copy_to_user_fault_end
-    .global linox_copy_to_user_fixup
-linox_raw_copy_to_user:
-    mov rax, rdx
-    test rax, rax
-    jz 4f
-    stac
-linox_copy_to_user_fault_begin:
-3:
-    mov cl, byte ptr [rsi]
-    mov byte ptr [rdi], cl
-    inc rsi
-    inc rdi
-    dec rax
-    jnz 3b
-linox_copy_to_user_fault_end:
-    clac
-4:
-    ret
-linox_copy_to_user_fixup:
-    clac
-    ret
-
-    .global linox_breakpoint_entry
-linox_breakpoint_entry:
-    test qword ptr [rsp + 8], 3
-    jz 1f
-    swapgs
-1:
-    clac
-    cld
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    and rsp, -16
-    call {breakpoint_handler}
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    test qword ptr [rsp + 8], 3
-    jz 2f
-    swapgs
-2:
-    iretq
-
-    .macro LINOX_EXCEPTION_NO_ERROR vector
-    .global linox_exception_\vector
-linox_exception_\vector:
-    push 0
-    push \vector
-    jmp linox_fatal_exception_common
-    .endm
-
-    .macro LINOX_EXCEPTION_ERROR vector
-    .global linox_exception_\vector
-linox_exception_\vector:
-    push \vector
-    jmp linox_fatal_exception_common
-    .endm
-
-    LINOX_EXCEPTION_NO_ERROR 0
-    LINOX_EXCEPTION_NO_ERROR 1
-    .global linox_nmi_entry
-linox_nmi_entry:
-    clac
-    cld
-    lock inc byte ptr [rip + {entry_nmi_probe_hits}]
-    push rax
-    mov rax, qword ptr [rip + {tlb_shootdown_address}]
-    test rax, rax
-    jz 1f
-    invlpg [rax]
-    lock inc dword ptr [rip + {tlb_shootdown_acknowledged}]
-1:
-    pop rax
-    iretq
-    LINOX_EXCEPTION_NO_ERROR 4
-    LINOX_EXCEPTION_NO_ERROR 5
-    LINOX_EXCEPTION_NO_ERROR 6
-    LINOX_EXCEPTION_NO_ERROR 7
-    .global linox_double_fault_entry
-linox_double_fault_entry:
-    push 8
-    jmp linox_fatal_exception_common
-    LINOX_EXCEPTION_NO_ERROR 9
-    LINOX_EXCEPTION_ERROR 10
-    LINOX_EXCEPTION_ERROR 11
-    LINOX_EXCEPTION_ERROR 12
-    LINOX_EXCEPTION_ERROR 13
-    LINOX_EXCEPTION_ERROR 14
-    LINOX_EXCEPTION_NO_ERROR 15
-    LINOX_EXCEPTION_NO_ERROR 16
-    LINOX_EXCEPTION_ERROR 17
-    LINOX_EXCEPTION_NO_ERROR 18
-    LINOX_EXCEPTION_NO_ERROR 19
-    LINOX_EXCEPTION_NO_ERROR 20
-    LINOX_EXCEPTION_ERROR 21
-    LINOX_EXCEPTION_NO_ERROR 22
-    LINOX_EXCEPTION_NO_ERROR 23
-    LINOX_EXCEPTION_NO_ERROR 24
-    LINOX_EXCEPTION_NO_ERROR 25
-    LINOX_EXCEPTION_NO_ERROR 26
-    LINOX_EXCEPTION_NO_ERROR 27
-    LINOX_EXCEPTION_NO_ERROR 28
-    LINOX_EXCEPTION_ERROR 29
-    LINOX_EXCEPTION_ERROR 30
-    LINOX_EXCEPTION_NO_ERROR 31
-
-linox_fatal_exception_common:
-    cli
-    clac
-    cld
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    test qword ptr [rsp + 144], 3
-    jnz linox_user_fault_common
-    cmp qword ptr [rsp + 120], 14
-    jne linox_fatal_exception_call
-    mov rax, [rsp + 136]
-    lea rbx, [rip + linox_copy_from_user_fault_begin]
-    cmp rax, rbx
-    jb 1f
-    lea rbx, [rip + linox_copy_from_user_fault_end]
-    cmp rax, rbx
-    jae 1f
-    lea rax, [rip + linox_copy_from_user_fixup]
-    mov [rsp + 136], rax
-    jmp linox_fault_return
-1:
-    lea rbx, [rip + linox_copy_to_user_fault_begin]
-    cmp rax, rbx
-    jb 2f
-    lea rbx, [rip + linox_copy_to_user_fault_end]
-    cmp rax, rbx
-    jae 2f
-    lea rax, [rip + linox_copy_to_user_fixup]
-    mov [rsp + 136], rax
-    jmp linox_fault_return
-2:
-    mov r12, rsp
-    mov rdi, [rsp + 128]
-    mov rsi, cr2
-    and rsp, -16
-    call {kernel_linux_cow_fault_handler}
-    test rax, rax
-    jnz linox_fault_return
-    mov rsp, r12
-linox_fatal_exception_call:
-    mov rdi, [rsp + 120]
-    mov rsi, [rsp + 128]
-    mov rdx, cr2
-    mov rcx, [rsp + 136]
-    mov r8, rsp
-    and rsp, -16
-    call {fatal_exception_handler}
-    ud2
-
-linox_user_fault_common:
-    swapgs
-    mov r12, rsp
-    mov rdi, rsp
-    and rsp, -16
-    call {user_fault_handler}
-    cmp rax, -1
-    je linox_user_return_kernel
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    add rsp, 16
-    swapgs
-    iretq
-linox_fault_return:
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    add rsp, 16
-    iretq
-
-    .section .rodata
-    .align 8
-    .global linox_exception_entries
-linox_exception_entries:
-    .quad linox_exception_0
-    .quad linox_exception_1
-    .quad linox_nmi_entry
-    .quad linox_breakpoint_entry
-    .quad linox_exception_4
-    .quad linox_exception_5
-    .quad linox_exception_6
-    .quad linox_exception_7
-    .quad linox_double_fault_entry
-    .quad linox_exception_9
-    .quad linox_exception_10
-    .quad linox_exception_11
-    .quad linox_exception_12
-    .quad linox_exception_13
-    .quad linox_exception_14
-    .quad linox_exception_15
-    .quad linox_exception_16
-    .quad linox_exception_17
-    .quad linox_exception_18
-    .quad linox_exception_19
-    .quad linox_exception_20
-    .quad linox_exception_21
-    .quad linox_exception_22
-    .quad linox_exception_23
-    .quad linox_exception_24
-    .quad linox_exception_25
-    .quad linox_exception_26
-    .quad linox_exception_27
-    .quad linox_exception_28
-    .quad linox_exception_29
-    .quad linox_exception_30
-    .quad linox_exception_31
-
-    .text
-    .global linox_user_enter
-linox_user_enter:
-    mov r10, [rsp + 8]
-    mov r11, [rsp + 16]
-    push rbx
-    push rbp
-    push r12
-    push r13
-    push r14
-    push r15
-    mov gs:[{entry_return_stack}], rsp
-    mov r14, [rsp + 72]
-    mov rbx, rdx
-    push {user_data}
-    push rsi
-    push 0x202
-    push {user_code}
-    push rdi
-    swapgs
-    iretq
-
-    .global linox_process_user_enter
-linox_process_user_enter:
-    push rbx
-    push rbp
-    push r12
-    push r13
-    push r14
-    push r15
-    mov gs:[{entry_return_stack}], rsp
-    push {user_data}
-    push rsi
-    push rcx
-    push {user_code}
-    push rdi
-    mov rax, rdx
-    mov rbx, [rax + 8]
-    mov rcx, [rax + 16]
-    mov rdx, [rax + 24]
-    mov rsi, [rax + 32]
-    mov rdi, [rax + 40]
-    mov rbp, [rax + 48]
-    mov r8, [rax + 56]
-    mov r9, [rax + 64]
-    mov r10, [rax + 72]
-    mov r11, [rax + 80]
-    mov r12, [rax + 88]
-    mov r13, [rax + 96]
-    mov r14, [rax + 104]
-    mov r15, [rax + 112]
-    mov rax, [rax]
-    swapgs
-    iretq
-
-    .global linox_syscall_entry
-linox_syscall_entry:
-    cli
-    swapgs
-    clac
-    cld
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rsp
-    mov rdi, rax
-    mov rsi, [r12 + 72]
-    mov rdx, r12
-    and rsp, -16
-    call {syscall_handler}
-    cmp rax, -1
-    je linox_user_return_kernel
-    mov rsp, r12
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    swapgs
-    iretq
-
-    .global linox_linux_syscall_entry
-linox_linux_syscall_entry:
-    cli
-    swapgs
-    clac
-    cld
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 0
-    jnc 1f
-    int 2
-1:
-    mov gs:[{entry_user_rsp}], rsp
-    mov gs:[{entry_user_rip}], rcx
-    mov gs:[{entry_user_rflags}], r11
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 1
-    jnc 2f
-    int 2
-2:
-    mov rsp, gs:[{entry_return_stack}]
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 2
-    jnc 3f
-    int 2
-3:
-    push rdi
-    push rsi
-    push rdx
-    push r8
-    push r9
-    push r10
-    push rbx
-    push rbp
-    push r12
-    push r13
-    push r14
-    push r15
-    mov gs:[{entry_kernel_frame}], rsp
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 3
-    jnc 4f
-    int 2
-4:
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, gs:[{entry_user_rsp}]
-    mov rcx, gs:[{entry_user_rip}]
-    mov r8, gs:[{entry_user_rflags}]
-    and rsp, -16
-    call {linux_syscall_handler}
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 4
-    jnc 5f
-    int 2
-5:
-    cmp rax, {linux_return_to_kernel}
-    je linox_user_return_kernel
-    cmp rax, {linux_return_from_iret}
-    je linox_linux_iret_return
-    mov gs:[{entry_syscall_result}], rax
-    mov rsp, gs:[{entry_kernel_frame}]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    pop rsi
-    pop rdi
-    mov rax, gs:[{entry_syscall_result}]
-    mov rcx, gs:[{entry_user_rip}]
-    shr rcx, 47
-    jne linox_invalid_user_return
-    mov rcx, gs:[{entry_user_rsp}]
-    shr rcx, 47
-    jne linox_invalid_user_return
-    mov rcx, gs:[{entry_user_rip}]
-    mov r11, gs:[{entry_user_rflags}]
-    lock btr qword ptr [rip + {entry_nmi_probe_mask}], 5
-    jnc 6f
-    int 2
-6:
-    mov rsp, gs:[{entry_user_rsp}]
-    swapgs
-    sysretq
-linox_invalid_user_return:
-    mov rsp, gs:[{entry_return_stack}]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    ret
-linox_linux_iret_return:
-    mov rsp, gs:[{entry_kernel_frame}]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    pop rsi
-    pop rdi
-    push {user_data}
-    push gs:[{entry_user_rsp}]
-    push gs:[{entry_user_rflags}]
-    push {user_code}
-    push gs:[{entry_user_rip}]
-    mov rax, gs:[{entry_signal_rax}]
-    mov rcx, gs:[{entry_signal_rcx}]
-    mov r11, gs:[{entry_signal_r11}]
-    swapgs
-    iretq
-linox_user_return_kernel:
-    mov rsp, gs:[{entry_return_stack}]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-    pop rbx
-    ret
-"#,
-    breakpoint_handler = sym breakpoint_handler,
-    fatal_exception_handler = sym fatal_exception_handler,
-    kernel_linux_cow_fault_handler = sym kernel_linux_cow_fault_handler,
-    user_fault_handler = sym user_fault_handler,
-    syscall_handler = sym syscall_handler,
-    linux_syscall_handler = sym linux_syscall_handler,
-    entry_return_stack = const 0,
-    entry_user_rsp = const 8,
-    entry_user_rip = const 16,
-    entry_user_rflags = const 24,
-    entry_kernel_frame = const 32,
-    entry_syscall_result = const 40,
-    entry_signal_rax = const 48,
-    entry_signal_rcx = const 56,
-    entry_signal_r11 = const 64,
-    entry_nmi_probe_mask = sym PRIVILEGE_ENTRY_NMI_PROBE_MASK,
-    entry_nmi_probe_hits = sym PRIVILEGE_ENTRY_NMI_PROBE_HITS,
-    tlb_shootdown_address = sym super::smp::TLB_SHOOTDOWN_ADDRESS,
-    tlb_shootdown_acknowledged = sym super::smp::TLB_SHOOTDOWN_ACKNOWLEDGED,
-    linux_return_to_kernel = const LINUX_RETURN_TO_KERNEL as i64,
-    linux_return_from_iret = const LINUX_RETURN_FROM_IRET as i64,
-    user_data = const USER_DATA_SELECTOR as u64,
-    user_code = const USER_CODE_SELECTOR as u64,
-);
-
-extern "C" {
-    static linox_exception_entries: [usize; 32];
-    fn linox_syscall_entry();
-    fn linox_linux_syscall_entry();
-}
-
-unsafe fn enter_linux_process(entry: usize, stack: usize, general: *const u64, rflags: u64) {
-    let entry_state = current_entry_state();
-    let previous_return_stack = (*entry_state).return_stack;
-    process_user_enter(entry, stack, general, rflags);
-    (*entry_state).return_stack = previous_return_stack;
-}
-
-/// Enters a Linux process's user mode until it returns to the kernel. The
+/// Enters a Linux process's user mode until one of its system calls
+/// returns to the kernel (`trusted::entry::enter_process_user`). The
 /// kernel-entry lock is released while it runs user code and held again on
 /// the way back (`sync::kernel_entry_leave_to_user`).
-///
-/// # Safety
-///
-/// As for `linox_process_user_enter`.
-pub(super) unsafe fn process_user_enter(
-    entry: usize,
-    stack: usize,
-    general: *const u64,
-    rflags: u64,
-) {
+pub(super) fn process_user_enter(entry: usize, stack: usize, general: &[u64; 15], rflags: u64) {
     crate::sync::kernel_entry_leave_to_user();
     crate::cpu_time::leave_for_user();
     set_user_time_stamp_access(linux_user_time_stamp_allowed());
-    linox_process_user_enter(entry, stack, general, rflags);
+    let _ = crate::trusted::entry::enter_process_user(entry, stack, general, rflags);
     // A return the entry stub refused (a non-canonical user address) comes
     // back here without passing the system call's lock re-entry.
     set_user_time_stamp_access(true);
@@ -3206,14 +2602,7 @@ pub(super) unsafe fn process_user_enter(
 /// gets a kernel stack of its own (see `activation`); a thread dispatched to
 /// another CPU, and any entry when no stack can be allocated, runs below the
 /// caller's frames as before.
-unsafe fn enter_linux_runtime_process(
-    entry: usize,
-    stack: usize,
-    general: *const u64,
-    rflags: u64,
-) {
-    let entry_state = current_entry_state();
-    let previous_return_stack = (*entry_state).return_stack;
+fn enter_linux_runtime_process(entry: usize, stack: usize, general: &[u64; 15], rflags: u64) {
     LINUX_PROCESS_SLICE[linux_cpu_slot()].store(0, Ordering::SeqCst);
     let entered = X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && current_linux_runtime_cpu_index() == 0
@@ -3241,11 +2630,13 @@ unsafe fn enter_linux_runtime_process(
         }
         process_user_enter(entry, stack, general, rflags);
     }
-    (*entry_state).return_stack = previous_return_stack;
 }
 
+/// Enters a native domain's ring-3 code (`trusted::entry::enter_native_user`)
+/// once the loaded address space is checked to map `entry` and `stack` as
+/// its code and stack; false without entering otherwise.
 #[allow(clippy::too_many_arguments)]
-unsafe fn enter_user(
+fn enter_user(
     entry: usize,
     stack: usize,
     host_handle: u64,
@@ -3256,70 +2647,24 @@ unsafe fn enter_user(
     service_identity: u64,
     root_handle: u64,
 ) -> bool {
-    if !address_space::current_user_entry_context_is_valid(entry as u64, stack as u64) {
-        return false;
-    }
-    linox_user_enter(
-        entry,
-        stack,
-        host_handle,
-        console_handle,
-        ipc_handle,
-        identity,
-        service_domain,
-        service_identity,
-        root_handle,
-    );
-    true
-}
-
-extern "sysv64" {
-    fn linox_raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize;
-    fn linox_raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize;
-    fn linox_user_enter(
-        entry: usize,
-        stack: usize,
-        host_handle: u64,
-        console_handle: u64,
-        ipc_handle: u64,
-        identity: u64,
-        service_domain: u64,
-        service_identity: u64,
-        root_handle: u64,
-    );
-    fn linox_process_user_enter(entry: usize, stack: usize, general: *const u64, rflags: u64);
-}
-
-pub(crate) unsafe fn raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize {
-    linox_raw_copy_from_user(output, input, length)
-}
-
-pub(crate) unsafe fn raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize {
-    linox_raw_copy_to_user(output, input, length)
+    address_space::current_user_entry_context_is_valid(entry as u64, stack as u64)
+        && crate::trusted::entry::enter_native_user(
+            entry,
+            stack,
+            crate::trusted::entry::NativeEntryValues {
+                host_handle,
+                console_handle,
+                ipc_handle,
+                identity,
+                service_domain,
+                service_identity,
+                root_handle,
+            },
+        )
 }
 
 pub(crate) fn verify_user_copy_fault_fixups(mapped_end: u64, unmapped: u64) -> bool {
-    let mut output = [0_u8; 2];
-    let input = [0x5a_u8, 0xa5];
-    let partial_from = unsafe {
-        raw_copy_from_user(
-            output.as_mut_ptr(),
-            (mapped_end - 1) as *const u8,
-            output.len(),
-        )
-    };
-    let partial_to =
-        unsafe { raw_copy_to_user((mapped_end - 1) as *mut u8, input.as_ptr(), input.len()) };
-    let rejected_from =
-        unsafe { raw_copy_from_user(output.as_mut_ptr(), unmapped as *const u8, output.len()) };
-    let rejected_to = unsafe { raw_copy_to_user(unmapped as *mut u8, input.as_ptr(), input.len()) };
-    let flags: u64;
-    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(nomem)) };
-    partial_from == 1
-        && partial_to == 1
-        && rejected_from == output.len()
-        && rejected_to == input.len()
-        && flags & (1 << 18) == 0
+    crate::trusted::user_copy::verify_fault_fixups(mapped_end, unmapped)
 }
 
 pub(crate) fn enable_supervisor_execution_prevention() -> bool {
@@ -3328,13 +2673,7 @@ pub(crate) fn enable_supervisor_execution_prevention() -> bool {
     {
         return false;
     }
-    let mut cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        cr4 |= CR4_SMEP;
-        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    supervisor_execution_prevention_enabled()
+    control::enable_cr4_feature(Cr4Feature::Smep)
 }
 
 pub(crate) fn enable_execute_disable() -> bool {
@@ -3343,26 +2682,15 @@ pub(crate) fn enable_execute_disable() -> bool {
     {
         return false;
     }
-    unsafe {
-        let efer = read_msr(EFER_MSR);
-        write_msr(EFER_MSR, efer | EFER_NXE);
-        read_msr(EFER_MSR) & EFER_NXE != 0
-    }
+    msr::enable_execute_disable()
 }
 
 pub(crate) fn execute_disable_enabled() -> bool {
-    if __cpuid(CPUID_EXTENDED_MAX).eax < CPUID_EXTENDED_FEATURES {
-        return false;
-    }
-    unsafe { read_msr(EFER_MSR) & EFER_NXE != 0 }
+    __cpuid(CPUID_EXTENDED_MAX).eax >= CPUID_EXTENDED_FEATURES && msr::execute_disable_enabled()
 }
 
 pub(crate) fn supervisor_execution_prevention_enabled() -> bool {
-    let cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    cr4 & CR4_SMEP != 0
+    control::cr4_feature_enabled(Cr4Feature::Smep)
 }
 
 pub(crate) fn enable_supervisor_access_prevention() -> bool {
@@ -3371,26 +2699,11 @@ pub(crate) fn enable_supervisor_access_prevention() -> bool {
     {
         return false;
     }
-    let mut cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        cr4 |= CR4_SMAP;
-        asm!(
-            "mov cr4, {cr4}",
-            "clac",
-            cr4 = in(reg) cr4,
-            options(nomem, nostack)
-        );
-    }
-    supervisor_access_prevention_enabled()
+    control::enable_cr4_feature(Cr4Feature::Smap)
 }
 
 pub(crate) fn supervisor_access_prevention_enabled() -> bool {
-    let cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    cr4 & CR4_SMAP != 0
+    control::cr4_feature_enabled(Cr4Feature::Smap)
 }
 
 pub(crate) fn enable_user_mode_instruction_prevention() -> bool {
@@ -3399,13 +2712,7 @@ pub(crate) fn enable_user_mode_instruction_prevention() -> bool {
     {
         return false;
     }
-    let mut cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        cr4 |= CR4_UMIP;
-        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    user_mode_instruction_prevention_enabled()
+    control::enable_cr4_feature(Cr4Feature::Umip)
 }
 
 /// Lets this CPU's user mode read the timestamp counter, or makes rdtsc
@@ -3413,17 +2720,7 @@ pub(crate) fn enable_user_mode_instruction_prevention() -> bool {
 /// with PR_SET_TSC runs: set as the CPU leaves for such a process's user
 /// mode, cleared as it comes back, and written only when it changes.
 pub(super) fn set_user_time_stamp_access(allowed: bool) {
-    let mut cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    if (cr4 & CR4_TSD == 0) == allowed {
-        return;
-    }
-    cr4 ^= CR4_TSD;
-    unsafe {
-        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
+    control::set_user_time_stamp_access(allowed);
 }
 
 /// Whether the Linux process this CPU is about to run in user mode may read
@@ -3434,15 +2731,11 @@ pub(super) fn linux_user_time_stamp_allowed() -> bool {
 }
 
 pub(crate) fn user_mode_instruction_prevention_enabled() -> bool {
-    let cr4: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
-    cr4 & CR4_UMIP != 0
+    control::cr4_feature_enabled(Cr4Feature::Umip)
 }
 
 pub(crate) fn initialize_user_call_gate() -> bool {
-    install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize)
+    install_user_interrupt_gate(SYSCALL_VECTOR, EntryStub::native_system_call())
         && user_interrupt_surface_is_minimal()
 }
 
@@ -3596,7 +2889,7 @@ struct LinuxCloneRequest {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(C)]
-struct LinuxSyscallFrame {
+pub(crate) struct LinuxSyscallFrame {
     r15: u64,
     r14: u64,
     r13: u64,
@@ -3974,68 +3267,22 @@ impl LinuxTlsContext {
     }
 }
 
-fn configure_linux_syscall() -> Option<[u64; 5]> {
-    // SYSRET loads SS from STAR[63:48] + 8 and CS from STAR[63:48] + 16.
-    // Intel forces RPL 3 on both selectors, but AMD copies SS unchanged, so
-    // the base must already carry RPL 3 or the next IRET to user mode faults.
-    let sysret_base = u64::from(USER_DATA_SELECTOR) - 8;
-    let star = (sysret_base << 48) | (u64::from(KERNEL_CODE_SELECTOR) << 32);
-    let lstar = linox_linux_syscall_entry as *const () as u64;
-    let fmask = (1_u64 << 9) | (1_u64 << 10) | (1_u64 << 18);
-    unsafe {
-        let saved = [
-            read_msr(EFER_MSR),
-            read_msr(STAR_MSR),
-            read_msr(LSTAR_MSR),
-            read_msr(FMASK_MSR),
-            read_msr(FS_BASE_MSR),
-        ];
-        write_msr(STAR_MSR, star);
-        write_msr(LSTAR_MSR, lstar);
-        write_msr(FMASK_MSR, fmask);
-        write_msr(EFER_MSR, read_msr(EFER_MSR) | EFER_SCE);
-        let valid = read_msr(STAR_MSR) == star
-            && read_msr(LSTAR_MSR) == lstar
-            && read_msr(FMASK_MSR) == fmask
-            && read_msr(EFER_MSR) & EFER_SCE != 0;
-        if valid {
-            Some(saved)
-        } else {
-            let _ = restore_linux_syscall(saved);
-            None
-        }
-    }
-}
-
-fn restore_linux_syscall(saved: [u64; 5]) -> bool {
-    unsafe {
-        write_msr(FS_BASE_MSR, saved[4]);
-        write_msr(FMASK_MSR, saved[3]);
-        write_msr(LSTAR_MSR, saved[2]);
-        write_msr(STAR_MSR, saved[1]);
-        write_msr(EFER_MSR, saved[0]);
-        read_msr(EFER_MSR) == saved[0]
-            && read_msr(STAR_MSR) == saved[1]
-            && read_msr(LSTAR_MSR) == saved[2]
-            && read_msr(FMASK_MSR) == saved[3]
-            && read_msr(FS_BASE_MSR) == saved[4]
-    }
-}
-
 pub(crate) fn verify_breakpoint() -> bool {
     BREAKPOINT_HANDLED.store(false, Ordering::SeqCst);
-    // SAFETY: Vector 3 is installed as a present interrupt gate and its handler
-    // preserves the interrupted register state before returning with IRETQ.
-    unsafe { asm!("int3", options(nomem, nostack)) };
+    control::raise_breakpoint();
     BREAKPOINT_HANDLED.load(Ordering::SeqCst)
 }
 
-extern "sysv64" fn breakpoint_handler() {
+pub(crate) extern "sysv64" fn breakpoint_handler() {
     BREAKPOINT_HANDLED.store(true, Ordering::SeqCst);
     serial_write("linox: breakpoint exception handled\r\n");
 }
 
-extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
+pub(crate) extern "sysv64" fn syscall_handler(
+    number: u64,
+    capability: u64,
+    frame: &mut UserTrapFrame,
+) -> u64 {
     let _kernel_entry = crate::sync::kernel_entry_lock();
     let cpu = current_cpu_index();
     let Some(probe_state) = X86_RUNTIME.PROCESS_CHILD_PROBE_STATE.get(cpu) else {
@@ -4043,21 +3290,19 @@ extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut Use
     };
     match probe_state.load(Ordering::SeqCst) {
         PROCESS_CHILD_PROBE_EXPECT_CONTEXT => {
-            let valid = (!frame.is_null())
-                .then(|| unsafe { &*frame })
-                .is_some_and(|frame| {
-                    frame
-                        .process_general_registers(number)
-                        .into_iter()
-                        .zip(&X86_RUNTIME.PROCESS_CHILD_EXPECTED_REGISTERS[cpu])
-                        .all(|(observed, expected)| observed == expected.load(Ordering::SeqCst))
-                        && active_fs_base()
-                            == X86_RUNTIME
-                                .PROCESS_CHILD_EXPECTED_FS_BASE
-                                .get(cpu)
-                                .expect("current processor index is bounded")
-                                .load(Ordering::SeqCst)
-                });
+            let valid = Some(&*frame).is_some_and(|frame| {
+                frame
+                    .process_general_registers(number)
+                    .into_iter()
+                    .zip(&X86_RUNTIME.PROCESS_CHILD_EXPECTED_REGISTERS[cpu])
+                    .all(|(observed, expected)| observed == expected.load(Ordering::SeqCst))
+                    && active_fs_base()
+                        == X86_RUNTIME
+                            .PROCESS_CHILD_EXPECTED_FS_BASE
+                            .get(cpu)
+                            .expect("current processor index is bounded")
+                            .load(Ordering::SeqCst)
+            });
             X86_RUNTIME
                 .PROCESS_CHILD_CONTEXT_VALID
                 .get(cpu)
@@ -4074,18 +3319,15 @@ extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut Use
             return if valid { 0 } else { u64::MAX };
         }
         PROCESS_CHILD_PROBE_EXPECT_EXIT => {
-            let exit_status = (!frame.is_null())
-                .then(|| unsafe { &*frame })
-                .filter(|_| {
-                    number == LINUX_EXIT_SYSCALL
-                        && active_fs_base()
-                            == X86_RUNTIME
-                                .PROCESS_CHILD_EXPECTED_FS_BASE
-                                .get(cpu)
-                                .expect("current processor index is bounded")
-                                .load(Ordering::SeqCst)
-                })
-                .and_then(|frame| u8::try_from(frame.process_general_registers(number)[5]).ok());
+            let exit_status = (number == LINUX_EXIT_SYSCALL
+                && active_fs_base()
+                    == X86_RUNTIME
+                        .PROCESS_CHILD_EXPECTED_FS_BASE
+                        .get(cpu)
+                        .expect("current processor index is bounded")
+                        .load(Ordering::SeqCst))
+            .then_some(&*frame)
+            .and_then(|frame| u8::try_from(frame.process_general_registers(number)[5]).ok());
             if let Some(status) = exit_status {
                 X86_RUNTIME
                     .PROCESS_CHILD_EXIT_STATUS
@@ -4107,7 +3349,7 @@ extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut Use
     // Termination must remain available after a domain exhausts its budget.
     if number == 2 {
         SYSCALL_STATE.fetch_or(4, Ordering::SeqCst);
-        return exit_result(caller_domain, frame);
+        return exit_result(caller_domain, Some(frame));
     }
     if !domain::begin_operation(caller_domain) {
         return u64::MAX;
@@ -4115,7 +3357,7 @@ extern "sysv64" fn syscall_handler(number: u64, capability: u64, frame: *mut Use
     let result = if !domain::charge_call(caller_domain) {
         CALL_BUDGET_EXHAUSTED
     } else {
-        dispatch_charged_call(number, capability, caller_domain, frame)
+        dispatch_charged_call(number, capability, caller_domain, Some(frame))
     };
     if !domain::end_operation(caller_domain) {
         return u64::MAX;
@@ -4478,12 +3720,12 @@ static X86_MUTABLE_RUNTIME: X86MutableRuntimeOwner = X86MutableRuntimeOwner {
     signal_context: [const { UnsafeCell::new(LinuxSignalContext::ZERO) }; LINUX_CPU_BANK_LIMIT],
 };
 
-extern "sysv64" fn user_fault_handler(frame: *mut UserFaultFrame) -> u64 {
+pub(crate) extern "sysv64" fn user_fault_handler(frame: &mut UserFaultFrame) -> u64 {
     set_user_time_stamp_access(true);
     crate::cpu_time::back_from_user();
     crate::sync::kernel_entry_return_from_user();
     let result = crate::linux_profile::span(crate::linux_profile::Span::UserFault, || {
-        handle_user_fault(frame)
+        handle_user_fault(core::ptr::from_mut(frame))
     });
     // Back to user mode unless the fault returns to the kernel.
     if result != u64::MAX {
@@ -4507,15 +3749,20 @@ fn resume_action(action: RuntimeAction) -> u64 {
 }
 
 pub(crate) fn active_fs_base() -> u64 {
-    unsafe { read_msr(FS_BASE_MSR) }
+    msr::fs_base()
 }
 
 pub(crate) fn verify_user_fs_base_installation() -> bool {
     let saved = active_fs_base();
     let first_installed = install_user_fs_base(0x1110);
     let second_installed = install_user_fs_base(0x2220);
-    unsafe { write_msr(FS_BASE_MSR, saved) };
-    first_installed && second_installed && active_fs_base() == saved
+    msr::set_fs_base(saved) && first_installed && second_installed
+}
+
+/// The kernel page-fault path's copy-on-write handler, as the exception
+/// stub in `trusted::entry` calls it.
+pub(crate) extern "sysv64" fn kernel_cow_fault_handler(error: u64, address: u64) -> u64 {
+    kernel_linux_cow_fault_handler(error, address)
 }
 
 fn install_current_scheduler_fs_base() -> bool {
@@ -4523,11 +3770,7 @@ fn install_current_scheduler_fs_base() -> bool {
 }
 
 fn install_user_fs_base(fs_base: u64) -> bool {
-    if fs_base >= 1 << 47 {
-        return false;
-    }
-    unsafe { write_msr(FS_BASE_MSR, fs_base) };
-    active_fs_base() == fs_base
+    msr::set_fs_base(fs_base)
 }
 
 pub(crate) fn activate_user_context(root: u64, fs_base: u64) -> bool {
@@ -4559,25 +3802,7 @@ pub(crate) fn activate_user_root(root: u64) -> bool {
     {
         return false;
     }
-    let active: u64;
-    super::smp::note_active_root(root);
-    unsafe {
-        asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
-        asm!("mov {}, cr3", out(reg) active, options(nomem, nostack, preserves_flags));
-    }
-    super::smp::note_root_loaded();
-    active & ADDRESS_MASK == root
-}
-
-unsafe fn read_msr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
-    (u64::from(high) << 32) | u64::from(low)
-}
-
-unsafe fn write_msr(msr: u32, value: u64) {
-    asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32, options(nomem, nostack, preserves_flags));
+    crate::trusted::root::load_user_root(&frames) & ADDRESS_MASK == root
 }
 
 /// Set while a fatal kernel exception is being reported, so a fault in the
@@ -4602,12 +3827,12 @@ fn fatal_write_hex(label: &str, value: u64) {
 /// saved register, control registers, kernel return addresses found on the
 /// interrupted stack (with the image base, for symbolizing them), and then
 /// the Linux state, which is read last since it is the likeliest to fault.
-extern "sysv64" fn fatal_exception_handler(
+pub(crate) extern "sysv64" fn fatal_exception_handler(
     vector: u64,
     error: u64,
     fault_address: u64,
     instruction: u64,
-    frame: *const u64,
+    frame: &FatalFrame,
 ) -> ! {
     if FATAL_EXCEPTION_ACTIVE.swap(true, Ordering::SeqCst) {
         fatal_write_hex("\r\nlinox: nested fatal exception vector ", vector);
@@ -4627,9 +3852,7 @@ extern "sysv64" fn fatal_exception_handler(
     if vector == 14 {
         fatal_write_hex(" cr2 ", fault_address);
     }
-    // SAFETY: the entry stub pushed the 15 general registers, then the vector
-    // and error code, and the CPU pushed rip, cs, rflags, rsp and ss.
-    let saved = |index: usize| unsafe { frame.add(index).read_volatile() };
+    let saved = |index: usize| frame.0[index];
     crate::serial_write_raw(b"\r\nlinox: registers");
     for (index, name) in REGISTERS.iter().enumerate() {
         if index % 5 == 0 {
@@ -4642,13 +3865,7 @@ extern "sysv64" fn fatal_exception_handler(
     fatal_write_hex(" rflags ", saved(19));
     fatal_write_hex(" rsp ", saved(20));
     fatal_write_hex(" ss ", saved(21));
-    let (cr0, cr3, cr4): (u64, u64, u64);
-    // SAFETY: reading control registers has no side effects.
-    unsafe {
-        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-    }
+    let [cr0, _, cr3, cr4] = control::registers();
     fatal_write_hex("\r\n  cr0 ", cr0);
     fatal_write_hex(" cr2 ", fault_address);
     fatal_write_hex(" cr3 ", cr3);
@@ -4676,9 +3893,10 @@ extern "sysv64" fn fatal_exception_handler(
             if !crate::arch::x86_64::paging::kernel_address_is_mapped(address) {
                 break;
             }
-            // SAFETY: the page holding `address` is mapped, checked above; this is a
-            // kernel stack address, never a userspace one.
-            let value = unsafe { core::ptr::read_volatile(address as *const u64) };
+            // The report halts: the stack's owner never runs again.
+            let Some(value) = crate::trusted::crash::stack_word(address) else {
+                break;
+            };
             if value > image_base && value < image_base + image_size {
                 crate::serial_write_raw(b" ");
                 fatal_write_hex("", value);

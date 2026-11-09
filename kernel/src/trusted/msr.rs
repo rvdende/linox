@@ -1,6 +1,5 @@
-//! The model-specific registers the kernel reads and writes outside the CPU
-//! core (`arch/x86_64/cpu`, which keeps its own accessors for the system
-//! call and segment MSRs).
+//! The model-specific registers the kernel reads and writes (the CPU
+//! tables' GS_BASE, KERNEL_GS_BASE and TSC_AUX are `trusted::cpu_tables`').
 //!
 //! The registers are named, not numbered, because what makes an MSR write
 //! dangerous depends on the register: EFER can turn off long mode or NX,
@@ -12,7 +11,16 @@
 //!   [`write_x2apic`]). Like the same registers in xAPIC mode (MMIO), they
 //!   reach the interrupt controller and never memory;
 //! - the page attribute table, written only with the kernel's one layout
-//!   by [`install_write_combining_pat`].
+//!   by [`install_write_combining_pat`];
+//! - FS_BASE ([`fs_base`], [`set_fs_base`]): user mode's thread pointer.
+//!   The kernel itself never uses FS, so any canonical value is safe for
+//!   it;
+//! - EFER.NXE ([`enable_execute_disable`]): turned on, never off, so page
+//!   table entries' NX bits take effect;
+//! - the `syscall` MSRs ([`configure_linux_syscall`]): STAR with the
+//!   kernel's and user selectors, LSTAR with `trusted::entry`'s stub only,
+//!   the flag mask, and EFER.SCE; and putting back what the CPU held
+//!   before ([`restore_linux_syscall`]).
 //!
 //! Reading an MSR the processor does not implement raises #GP, which the
 //! kernel reports as a fatal exception: a crash, not a corruption.
@@ -111,4 +119,118 @@ pub(crate) fn install_write_combining_pat() {
             options(nostack, preserves_flags),
         );
     }
+}
+
+const IA32_EFER: u32 = 0xc000_0080;
+const IA32_STAR: u32 = 0xc000_0081;
+const IA32_LSTAR: u32 = 0xc000_0082;
+const IA32_FMASK: u32 = 0xc000_0084;
+const IA32_FS_BASE: u32 = 0xc000_0100;
+const EFER_SCE: u64 = 1;
+const EFER_NXE: u64 = 1 << 11;
+/// What `syscall` clears in RFLAGS on entry: IF, DF and AC.
+const SYSCALL_FLAG_MASK: u64 = (1 << 9) | (1 << 10) | (1 << 18);
+
+/// Writes one of the registers the module comment lists, with a value it
+/// allows (each caller says which).
+fn write(msr: u32, value: u64) {
+    // SAFETY: the callers write only the registers and values the module
+    // comment lists; none of them makes the processor reach memory the
+    // kernel does not expect it to.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// FS_BASE: user mode's thread pointer as loaded.
+pub(crate) fn fs_base() -> u64 {
+    read(IA32_FS_BASE)
+}
+
+/// Loads `value` into FS_BASE if it is a canonical address; whether it
+/// reads back so.
+pub(crate) fn set_fs_base(value: u64) -> bool {
+    if (1 << 47..0xffff_8000_0000_0000).contains(&value) {
+        return false;
+    }
+    write(IA32_FS_BASE, value);
+    fs_base() == value
+}
+
+/// Sets EFER.NXE; whether it reads back set. The caller checked CPUID.
+pub(crate) fn enable_execute_disable() -> bool {
+    write(IA32_EFER, read(IA32_EFER) | EFER_NXE);
+    execute_disable_enabled()
+}
+
+/// Whether EFER.NXE is set.
+pub(crate) fn execute_disable_enabled() -> bool {
+    read(IA32_EFER) & EFER_NXE != 0
+}
+
+/// The `syscall` MSRs (EFER, STAR, LSTAR, FMASK) and FS_BASE as they were
+/// before [`configure_linux_syscall`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SyscallMsrs {
+    efer: u64,
+    star: u64,
+    lstar: u64,
+    fmask: u64,
+    fs_base: u64,
+}
+
+/// Points `syscall` at `trusted::entry`'s Linux system-call stub, with the
+/// kernel's selectors and flag mask, and enables it (EFER.SCE). Returns
+/// what the registers held before, or None (with them put back) if they
+/// do not read back as written.
+pub(crate) fn configure_linux_syscall() -> Option<SyscallMsrs> {
+    use super::cpu_tables::{KERNEL_CODE_SELECTOR, USER_DATA_SELECTOR};
+    // SYSRET loads SS from STAR[63:48] + 8 and CS from STAR[63:48] + 16.
+    // Intel forces RPL 3 on both selectors, but AMD copies SS unchanged, so
+    // the base must already carry RPL 3 or the next IRET to user mode faults.
+    let sysret_base = u64::from(USER_DATA_SELECTOR) - 8;
+    let star = (sysret_base << 48) | (u64::from(KERNEL_CODE_SELECTOR) << 32);
+    let lstar = super::entry::linux_system_call_entry();
+    let saved = SyscallMsrs {
+        efer: read(IA32_EFER),
+        star: read(IA32_STAR),
+        lstar: read(IA32_LSTAR),
+        fmask: read(IA32_FMASK),
+        fs_base: fs_base(),
+    };
+    write(IA32_STAR, star);
+    write(IA32_LSTAR, lstar);
+    write(IA32_FMASK, SYSCALL_FLAG_MASK);
+    write(IA32_EFER, read(IA32_EFER) | EFER_SCE);
+    let valid = read(IA32_STAR) == star
+        && read(IA32_LSTAR) == lstar
+        && read(IA32_FMASK) == SYSCALL_FLAG_MASK
+        && read(IA32_EFER) & EFER_SCE != 0;
+    if valid {
+        Some(saved)
+    } else {
+        let _ = restore_linux_syscall(saved);
+        None
+    }
+}
+
+/// Puts back the registers [`configure_linux_syscall`] found; whether they
+/// read back so.
+pub(crate) fn restore_linux_syscall(saved: SyscallMsrs) -> bool {
+    write(IA32_FS_BASE, saved.fs_base);
+    write(IA32_FMASK, saved.fmask);
+    write(IA32_LSTAR, saved.lstar);
+    write(IA32_STAR, saved.star);
+    write(IA32_EFER, saved.efer);
+    read(IA32_EFER) == saved.efer
+        && read(IA32_STAR) == saved.star
+        && read(IA32_LSTAR) == saved.lstar
+        && read(IA32_FMASK) == saved.fmask
+        && fs_base() == saved.fs_base
 }

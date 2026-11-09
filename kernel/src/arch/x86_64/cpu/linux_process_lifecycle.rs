@@ -2163,7 +2163,7 @@ fn linux_clone_thread_request(
 }
 
 pub(super) fn linux_schedule_new_thread(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     registers: LinuxSyscallFrame,
     user_stack: u64,
     user_rip: u64,
@@ -2226,7 +2226,7 @@ pub(super) fn linux_schedule_new_thread(
 /// exits before init's exit runs again. Returns `None` once init is alone
 /// (or the processes did not go away), so its exit proceeds.
 pub(super) fn linux_init_exit_kill_others_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
 ) -> Option<u64> {
@@ -2327,7 +2327,7 @@ fn linux_exit_context_with_mapped_stack(caller: LinuxUserContext) -> LinuxUserCo
 }
 
 pub(super) fn linux_exit_child_to_parent(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
 ) -> u64 {
     let clear_child_tid = current_linux_clear_child_tid().unwrap_or(0);
@@ -2636,7 +2636,7 @@ pub(in crate::arch::x86_64) fn linux_wait_for_interrupt() {
         // handlers save and restore the state they touch, and `cli` ends the
         // window before this returns, so the caller's interrupt-off
         // invariants hold.
-        unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+        crate::trusted::interrupts::wait();
     }
     crate::cpu_time::add_idle(timer::timestamp_counter().saturating_sub(started));
     crate::sync::kernel_entry_return_from_user();
@@ -2960,7 +2960,7 @@ pub(super) fn linux_waitid(
 }
 
 pub(super) fn linux_waitid_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     id_type: u64,
     id: u64,
     information: u64,
@@ -3006,7 +3006,7 @@ pub(super) fn linux_waitid_live(
 }
 
 pub(super) fn linux_wait4_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     pid: u64,
     status_address: u64,
     options: u64,

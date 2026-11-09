@@ -683,7 +683,7 @@ pub(super) fn linux_pidfd_send_signal(
     signal: u64,
     information: u64,
     flags: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {

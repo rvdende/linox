@@ -1576,7 +1576,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         }
         valid && save_linux_process_extended_state(1)
     } else {
-        unsafe { enter_user(execution.entry, execution.stack, 0, 0, 0, 0, 0, 0, 0) }
+        enter_user(execution.entry, execution.stack, 0, 0, 0, 0, 0, 0, 0)
     };
     if !user_entered {
         if execution.runtime {

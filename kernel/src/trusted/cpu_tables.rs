@@ -1,15 +1,15 @@
 //! Each CPU's descriptor tables (GDT, TSS, IDT), its entry-state record,
 //! and the stacks its TSS names.
 //!
-//! [`CpuTables`] holds, per CPU index, the record the system-call and
-//! user-fault stubs in `cpu.rs` reach through GS ([`CpuEntryState`]), a
-//! GDT with the kernel's fixed segments and a TSS descriptor, the TSS
-//! itself, an IDT, and the four stacks the TSS names (where an interrupt
-//! from ring 3 switches to, and the NMI, double-fault and machine-check
-//! stacks). [`CpuTables::install`] fills them for one CPU and loads them on
-//! the CPU that calls it: GS_BASE names the CPU's entry state, the GDT and
-//! TSS are loaded with the kernel's segments and the CPU's own stacks, and
-//! the 32 exception gates point at `cpu.rs`'s exception stubs
+//! [`CpuTables`] holds, per CPU index, the record the entry stubs in
+//! `trusted::entry` reach through GS ([`CpuEntryState`]), a GDT with the
+//! kernel's fixed segments and a TSS descriptor, the TSS itself, an IDT,
+//! and the four stacks the TSS names (where an interrupt from ring 3
+//! switches to, and the NMI, double-fault and machine-check stacks).
+//! [`CpuTables::install`] fills them for one CPU and loads them on the CPU
+//! that calls it: GS_BASE names the CPU's entry state, the GDT and TSS are
+//! loaded with the kernel's segments and the CPU's own stacks, and the 32
+//! exception gates point at `trusted::entry`'s exception stubs
 //! (`linox_exception_entries`), the NMI, double-fault and machine-check
 //! ones on their stacks. The tables are atomics the processor reads in
 //! place, so reading them for the boot checks and writing a gate need no
@@ -22,31 +22,43 @@
 //! runs on them (each CPU's kernel stack, a `CpuStackArray` of the CPU
 //! core's own).
 //!
+//! The entry state is reached by the stubs through GS, and by Rust only
+//! through this module's functions ([`entry_state`], [`set_user_return`],
+//! [`set_iret_registers`], [`live_kernel_frame`] and the save and restore
+//! `trusted::switch` uses), which find this CPU's record from GS_BASE,
+//! checked to name one of the installed records, and copy single fields in
+//! and out (volatile, and no reference to the record is made, so an
+//! interrupt handler on this CPU touching it races with nothing Rust
+//! holds). What they let safe code write is the user context of a return
+//! to user mode (which the stubs sanitize again) and the registers of an
+//! IRETQ return; never the stack pointers the stubs load (`return_stack`,
+//! `kernel_frame`).
+//!
 //! The invariants the `unsafe` blocks rely on:
 //! - each CPU index is installed once, by the CPU it names
 //!   ([`CpuTables::install`] refuses an index already installed), so no
-//!   two CPUs share an entry state, a TSS or the stacks it names;
+//!   two CPUs share an entry state, a TSS or the stacks it names; one
+//!   `CpuTables` is installed (the first `install` registers it and later
+//!   ones must be of the same);
 //! - the GDT and the TSS are written only by `install`, before they are
 //!   loaded, so what the CPU loads is the kernel's segments and its own
 //!   stacks;
 //! - an exception gate (vectors 0-31) is written only by `install`, with
-//!   `cpu.rs`'s stub for that vector.
-//!
-//! Known gap, as before this module: the gates above vector 31 take the
-//! handler address their caller names (`arch/x86_64/cpu/architecture.rs`'s
-//! `install_interrupt_gate` and `install_user_interrupt_gate`, whose
-//! callers pass `trusted::entry`'s stubs and `cpu.rs`'s system-call
-//! entry). An address that is not an entry stub would be jumped to in ring
-//! 0 by the next such interrupt. A typed stub handle closes this once
-//! `cpu.rs`'s stubs move into `trusted::entry`.
+//!   `trusted::entry`'s stub for that vector, and any other gate only with
+//!   an `entry::EntryStub`, which only `trusted::entry` makes.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+use super::entry::EntryStub;
 
 pub(crate) const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub(crate) const KERNEL_DATA_SELECTOR: u16 = 0x10;
 pub(crate) const TSS_SELECTOR: u16 = 0x18;
+/// The user data and code segments' selectors (GDT entries 5 and 6, RPL 3).
+pub(crate) const USER_DATA_SELECTOR: u16 = 0x2b;
+pub(crate) const USER_CODE_SELECTOR: u16 = 0x33;
 pub(crate) const DOUBLE_FAULT_IST: u8 = 1;
 pub(crate) const NMI_IST: u8 = 2;
 pub(crate) const MACHINE_CHECK_IST: u8 = 3;
@@ -73,17 +85,11 @@ const USER_DATA_DESCRIPTOR: u64 = 0x00cf_f200_0000_ffff;
 const USER_CODE_DESCRIPTOR: u64 = 0x00af_fa00_0000_ffff;
 
 extern "C" {
-    /// The 32 exception stubs' addresses, in `cpu.rs`'s entry assembly.
+    /// The 32 exception stubs' addresses, in `trusted::entry`'s assembly.
     static linox_exception_entries: [usize; EXCEPTION_VECTORS];
 }
 
-/// The address of the exception stubs' table, for the CPU core to check
-/// against its own declaration.
-pub(crate) fn exception_entries() -> *const usize {
-    core::ptr::addr_of!(linox_exception_entries).cast()
-}
-
-/// What `cpu.rs`'s entry stubs keep per CPU, at GS while in the kernel:
+/// What `trusted::entry`'s stubs keep per CPU, at GS while in the kernel:
 /// the kernel stack to return to, the user context of a system call and
 /// what the signal return path restores. The stubs use these fields at
 /// fixed offsets (asserted below).
@@ -216,6 +222,125 @@ impl Tss {
 #[repr(transparent)]
 struct EntryStateCell(UnsafeCell<CpuEntryState>);
 
+/// The installed `CpuTables`' first entry state and how many it has (0
+/// until the first `install`).
+static ENTRY_STATES: AtomicUsize = AtomicUsize::new(0);
+static ENTRY_STATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// This CPU's entry state, if GS_BASE names one of the installed records.
+fn current_state() -> Option<*mut CpuEntryState> {
+    let first = ENTRY_STATES.load(Ordering::Acquire);
+    if first == 0 {
+        return None;
+    }
+    let base = read_msr(GS_BASE_MSR) as usize;
+    let offset = base.checked_sub(first)?;
+    let stride = size_of::<EntryStateCell>();
+    (offset.is_multiple_of(stride) && offset / stride < ENTRY_STATE_COUNT.load(Ordering::Acquire))
+        .then_some(base as *mut CpuEntryState)
+}
+
+/// Reads one field of this CPU's entry state.
+macro_rules! read_field {
+    ($state:expr, $field:ident) => {
+        // SAFETY: `$state` is this CPU's entry state (`current_state`), a
+        // live `static` record only this CPU uses; a volatile copy of one
+        // word makes no reference to it.
+        unsafe { core::ptr::addr_of!((*$state).$field).read_volatile() }
+    };
+}
+
+/// Writes one field of this CPU's entry state.
+macro_rules! write_field {
+    ($state:expr, $field:ident, $value:expr) => {
+        // SAFETY: as in `read_field`; the callers write only fields whose
+        // every value the stubs handle safely (see the module comment).
+        unsafe { core::ptr::addr_of_mut!((*$state).$field).write_volatile($value) }
+    };
+}
+
+/// A copy of this CPU's entry state, if it is installed.
+pub(crate) fn entry_state() -> Option<CpuEntryState> {
+    let state = current_state()?;
+    // SAFETY: as in `read_field`, for the whole record of plain words.
+    Some(unsafe { state.read_volatile() })
+}
+
+/// The frame of the Linux system call running on this CPU (None: none), as
+/// the `syscall` stub recorded it (`trusted::entry`).
+pub(crate) fn live_kernel_frame() -> Option<u64> {
+    let state = current_state()?;
+    Some(read_field!(state, kernel_frame)).filter(|frame| *frame != 0)
+}
+
+/// Sets where the running Linux system call returns to in user mode: RIP
+/// and RSP, and RFLAGS unless `rflags` is None. False, changing nothing,
+/// for an address outside the user half, flags with IOPL, NT or VM set or
+/// IF clear, or when the entry state is not installed.
+pub(crate) fn set_user_return(rip: u64, rsp: u64, rflags: Option<u64>) -> bool {
+    const REQUIRED: u64 = (1 << 1) | (1 << 9);
+    const FORBIDDEN: u64 = (3 << 12) | (1 << 14) | (1 << 17);
+    let Some(state) = current_state() else {
+        return false;
+    };
+    if rip >= 1 << 47
+        || rsp >= 1 << 47
+        || rflags.is_some_and(|flags| flags & REQUIRED != REQUIRED || flags & FORBIDDEN != 0)
+    {
+        return false;
+    }
+    write_field!(state, user_rip, rip);
+    write_field!(state, user_rsp, rsp);
+    if let Some(flags) = rflags {
+        write_field!(state, user_rflags, flags);
+    }
+    true
+}
+
+/// Sets RAX, RCX and R11 for the running Linux system call's return
+/// through IRETQ (`entry::RETURN_FROM_IRET`); false when the entry state is
+/// not installed.
+pub(crate) fn set_iret_registers(rax: u64, rcx: u64, r11: u64) -> bool {
+    let Some(state) = current_state() else {
+        return false;
+    };
+    write_field!(state, signal_rax, rax);
+    write_field!(state, signal_rcx, rcx);
+    write_field!(state, signal_r11, r11);
+    true
+}
+
+/// Replaces this CPU's live system-call frame with `frame` (0: none),
+/// returning the one it had; for `entry::with_stand_in_frame`, which puts
+/// it back.
+pub(super) fn replace_kernel_frame(frame: u64) -> Option<u64> {
+    let state = current_state()?;
+    let previous = read_field!(state, kernel_frame);
+    write_field!(state, kernel_frame, frame);
+    Some(previous)
+}
+
+/// Takes this CPU's entry state for a system call that parks
+/// (`trusted::switch`): a copy of it, with the CPU's `kernel_frame`
+/// cleared, since the parked call's frame is no longer the running one.
+pub(super) fn take_for_park() -> Option<CpuEntryState> {
+    let state = current_state()?;
+    let copy = entry_state()?;
+    write_field!(state, kernel_frame, 0);
+    Some(copy)
+}
+
+/// Puts back an entry state `take_for_park` or `entry_state` copied, when
+/// the context it belongs to runs again (`trusted::switch`). The stacks it
+/// names are that context's, which have stayed live while it waited.
+pub(super) fn restore(saved: CpuEntryState) {
+    if let Some(state) = current_state() {
+        // SAFETY: as in `read_field`, for the whole record; what `saved`
+        // names is live (the caller's contract above).
+        unsafe { state.write_volatile(saved) };
+    }
+}
+
 /// The tables and TSS stacks of `CPUS` CPUs, with privilege stacks of
 /// `PRIVILEGE_STACK` bytes and interrupt-stack-table stacks of
 /// `IST_STACK` bytes (each with its guard pages).
@@ -234,11 +359,10 @@ pub(crate) struct CpuTables<const CPUS: usize, const PRIVILEGE_STACK: usize, con
 }
 
 // SAFETY: everything but the entry states is atomic. Each entry state is
-// written by Rust only in `install` (before its CPU's GS names it) and in
-// `with_entry_state_restored` (on the CPU whose GS names it); otherwise it
-// is reached through the raw pointer `current_entry_state` hands out, by
-// the CPU it belongs to (the module invariant), as `cpu.rs`'s stubs reach
-// it through GS.
+// written by Rust only in `install` (before its CPU's GS names it), in
+// `with_entry_state_restored` and, field by field, by the module's
+// functions, all on the CPU whose GS names it (the module invariant), as
+// `trusted::entry`'s stubs reach it through GS.
 unsafe impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize> Sync
     for CpuTables<CPUS, PRIVILEGE_STACK, IST_STACK>
 {
@@ -269,6 +393,12 @@ impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize>
         let Some(claimed) = self.installed.get(cpu) else {
             return false;
         };
+        let first = self.entry_states.as_ptr() as usize;
+        match ENTRY_STATES.compare_exchange(0, first, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => ENTRY_STATE_COUNT.store(CPUS, Ordering::Release),
+            Err(installed) if installed == first => {}
+            Err(_) => return false,
+        }
         if claimed.swap(true, Ordering::AcqRel) {
             return false;
         }
@@ -365,7 +495,7 @@ impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize>
 
     fn load_idt(&'static self, cpu: usize) {
         // SAFETY: `linox_exception_entries` is a read-only table of 32
-        // addresses in the kernel image (`cpu.rs`'s entry assembly).
+        // addresses in the kernel image (`trusted::entry`'s assembly).
         let entries = unsafe { &*core::ptr::addr_of!(linox_exception_entries) };
         for (vector, handler) in entries.iter().enumerate() {
             write_gate(
@@ -379,9 +509,9 @@ impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize>
             base: core::ptr::from_ref(&self.idt[cpu]) as u64,
         };
         // SAFETY: the IDT is this CPU's, in a `static`; its exception gates
-        // name `cpu.rs`'s stubs (written above) and the stacks of its TSS,
-        // and every other gate is missing or was written by
-        // `set_gate_on_every_cpu` (see the known gap above).
+        // name `trusted::entry`'s stubs (written above) and the stacks of
+        // its TSS, and every other gate is missing or names an `EntryStub`
+        // (`set_gate_on_every_cpu`).
         unsafe {
             asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
         }
@@ -400,20 +530,23 @@ impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize>
             })
     }
 
-    /// Points `vector` (32 or above) at `handler` with `attributes`
+    /// Points `vector` (32 or above) at `stub` with `attributes`
     /// ([`KERNEL_GATE`] or [`USER_GATE`]) on every CPU, or clears it with
-    /// `handler` 0. The caller keeps the vector's interrupt source quiet
+    /// `None`. The caller keeps the vector's interrupt source quiet
     /// meanwhile. False for an exception vector or other attributes.
-    pub(crate) fn set_gate_on_every_cpu(&self, vector: u8, handler: usize, attributes: u8) -> bool {
+    pub(crate) fn set_gate_on_every_cpu(
+        &self,
+        vector: u8,
+        stub: Option<EntryStub>,
+        attributes: u8,
+    ) -> bool {
         if usize::from(vector) < EXCEPTION_VECTORS || !matches!(attributes, KERNEL_GATE | USER_GATE)
         {
             return false;
         }
-        let gate = if handler == 0 {
-            Gate::MISSING
-        } else {
-            Gate::interrupt(handler, 0, attributes)
-        };
+        let gate = stub.map_or(Gate::MISSING, |stub| {
+            Gate::interrupt(stub.address(), 0, attributes)
+        });
         for idt in &self.idt {
             write_gate(idt, usize::from(vector), gate);
         }
@@ -437,13 +570,6 @@ impl<const CPUS: usize, const PRIVILEGE_STACK: usize, const IST_STACK: usize>
 
     pub(crate) const fn tss_limit(&self) -> u64 {
         (TSS_SIZE - 1) as u64
-    }
-
-    /// The entry state GS_BASE names on this CPU. The record belongs to
-    /// this CPU (the module invariant); `cpu.rs`'s entry code reads and
-    /// writes it through this pointer, as its stubs do through GS.
-    pub(crate) fn current_entry_state(&self) -> *mut CpuEntryState {
-        read_msr(GS_BASE_MSR) as *mut CpuEntryState
     }
 
     /// The CPU index whose entry state GS_BASE names, if it names one of

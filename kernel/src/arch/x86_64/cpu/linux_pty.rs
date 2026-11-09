@@ -178,7 +178,7 @@ pub(super) fn linux_pty_send_hangups() {
 /// other blocking descriptors do: the rest of the domain runs and the call
 /// starts again.
 pub(super) fn linux_pty_syscall_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     descriptor: u64,

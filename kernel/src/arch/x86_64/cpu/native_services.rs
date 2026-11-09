@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(crate) fn force_next_control_discovery(domain_id: u64, discovery_word: u64) -> bool {
@@ -24,13 +25,8 @@ pub(super) fn dispatch_charged_call(
     number: u64,
     capability: u64,
     caller_domain: u64,
-    frame: *mut UserTrapFrame,
+    frame: Option<&mut UserTrapFrame>,
 ) -> u64 {
-    // SAFETY: `frame` is null or the trap frame `cpu.rs`'s native system-call
-    // stub pushed on this CPU's kernel stack and handed to its dispatcher,
-    // this function's only caller, which uses it no more until this returns:
-    // this is the one reference to it meanwhile.
-    let frame = unsafe { frame.as_mut() };
     match number {
         0 => {
             if CONTROL_DISCOVERY_OVERRIDE_DOMAIN
@@ -109,11 +105,9 @@ pub(super) fn dispatch_charged_call(
         control_abi::HOST_INSPECT_OPERATION => {
             host_inspect(caller_domain, capability, frame.as_deref())
         }
-        control_abi::DOMAIN_CONTROL_OPERATION => container_control(
-            caller_domain,
-            capability,
-            frame.map_or(core::ptr::null_mut(), core::ptr::from_mut),
-        ),
+        control_abi::DOMAIN_CONTROL_OPERATION => {
+            container_control(caller_domain, capability, frame)
+        }
         control_abi::LINUX_ABI_TEST_OPERATION => {
             linux_abi_test_results(caller_domain, capability, frame.as_deref())
         }
@@ -2212,10 +2206,8 @@ fn runtime_result(frame: Option<&mut UserTrapFrame>) -> u64 {
     resume_action(action)
 }
 
-pub(super) fn exit_result(caller_domain: u64, frame: *mut UserTrapFrame) -> u64 {
-    // SAFETY: as in `dispatch_charged_call`, whose caller calls this for the
-    // exit call instead.
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+pub(super) fn exit_result(caller_domain: u64, frame: Option<&mut UserTrapFrame>) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX;
     };
     let failure_policy = domain::service_failure_policy(caller_domain);

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(super) fn linux_execution_instance() -> usize {
@@ -1315,7 +1316,7 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
             // SAFETY: interrupts are enabled only around the halt, with no
             // lock held; this CPU's tick handler returns at once from a
             // kernel-mode frame, and `cli` ends the window.
-            unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+            crate::trusted::interrupts::wait();
         } else {
             let wait = if due_soon {
                 LINUX_SMP_IDLE_SPIN_TICKS
@@ -2061,7 +2062,7 @@ pub(super) fn linux_preemption_yield_taken(pid: u32) -> bool {
 /// scheduler resumes it later at the interrupted instruction. None if no
 /// preemption is pending for this process there.
 pub(super) fn linux_complete_timer_preemption(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     user_rip: u64,
 ) -> Option<u64> {
     let entry = crate::linux_elf::vdso_preempt_entry()?;

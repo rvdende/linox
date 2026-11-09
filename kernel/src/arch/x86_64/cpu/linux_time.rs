@@ -932,7 +932,7 @@ pub(super) enum LinuxWaitTurn {
 /// Blocks a timed wait for `wait` (with its deadline) while it has nothing
 /// to wait for in its own process.
 pub(super) fn linux_timed_wait_run_others(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     wait: WaitOn,
@@ -959,7 +959,7 @@ pub(super) fn linux_timed_wait_run_others(
 }
 
 pub(super) fn linux_nanosleep_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     request: u64,
     remaining: u64,
@@ -973,7 +973,7 @@ pub(super) fn linux_nanosleep_live_return(
 }
 
 pub(super) fn linux_clock_nanosleep_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     clock: u64,
     flags: u64,
@@ -997,7 +997,7 @@ struct LinuxSleep {
 }
 
 fn linux_sleep_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     LinuxSleep {
         number,

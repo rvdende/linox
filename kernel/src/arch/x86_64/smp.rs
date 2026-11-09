@@ -54,11 +54,11 @@ static LINUX_PROCESS_JOBS: SpinLock<[Option<LinuxProcessJob>; CPU_LIMIT]> =
     SpinLock::new(LockRank::ARCHITECTURE, [None; CPU_LIMIT]);
 static LINUX_PROCESS_RESULTS: [AtomicU16; CPU_LIMIT] =
     [const { AtomicU16::new(LINUX_RESULT_FAILED) }; CPU_LIMIT];
-pub(super) static TLB_SHOOTDOWN_ADDRESS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TLB_SHOOTDOWN_ADDRESS: AtomicU64 = AtomicU64::new(0);
 /// The page-table root each CPU last loaded into CR3 (0: not known yet), so
 /// that a shootdown interrupts only CPUs using the address space it changes.
 static ACTIVE_ROOTS: [AtomicU64; CPU_LIMIT] = [const { AtomicU64::new(0) }; CPU_LIMIT];
-pub(super) static TLB_SHOOTDOWN_ACKNOWLEDGED: AtomicU32 = AtomicU32::new(0);
+pub(crate) static TLB_SHOOTDOWN_ACKNOWLEDGED: AtomicU32 = AtomicU32::new(0);
 
 /// Copies the application processors' start-up trampoline into place.
 pub(crate) fn prepare_trampoline() -> bool {
@@ -69,7 +69,7 @@ pub(crate) fn start_application_processors(platform: PlatformInfo, apic: &LocalA
     if platform.enabled_processors == 0 || platform.enabled_processors > CPU_LIMIT {
         return false;
     }
-    if !cpu::install_interrupt_gate(IPI_VECTOR, entry::interprocessor_interrupt_entry()) {
+    if !cpu::install_interrupt_gate(IPI_VECTOR, entry::EntryStub::interprocessor_interrupt()) {
         return false;
     }
     APIC_BASE.store(apic.physical_base, Ordering::Release);

@@ -717,7 +717,7 @@ pub(super) struct LinuxSignalMaskInput {
 }
 
 pub(super) fn linux_epoll_wait_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     input: LinuxEpollWaitInput,
     timeout: u64,
@@ -745,7 +745,7 @@ pub(super) fn linux_epoll_wait_live_return(
 /// which a yield restarts). `temporary_signal_mask` is the mask an
 /// epoll_pwait call gave; without one the call waits as epoll_wait does.
 pub(super) fn linux_epoll_wait_duration_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     input: LinuxEpollWaitInput,
     duration: Option<u64>,
@@ -954,7 +954,7 @@ pub(super) fn linux_temporary_signal_mask(input: LinuxSignalMaskInput) -> Result
 }
 
 pub(super) fn linux_epoll_pwait_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     input: LinuxEpollWaitInput,
     timeout: u64,
@@ -993,7 +993,7 @@ fn linux_epoll_signal_mask(input: LinuxSignalMaskInput) -> Result<Option<u64>, u
 }
 
 pub(super) fn linux_epoll_pwait2_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     input: LinuxEpollWaitInput,
     timeout_address: u64,

@@ -17,10 +17,6 @@ pub(crate) fn linux_startup_random() -> Option<[u8; 16]> {
 static LINUX_BOOT_ID: OwnedState<[u8; 37]> = OwnedState::empty();
 
 pub(super) fn linux_boot_id() -> &'static [u8] {
-    // The text cpu.rs's runtime owner kept for this before
-    // (X86_RUNTIME.LINUX_BOOT_ID) is no longer written; it goes with the
-    // next change to that owner.
-    let _retired = &X86_RUNTIME.LINUX_BOOT_ID.0 .0;
     if X86_RUNTIME.LINUX_BOOT_ID_STATE.load(Ordering::Acquire) != 2
         && X86_RUNTIME
             .LINUX_BOOT_ID_STATE

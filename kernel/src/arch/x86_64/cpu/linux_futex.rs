@@ -269,7 +269,7 @@ fn requeue_linux_futex_waits(source: u64, target: u64, wake: u32, requeue: u32) 
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn linux_futex_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     address: u64,
     operation: u64,
@@ -594,7 +594,7 @@ pub(super) fn linux_futex_wake(address: u64, mask: u64, count: u64, flags: u64) 
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn linux_futex_wait_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     address: u64,
@@ -760,7 +760,7 @@ struct LinuxFutexVectorWord {
 /// first: the first whose value differs ends the call with EAGAIN.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn linux_futex_waitv_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     waiters: u64,
     count: u64,
@@ -1084,7 +1084,7 @@ pub(super) fn linux_futex_requeue(
 /// Leaves `current`, just blocked in a futex wait, for its ready sibling
 /// `target`, whose context the call returns into.
 fn switch_from_blocked_linux_futex_waiter(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     current: LinuxThreadHandle,
     tls: LinuxTlsContext,
     target: LinuxThreadHandle,

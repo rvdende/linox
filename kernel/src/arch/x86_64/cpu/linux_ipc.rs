@@ -432,7 +432,7 @@ fn linux_semaphore_operation(
 /// than init yields by restarting the call), so `GETNCNT`/`GETZCNT` see it
 /// and a timeout counts from the first attempt.
 pub(super) fn linux_semop_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     (id, operations, count, timeout): (u64, u64, u64, u64),
@@ -806,7 +806,7 @@ pub(super) fn linux_msgget(key: u64, flags: u64) -> u64 {
 /// with ENOMSG. The wait outlives the call's restarts, so a removal is seen
 /// as one.
 pub(super) fn linux_message_wait_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     (id, flags): (u64, u64),
@@ -1331,7 +1331,7 @@ fn linux_mq_now() -> u64 {
 /// the domain run and try again, until the absolute `timeout` passes
 /// (ETIMEDOUT) or a signal comes (EINTR).
 pub(super) fn linux_mq_wait_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     (descriptor, timeout): (u64, u64),

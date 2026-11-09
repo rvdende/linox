@@ -16,8 +16,8 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_FUTEX_COORDINATION	process-
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	LINUX_RESTART_DEADLINES	process-runtime	allowlist	none	ranked-restart-deadline-list
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_read_write.rs	LINUX_RETRY_SIBLING_HANDOFFS	process-runtime	allowlist	none	atomic-scheduling-heuristic-counter
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_mmap.rs	LINUX_MKWRITE_FAILED_PAGE	process-runtime	allowlist	none	atomic-page-mkwrite-sigbus-note
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	PRIVILEGE_ENTRY_NMI_PROBE_HITS	verification-only	allowlist	none	verification-build-only
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	PRIVILEGE_ENTRY_NMI_PROBE_MASK	verification-only	allowlist	none	verification-build-only
+interior-mutable	kernel/src/trusted/entry.rs	PRIVILEGE_ENTRY_NMI_PROBE_HITS	verification-only	allowlist	none	verification-build-only
+interior-mutable	kernel/src/trusted/entry.rs	PRIVILEGE_ENTRY_NMI_PROBE_MASK	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SERVICE_FRAMES_TRANSFERRED	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SERVICE_STACK_SCRUBBED	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SYSCALL_STATE	verification-only	allowlist	none	verification-build-only
@@ -216,7 +216,6 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_ELF_PROBE_TLS
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_ELF_PROBE_TLS_SIZE	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_ELF_PROBE_TMP_FILE_GENERATIONS	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_ELF_PROBE_UMASK	process-runtime	allowlist	none	explicit-x86-runtime-owner-backing
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_BOOT_ID	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_BOOT_ID_STATE	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_BOOT_PROFILE_LIFECYCLE_COUNTS	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_LINUX_BOOT_PROFILE_LIFECYCLE_TICKS	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
@@ -568,7 +567,7 @@ interior-mutable	kernel/src/linux_exe.rs	ENTRIES	process-runtime	allowlist	none	
 interior-mutable	kernel/src/linux_mounts.rs	MOUNTS	process-runtime	allowlist	none	ranked-domain-mount-table
 interior-mutable	kernel/src/linux_namespace.rs	NAMESPACES	process-runtime	allowlist	none	ranked-domain-namespace-table
 interior-mutable	kernel/src/linux_namespace.rs	LIVE_COUNTS	process-runtime	allowlist	none	atomic-namespace-presence-counters
-interior-mutable	kernel/src/arch/x86_64/cpu/activation.rs	ACTIVATIONS	process-runtime	allowlist	none	locked-running-and-parked-thread-activations
+interior-mutable	kernel/src/trusted/switch.rs	ACTIVATIONS	process-runtime	allowlist	none	locked-running-and-parked-thread-activations
 interior-mutable	kernel/src/arch/x86_64/cpu/activation.rs	STACK_POOL	process-runtime	allowlist	none	locked-activation-stack-pool
 interior-mutable	kernel/src/arch/x86_64/cpu/activation.rs	SWITCHING_VERIFIED	process-runtime	allowlist	none	once-per-boot-switching-self-test
 interior-mutable	kernel/src/linux_record_lock.rs	LOCKS	process-runtime	allowlist	none	ranked-record-lock-table
@@ -669,6 +668,8 @@ interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_SWAP_CURSOR	do
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_swapon.rs	LINUX_USER_FAULT_RECLAIM	process-runtime	allowlist	none	atomic-user-fault-reclaim-tag
 interior-mutable	kernel/src/arch/x86_64/cpu/linux_cgroupfs.rs	LINUX_CACHE_RECLAIM_ROTOR	domain-runtime	allowlist	none	atomic-cache-reclaim-rotor
 interior-mutable	boot/efi/src/main.rs	FIRMWARE_CONSOLE	bootstrap-init	allowlist	none	firmware-console-until-exit-boot-services
+interior-mutable	kernel/src/trusted/cpu_tables.rs	ENTRY_STATES	per-cpu-arch	allowlist	none	set-once-installed-entry-state-registry
+interior-mutable	kernel/src/trusted/cpu_tables.rs	ENTRY_STATE_COUNT	per-cpu-arch	allowlist	none	set-once-installed-entry-state-registry
 interior-mutable	kernel/src/trusted/crash.rs	IDT	platform-device	allowlist	none	hardware-bringup-exception-table
 interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	none	fatal-report-reentrancy-latch
 interior-mutable	kernel/src/bringup/trap.rs	STAGE	platform-device	allowlist	none	hardware-bringup-stage-publication

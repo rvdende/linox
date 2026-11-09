@@ -7,6 +7,7 @@ cpu="$root/kernel/src/arch/x86_64/cpu.rs"
 # cpu.rs and its submodules (kernel/src/arch/x86_64/cpu/*.rs, which hold code
 # split out of cpu.rs): the SMAP and scalar-pointer rules cover all of them.
 cpu_tree=("$cpu" "$root/kernel/src/arch/x86_64/cpu")
+user_copy="$root/kernel/src/trusted/user_copy.rs"
 address_space="$root/kernel/src/address_space.rs"
 
 fail() {
@@ -23,8 +24,8 @@ for required in \
     'linox_copy_to_user_fault_end:' \
     'linox_copy_from_user_fixup:' \
     'linox_copy_to_user_fixup:' \
-    'verify_user_copy_fault_fixups'; do
-    rg -Fq "$required" "$cpu" || fail "missing recoverable user-copy invariant: $required"
+    'verify_fault_fixups'; do
+    rg -Fq "$required" "$user_copy" || fail "missing recoverable user-copy invariant: $required"
 done
 
 for required in \

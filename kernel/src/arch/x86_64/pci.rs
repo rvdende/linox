@@ -1024,7 +1024,7 @@ fn install_virtio_interrupt_at(apic: &LocalApic, vector: u8) -> bool {
     PCI_INTERRUPTS
         .forced_timeout_object
         .store(0, Ordering::SeqCst);
-    cpu::install_interrupt_gate(vector, entry::virtio_interrupt_entry())
+    cpu::install_interrupt_gate(vector, entry::EntryStub::virtio_interrupt())
 }
 
 fn retire_virtio_interrupt(apic: &LocalApic) -> bool {

@@ -9,16 +9,16 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 228 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 228 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 182 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 182 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 49 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 49 to ${undocumented}" >&2
+if (( undocumented > 4 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 4 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -31,38 +31,38 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "arch/x86_64/cpu/boot_verify.rs 1"
-    "arch/x86_64/cpu/boot_verify_elf.rs 3"
+    "arch/x86_64/cpu/boot_verify_elf.rs 2"
     "arch/x86_64/cpu/linux_user_memory.rs 1"
-    "arch/x86_64/cpu/native_services.rs 2"
     "image_store.rs 1"
     "lib.rs 0"
+    "trusted/ap_start.rs 1"
     "trusted/boot.rs 9"
     "trusted/claim.rs 3"
-    "trusted/cpu_tables.rs 12"
+    "trusted/control.rs 12"
+    "trusted/cpu_tables.rs 16"
+    "trusted/crash.rs 5"
     "trusted/dma.rs 4"
+    "trusted/entry.rs 4"
     "trusted/firmware.rs 2"
     "trusted/frame.rs 9"
     "trusted/frame_tables.rs 2"
     "trusted/heap.rs 7"
     "trusted/image.rs 9"
-    "trusted/mmio.rs 2"
-    "trusted/msr.rs 3"
-    "trusted/page_table.rs 2"
-    "trusted/pixels.rs 3"
-    "trusted/random.rs 1"
-    "trusted/root.rs 4"
-    "trusted/programs.rs 1"
-    "trusted/port.rs 8"
-    "trusted/ap_start.rs 1"
     "trusted/interrupts.rs 8"
     "trusted/lock.rs 3"
+    "trusted/mmio.rs 2"
+    "trusted/msr.rs 4"
     "trusted/owned_state.rs 4"
-    "trusted/tsc.rs 3"
-    "trusted/control.rs 8"
-    "trusted/crash.rs 5"
+    "trusted/page_table.rs 2"
+    "trusted/pixels.rs 3"
+    "trusted/port.rs 8"
+    "trusted/programs.rs 1"
+    "trusted/random.rs 1"
+    "trusted/root.rs 5"
+    "trusted/switch.rs 12"
     "trusted/take_once.rs 2"
-    "trusted/user_copy.rs 2"
+    "trusted/tsc.rs 3"
+    "trusted/user_copy.rs 8"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"
@@ -79,13 +79,21 @@ done
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
 forbidding_files=(
     "address_space.rs"
-    "arch/x86_64/cpu/linux_cgroupfs.rs"
-    "arch/x86_64/cpu/linux_procfs.rs"
-    "arch/x86_64/cpu/linux_process_vm.rs"
     "arch/x86_64/acpi.rs"
     "arch/x86_64/apic.rs"
+    "arch/x86_64/cpu/activation.rs"
     "arch/x86_64/cpu/architecture.rs"
+    "arch/x86_64/cpu/boot_verify.rs"
+    "arch/x86_64/cpu/linux_cgroupfs.rs"
+    "arch/x86_64/cpu/linux_domain_runtime.rs"
+    "arch/x86_64/cpu/linux_process_vm.rs"
+    "arch/x86_64/cpu/linux_procfs.rs"
+    "arch/x86_64/cpu/linux_runtime_loop.rs"
+    "arch/x86_64/cpu/linux_scheduler.rs"
+    "arch/x86_64/cpu/linux_syscall.rs"
     "arch/x86_64/cpu/linux_system.rs"
+    "arch/x86_64/cpu/linux_thread.rs"
+    "arch/x86_64/cpu/native_services.rs"
     "arch/x86_64/iommu.rs"
     "arch/x86_64/paging.rs"
     "arch/x86_64/pci.rs"

@@ -685,7 +685,7 @@ pub(super) fn linux_seccomp_strict_syscall_allowed(number: u64) -> bool {
 pub(super) fn linux_seccomp_filter_syscall(
     number: u64,
     arguments: [u64; 6],
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> Option<u64> {

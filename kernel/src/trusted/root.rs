@@ -114,6 +114,25 @@ pub(crate) fn activate_kernel_root() {
     activate(Root::kernel());
 }
 
+/// Loads a process's root, which `paging::validated_user_root_frames`
+/// checked maps the kernel's shared entries exactly as the kernel's own
+/// root does (so the code and data in use stay mapped), on this CPU:
+/// recorded for TLB shootdowns before the load and counted after it.
+/// Returns the root CR3 then holds.
+pub(crate) fn load_user_root(frames: &crate::arch::x86_64::paging::ValidatedUserRootFrames) -> u64 {
+    use crate::arch::x86_64::smp;
+    let root = frames.root();
+    smp::note_active_root(root);
+    // SAFETY: the root maps the kernel half as the kernel's root does (the
+    // validation `ValidatedUserRootFrames` stands for), and the rest of it
+    // is user mappings no Rust reference covers.
+    unsafe {
+        asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
+    }
+    smp::note_root_loaded();
+    current()
+}
+
 /// Loads CR3 with the value it holds: the mappings stay as they are, and
 /// this CPU drops its non-global translations.
 pub(crate) fn reload() {

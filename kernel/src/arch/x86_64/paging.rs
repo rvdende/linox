@@ -142,7 +142,12 @@ pub(crate) fn verify_user_context_layout_invariants() -> bool {
         && !user_context_matches_layout(USER_REGION_BASE, USER_REGION_BASE + 5 * page + 1)
 }
 
+/// A process root the memory layer checked (`validated_user_root_frames`):
+/// it maps the kernel's shared entries exactly as the kernel's root does.
+/// Only that check makes one, so `trusted::root::load_user_root` loads only
+/// such roots.
 pub(crate) struct ValidatedUserRootFrames {
+    root: u64,
     base: [u64; 15],
     base_count: usize,
     dma: Option<u64>,
@@ -154,6 +159,11 @@ pub(crate) struct ValidatedUserRootFrames {
 }
 
 impl ValidatedUserRootFrames {
+    /// The root's physical address.
+    pub(crate) const fn root(&self) -> u64 {
+        self.root
+    }
+
     pub(crate) fn base(&self) -> &[u64] {
         &self.base[..self.base_count]
     }
@@ -306,6 +316,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         let mut base = [0_u64; 15];
         base[..legacy_frames.len()].copy_from_slice(&legacy_frames);
         return Some(ValidatedUserRootFrames {
+            root,
             base,
             base_count: legacy_frames.len(),
             dma: (dma != 0).then_some(dma_address),
@@ -435,6 +446,7 @@ pub(crate) fn validated_user_root_frames(root: u64) -> Option<ValidatedUserRootF
         && (native_dma == 0
             || !(0..native_frame_count).any(|index| native_frame_at(index) == native_dma_address)))
     .then_some(ValidatedUserRootFrames {
+        root,
         base: {
             let mut frames = [0; 15];
             for (index, frame) in frames

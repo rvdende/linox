@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(super) fn reserve_linux_thread(
@@ -539,13 +540,9 @@ fn clear_linux_thread_slot(slot: usize) {
         // userspace can inspect or recycle its thread-control allocation.
         let zeroes = [0_u8; 128];
         for offset in (0..PAGE_SIZE).step_by(zeroes.len()) {
-            if unsafe {
-                raw_copy_to_user(
-                    (stack_base + offset as u64) as *mut u8,
-                    zeroes.as_ptr(),
-                    zeroes.len(),
-                ) != 0
-            } {
+            if crate::trusted::user_copy::copy_to_user(stack_base + offset as u64, &zeroes)
+                != zeroes.len()
+            {
                 break;
             }
         }

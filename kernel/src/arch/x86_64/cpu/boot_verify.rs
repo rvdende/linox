@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(crate) fn verify_cross_cpu_linux_runtime_mechanisms() -> bool {
@@ -134,7 +135,7 @@ pub(crate) fn verify_user_syscall(
     root_handle: u64,
     service_domain: u64,
 ) -> bool {
-    if !install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize)
+    if !install_user_interrupt_gate(SYSCALL_VECTOR, EntryStub::native_system_call())
         || !user_interrupt_surface_is_minimal()
     {
         return false;
@@ -146,24 +147,22 @@ pub(crate) fn verify_user_syscall(
     if !install_current_scheduler_fs_base() {
         return false;
     }
-    // SAFETY: The caller supplies mapped ring-3 code and stack addresses. The
+    // The caller supplies mapped ring-3 code and stack addresses. The
     // syscall gate abandons the user frame and returns on the saved kernel
     // stack, with interrupts disabled throughout.
-    unsafe {
-        if !enter_user(
-            entry,
-            stack,
-            host_handle,
-            console_handle,
-            ipc_handle,
-            1,
-            service_domain,
-            service_identity,
-            root_handle,
-        ) {
-            return false;
-        }
-    };
+    if !enter_user(
+        entry,
+        stack,
+        host_handle,
+        console_handle,
+        ipc_handle,
+        1,
+        service_domain,
+        service_identity,
+        root_handle,
+    ) {
+        return false;
+    }
     SYSCALL_STATE.load(Ordering::SeqCst) == 31
 }
 
@@ -302,8 +301,9 @@ pub(super) fn verify_linux_thread_interrupt_resume_context(
     let mut exact_frame = LinuxSyscallFrame::ZERO;
     let exact_return_prepared = architecture::with_entry_state_restored(|| {
         interrupted_context.is_some_and(|context| {
-            write_linux_thread_live_return(&mut exact_frame, handle, context)
-                && exact_frame == context.registers
+            crate::trusted::entry::with_stand_in_frame(&mut exact_frame, |output| {
+                write_linux_thread_live_return(output, handle, context)
+            }) && exact_frame == context.registers
                 && architecture::current_entry_state_copy().is_some_and(|entry_state| {
                     entry_state.user_rsp == context.rsp
                         && entry_state.user_rip == context.rip
@@ -1781,7 +1781,7 @@ fn verify_linux_fadvise64_syscall() -> bool {
         && linux_descriptor_close_on_exec(pipe[0])
         && linux_descriptor_close_on_exec(pipe[1])
         && linux_vmsplice_live_return(
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             no_caller,
             (1_u64 << 32) | pipe[1],
             0,
@@ -1789,7 +1789,7 @@ fn verify_linux_fadvise64_syscall() -> bool {
             (1_u64 << 32) | LINUX_SPLICE_F_NONBLOCK,
         ) == 0
         && linux_tee(
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             no_caller,
             (1_u64 << 32) | pipe[0],
             (1_u64 << 32) | pipe[1],
@@ -3112,7 +3112,7 @@ fn verify_linux_timer_argument_widths() -> bool {
     X86_RUNTIME.ELF_PROBE_SIGNAL_HANDLERS[LINUX_SIGALRM as usize - 1].store(1, Ordering::SeqCst);
     let expiration_delivered = interval_expiry
         && linux_real_timer_signal(
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             LinuxUserContext {
                 registers: LinuxSyscallFrame::ZERO,
                 rip: 0,
@@ -3211,7 +3211,7 @@ fn verify_linux_signal_argument_widths() -> bool {
         && linux_kill(
             UPPER_REGISTER_BITS | current_pid,
             (UPPER_REGISTER_BITS, LINUX_SI_USER, None),
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3226,7 +3226,7 @@ fn verify_linux_signal_argument_widths() -> bool {
             Some(UPPER_REGISTER_BITS | current_tid),
             UPPER_REGISTER_BITS,
             0,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0;
@@ -3247,7 +3247,7 @@ fn verify_linux_signal_argument_widths() -> bool {
             0,
             mapping,
             0,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0;
@@ -3258,12 +3258,19 @@ fn verify_linux_signal_argument_widths() -> bool {
             0,
             mapping,
             0,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
-        && linux_pidfd_send_signal(pidfd, 0, 1, 0, core::ptr::null_mut(), interrupted, (0, 0))
-            == LINUX_EFAULT;
+        && linux_pidfd_send_signal(
+            pidfd,
+            0,
+            1,
+            0,
+            LinuxSyscallFrameHandle::NONE,
+            interrupted,
+            (0, 0),
+        ) == LINUX_EFAULT;
     let pidfd_valid = valid
         && queued_self_signals
         && duplicate < LINUX_DESCRIPTOR_TABLE_LIMIT
@@ -3274,7 +3281,7 @@ fn verify_linux_signal_argument_widths() -> bool {
             UPPER_REGISTER_BITS,
             0,
             UPPER_REGISTER_BITS,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3343,7 +3350,7 @@ fn verify_linux_queued_self_signals(
             None,
             SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3359,7 +3366,7 @@ fn verify_linux_queued_self_signals(
             Some(current_tid),
             SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3371,7 +3378,7 @@ fn verify_linux_queued_self_signals(
             None,
             REALTIME_SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3381,7 +3388,7 @@ fn verify_linux_queued_self_signals(
             None,
             REALTIME_SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3394,7 +3401,7 @@ fn verify_linux_queued_self_signals(
             None,
             SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3404,7 +3411,7 @@ fn verify_linux_queued_self_signals(
             Some(current_tid),
             SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == 0
@@ -3416,7 +3423,7 @@ fn verify_linux_queued_self_signals(
             None,
             SIGNAL,
             information,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == LINUX_EPERM
@@ -3427,7 +3434,7 @@ fn verify_linux_queued_self_signals(
             None,
             LINUX_SIGNAL_COUNT as u64 + 1,
             1,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             interrupted,
             (0, 0),
         ) == LINUX_EINVAL;
@@ -3541,7 +3548,7 @@ fn verify_linux_event_argument_widths() -> bool {
             mapping + 128,
         ) == 0
         && linux_epoll_wait_duration_live_return(
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             caller,
             LinuxEpollWaitInput {
                 epoll: UPPER_REGISTER_BITS | epoll,
@@ -3898,7 +3905,7 @@ pub(super) fn verify_linux_cross_process_prlimit(pid: u32) -> bool {
             0,
             0,
             0,
-            core::ptr::null_mut(),
+            LinuxSyscallFrameHandle::NONE,
             LinuxUserContext {
                 registers: LinuxSyscallFrame::ZERO,
                 rip: 0,

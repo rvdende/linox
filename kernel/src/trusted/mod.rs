@@ -30,8 +30,11 @@
 //! - [`image`]: the boot loader's handoff images and published root
 //!   filesystem images, read in place as `'static` byte slices.
 //! - [`interrupts`]: this CPU's interrupt flag, and halting.
-//! - [`entry`]: the entry stubs of the device, timer and inter-processor
-//!   interrupt vectors.
+//! - [`entry`]: every entry stub (system calls, exceptions, NMI, device,
+//!   timer and inter-processor interrupts), the stubs that enter user
+//!   mode, and the frames they hand the handlers.
+//! - [`switch`]: kernel stacks of their own for Linux thread activations,
+//!   and switching between them.
 //! - [`ap_start`]: the application processors' start-up trampoline.
 //! - [`tsc`]: the timestamp counter, and the processor id beside it.
 //! - [`random`]: the processor's random number generator (RDRAND).
@@ -79,6 +82,7 @@ pub(crate) mod port;
 pub(crate) mod programs;
 pub(crate) mod random;
 pub(crate) mod root;
+pub(crate) mod switch;
 pub(crate) mod take_once;
 pub(crate) mod tsc;
 pub(crate) mod user_copy;

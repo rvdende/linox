@@ -1469,10 +1469,8 @@ fn linux_rootfs_execve_source(
     if !reset_extended_user_state() {
         return LINUX_ENOMEM;
     }
-    unsafe {
-        let entry_state = &mut *current_entry_state();
-        entry_state.user_rip = startup.initial_entry;
-        entry_state.user_rsp = new_stack;
+    if !cpu_tables::set_user_return(startup.initial_entry, new_stack, None) {
+        return LINUX_ENOEXEC;
     }
     if !linux_process::set_live_process_exec_context(pid, startup.initial_entry, new_stack) {
         serial_write("linox: Linux exec process context rejected entry/stack: ");
@@ -2656,11 +2654,7 @@ fn linux_execve_at(
         runtime_plan.relro.map_or(0, |relro| relro.memory_size),
         Ordering::SeqCst,
     );
-    unsafe {
-        let entry_state = &mut *current_entry_state();
-        entry_state.user_rip = entry;
-        entry_state.user_rsp = new_stack;
-    }
+    let _ = cpu_tables::set_user_return(entry, new_stack, None);
     X86_RUNTIME
         .ELF_PROBE_EXEC_NODE
         .store(exec_node, Ordering::SeqCst);

@@ -245,8 +245,8 @@ pub(crate) fn verify_local_apic_interrupt(
     apic: &LocalApic,
     calibration: &LocalApicCalibration,
 ) -> bool {
-    if !cpu::install_interrupt_gate(TIMER_VECTOR, entry::timer_interrupt_entry())
-        || !cpu::install_interrupt_gate(SPURIOUS_VECTOR, entry::spurious_interrupt_entry())
+    if !cpu::install_interrupt_gate(TIMER_VECTOR, entry::EntryStub::timer_interrupt())
+        || !cpu::install_interrupt_gate(SPURIOUS_VECTOR, entry::EntryStub::spurious_interrupt())
     {
         return false;
     }

@@ -1033,7 +1033,7 @@ fn linux_socket_accept(descriptor: u64, address: u64, length: u64, flags: u64) -
 /// entering it (bind04, connect01, setsockopt10).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn linux_socket_accept_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     descriptor: u64,
@@ -1292,7 +1292,7 @@ pub(super) fn linux_socket_sendto(
 }
 
 pub(super) fn linux_socket_recvfrom(
-    live: Option<(*mut LinuxSyscallFrame, LinuxUserContext, u64)>,
+    live: Option<(LinuxSyscallFrameHandle, LinuxUserContext, u64)>,
     descriptor: u64,
     address: u64,
     count: u64,
@@ -1829,7 +1829,7 @@ pub(super) fn linux_unix_inflight_limit_exceeded() -> bool {
 }
 
 pub(super) fn linux_socket_recvmsg(
-    live: Option<(*mut LinuxSyscallFrame, LinuxUserContext, u64)>,
+    live: Option<(LinuxSyscallFrameHandle, LinuxUserContext, u64)>,
     descriptor: u64,
     message: u64,
     flags: u64,
@@ -2254,7 +2254,7 @@ pub(super) fn linux_socket_sendmmsg(
 }
 
 pub(super) fn linux_socket_send_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     result: u64,
     flags: u64,

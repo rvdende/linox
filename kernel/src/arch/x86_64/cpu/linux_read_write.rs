@@ -1261,7 +1261,7 @@ fn linux_console_input_descriptor(descriptor: u64) -> bool {
 }
 
 pub(super) fn linux_descriptor_read_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     address: u64,
@@ -1457,7 +1457,7 @@ pub(super) fn linux_descriptor_read_live_return(
 }
 
 pub(super) fn linux_descriptor_readv_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     vectors: u64,
@@ -1517,7 +1517,7 @@ pub(super) fn linux_descriptor_readv_live_return(
 }
 
 pub(super) fn linux_descriptor_write_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     address: u64,
@@ -1590,7 +1590,7 @@ pub(super) fn linux_descriptor_write_live_return(
 }
 
 pub(super) fn linux_descriptor_writev_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     vectors: u64,
@@ -1629,7 +1629,7 @@ pub(super) fn linux_descriptor_writev_live_return(
 }
 
 pub(super) fn linux_broken_pipe_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     mut interrupted: LinuxUserContext,
 ) -> u64 {
     interrupted.rax = LINUX_EPIPE;
@@ -1650,7 +1650,7 @@ pub(super) fn linux_broken_pipe_live_return(
 }
 
 pub(super) fn linux_file_size_limit_signal(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     mut interrupted: LinuxUserContext,
     return_registers: (u64, u64),
     result: u64,
@@ -1674,7 +1674,7 @@ pub(super) fn linux_file_size_limit_signal(
 }
 
 pub(super) fn linux_real_timer_signal(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     mut interrupted: LinuxUserContext,
     return_registers: (u64, u64),
     result: u64,
@@ -1695,7 +1695,7 @@ pub(super) fn linux_real_timer_signal(
 /// the call (system call `number`) starts again.
 #[allow(clippy::too_many_arguments)]
 fn linux_blocking_descriptor_io_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     kind: u8,
@@ -1836,7 +1836,7 @@ fn linux_socket_wait_deadline(descriptor: u64, write: bool, rip: u64) -> Option<
 /// domain runs and the call starts again, until the socket's timeout passes
 /// (EAGAIN, as Linux). A write to a pipe whose reader is gone raises SIGPIPE.
 pub(super) fn linux_local_socket_io_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     descriptor: u64,
@@ -1889,7 +1889,7 @@ static LINUX_RETRY_SIBLING_HANDOFFS: AtomicU32 = AtomicU32::new(0);
 const LINUX_RETRY_SIBLING_HANDOFF_LIMIT: u32 = 1;
 
 pub(super) fn linux_retry_later_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     wait: WaitOn,
@@ -1953,7 +1953,7 @@ pub(super) fn linux_retry_later_live_return(
 /// Returns to the caller's system call instruction, so system call `number`
 /// runs again with the same arguments.
 pub(super) fn linux_restart_syscall_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
 ) -> u64 {

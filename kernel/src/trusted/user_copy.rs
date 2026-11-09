@@ -1,8 +1,9 @@
 //! Copies between kernel buffers and the user pages of the address space
 //! loaded on this CPU, recovering from page faults.
 //!
-//! The copy loops are `cpu.rs`'s `linox_raw_copy_from_user` and
-//! `linox_raw_copy_to_user`: they lift SMAP for the copy alone, and a page
+//! The copy loops are [`raw_copy_from_user`] and [`raw_copy_to_user`]
+//! (`linox_raw_copy_from_user` and `linox_raw_copy_to_user` below; the
+//! page-fault stub in `trusted::entry` knows their fault ranges): they lift SMAP for the copy alone, and a page
 //! fault inside them (an unmapped or read-only page) returns the count
 //! not copied instead of reaching the fault handler. They copy whatever
 //! the addresses map, though, and a supervisor page is as reachable to
@@ -21,9 +22,95 @@
 //! module guarantees only that a copy never touches kernel memory beyond
 //! the caller's own buffer.
 
+use core::arch::{asm, global_asm};
+
 use super::page_table::PageTable;
 use super::root;
-use crate::arch::x86_64::cpu;
+
+global_asm!(
+    r#"
+    .text
+    .global linox_raw_copy_from_user
+    .global linox_copy_from_user_fault_begin
+    .global linox_copy_from_user_fault_end
+    .global linox_copy_from_user_fixup
+linox_raw_copy_from_user:
+    mov rax, rdx
+    test rax, rax
+    jz 2f
+    stac
+linox_copy_from_user_fault_begin:
+1:
+    mov cl, byte ptr [rsi]
+    mov byte ptr [rdi], cl
+    inc rsi
+    inc rdi
+    dec rax
+    jnz 1b
+linox_copy_from_user_fault_end:
+    clac
+2:
+    ret
+linox_copy_from_user_fixup:
+    clac
+    ret
+
+    .global linox_raw_copy_to_user
+    .global linox_copy_to_user_fault_begin
+    .global linox_copy_to_user_fault_end
+    .global linox_copy_to_user_fixup
+linox_raw_copy_to_user:
+    mov rax, rdx
+    test rax, rax
+    jz 4f
+    stac
+linox_copy_to_user_fault_begin:
+3:
+    mov cl, byte ptr [rsi]
+    mov byte ptr [rdi], cl
+    inc rsi
+    inc rdi
+    dec rax
+    jnz 3b
+linox_copy_to_user_fault_end:
+    clac
+4:
+    ret
+linox_copy_to_user_fixup:
+    clac
+    ret
+"#
+);
+
+extern "sysv64" {
+    fn linox_raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize;
+    fn linox_raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize;
+}
+
+/// Copies `length` bytes from `input` to `output` with SMAP lifted,
+/// stopping at the first page fault; returns the count not copied.
+///
+/// # Safety
+///
+/// `output` is valid for `length` bytes of writes that no live reference
+/// covers, and `input` lies on user pages (or faults): this module's
+/// checked copies are the callers.
+unsafe fn raw_copy_from_user(output: *mut u8, input: *const u8, length: usize) -> usize {
+    // SAFETY: the caller's contract; a fault returns the count left.
+    unsafe { linox_raw_copy_from_user(output, input, length) }
+}
+
+/// Copies `length` bytes from `input` to `output` with SMAP lifted,
+/// stopping at the first page fault; returns the count not copied.
+///
+/// # Safety
+///
+/// `input` is valid for `length` bytes of reads, and `output` lies on user
+/// pages (or faults), which no Rust reference covers.
+unsafe fn raw_copy_to_user(output: *mut u8, input: *const u8, length: usize) -> usize {
+    // SAFETY: the caller's contract; a fault returns the count left.
+    unsafe { linox_raw_copy_to_user(output, input, length) }
+}
 
 /// The end of the canonical lower half, where user mappings live.
 const USER_LIMIT: u64 = 1 << 47;
@@ -87,8 +174,7 @@ pub(crate) fn copy_from_user(address: u64, output: &mut [u8]) -> usize {
     // Rust reference covers, and `output` is a kernel buffer of at least
     // `count` bytes that only this copy writes. The copy recovers from a
     // fault by returning the count it did not copy.
-    let missed =
-        unsafe { cpu::raw_copy_from_user(output.as_mut_ptr(), address as *const u8, count) };
+    let missed = unsafe { raw_copy_from_user(output.as_mut_ptr(), address as *const u8, count) };
     count.saturating_sub(missed)
 }
 
@@ -103,6 +189,51 @@ pub(crate) fn copy_to_user(address: u64, input: &[u8]) -> usize {
     // SAFETY: as in `copy_from_user`: the first `count` bytes from
     // `address` lie on writable user pages, and `input` is a kernel buffer
     // of at least `count` bytes that the copy only reads.
-    let missed = unsafe { cpu::raw_copy_to_user(address as *mut u8, input.as_ptr(), count) };
+    let missed = unsafe { raw_copy_to_user(address as *mut u8, input.as_ptr(), count) };
     count.saturating_sub(missed)
+}
+
+/// Whether the page holding `address` is mapped present at every level of
+/// the loaded tables (user or not).
+fn present(address: u64) -> bool {
+    user_mapping_end(root::current() & ADDRESS_MASK, address, PRESENT).is_some()
+}
+
+/// Checks the copies' fault recovery: copies of two bytes that straddle the
+/// end of a user mapping (`mapped_end`, with the page below it a writable
+/// user page and the page at it unmapped) copy one byte and report one
+/// missed, copies from and to `unmapped` (an unmapped page) copy nothing,
+/// and SMAP is closed again after each (RFLAGS.AC clear). False without
+/// copying if the pages are not as described.
+pub(crate) fn verify_fault_fixups(mapped_end: u64, unmapped: u64) -> bool {
+    let Some(last) = mapped_end.checked_sub(1) else {
+        return false;
+    };
+    if user_prefix(last, 1, true) != 1 || present(mapped_end) || present(unmapped) {
+        return false;
+    }
+    let mut output = [0_u8; 2];
+    let input = [0x5a_u8, 0xa5];
+    // SAFETY: `output` and `input` are this function's buffers; the byte
+    // below `mapped_end` is a writable user page (checked above) and the
+    // pages at `mapped_end` and `unmapped` are not mapped at all, so the
+    // copies touch one user byte and fault on the rest, which the fixups
+    // turn into a short count.
+    let (partial_from, partial_to, rejected_from, rejected_to) = unsafe {
+        (
+            raw_copy_from_user(output.as_mut_ptr(), last as *const u8, output.len()),
+            raw_copy_to_user(last as *mut u8, input.as_ptr(), input.len()),
+            raw_copy_from_user(output.as_mut_ptr(), unmapped as *const u8, output.len()),
+            raw_copy_to_user(unmapped as *mut u8, input.as_ptr(), input.len()),
+        )
+    };
+    let flags: u64;
+    // SAFETY: reading RFLAGS through the stack touches only the two stack
+    // slots pushfq/pop use.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(nomem)) };
+    partial_from == 1
+        && partial_to == 1
+        && rejected_from == output.len()
+        && rejected_to == input.len()
+        && flags & (1 << 18) == 0
 }

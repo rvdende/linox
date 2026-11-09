@@ -492,7 +492,7 @@ pub(super) fn wake_linux_select_waits() -> u32 {
 }
 
 pub(super) fn linux_select_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     input: LinuxSelectInput,
     pselect: bool,
@@ -696,7 +696,7 @@ pub(super) fn linux_select_live_return(
 }
 
 pub(super) fn linux_poll_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     address: u64,
     count: u64,
@@ -723,7 +723,7 @@ pub(super) fn linux_poll_live_return(
 }
 
 pub(super) fn linux_signal_suspend_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     wait_kind: u8,
     temporary_signal_mask: Option<u64>,
@@ -758,7 +758,7 @@ pub(super) fn yield_current_linux_process(mut caller: LinuxUserContext, result: 
 /// in the boot probe). Once a sibling thread is ready, the wait stops here
 /// with that thread and the wait's deadline, to go on as a thread wait.
 fn linux_poll_run_others_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     address: u64,
     active: &mut [u8],
@@ -817,7 +817,7 @@ pub(super) fn yield_current_linux_process_wait(caller: LinuxUserContext) -> bool
 }
 
 pub(super) fn linux_poll_wait_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     address: u64,
     count: u64,
@@ -1162,7 +1162,7 @@ pub(super) fn linux_poll_wait_live_return(
 }
 
 pub(super) fn linux_ppoll_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     address: u64,
     count: u64,

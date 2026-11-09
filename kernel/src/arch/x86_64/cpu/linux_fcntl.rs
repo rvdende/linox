@@ -198,7 +198,7 @@ fn linux_lease_break_at(
 /// interrupting it, while the lease holder gives the lease up (or its
 /// break time runs out).
 pub(super) fn linux_lease_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     (number, directory, path_address, flags): (u64, u64, u64, u64),
     call: impl FnOnce() -> u64,
@@ -783,7 +783,7 @@ pub(super) fn linux_flock(descriptor: u64, operation: u64) -> u64 {
 /// flock(2): one attempt, and without LOCK_NB a wait for the holder to let
 /// go, as F_SETLKW waits: a signal interrupts it (EINTR, flock07).
 pub(super) fn linux_flock_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     operation: u64,
@@ -982,7 +982,7 @@ fn linux_fcntl_lock(descriptor: u64, command: u64, address: u64) -> u64 {
 /// the way, letting other processes run, until it is released or a signal
 /// arrives.
 pub(super) fn linux_fcntl_setlkw_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     (descriptor, command, address): (u64, u64, u64),
 ) -> u64 {
@@ -1048,7 +1048,7 @@ pub(super) fn linux_fcntl_setlkw_live_return(
 /// `number` again when it wakes (`LINUX_THREAD_WAIT_RETRY`), and switches
 /// to the ready sibling thread `target`.
 fn linux_retry_after_thread_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     target: LinuxThreadHandle,

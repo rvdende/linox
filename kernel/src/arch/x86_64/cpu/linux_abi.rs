@@ -445,10 +445,10 @@ pub(super) const LINUX_ARCH_GET_FS: u64 = 0x1003;
 pub(super) const LINUX_PROBE_EXIT_STATUS: u64 = 42;
 pub(super) const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub(super) const LINUX_CAPABILITY_DATA_SIZE: usize = 24;
-pub(super) const LINUX_RETURN_TO_KERNEL: u64 = (-4096_i64) as u64;
+pub(super) const LINUX_RETURN_TO_KERNEL: u64 = crate::trusted::entry::RETURN_TO_KERNEL;
 /// The length of the `syscall` instruction, for restarting a syscall.
 pub(super) const LINUX_SYSCALL_INSTRUCTION_SIZE: u64 = 2;
-pub(super) const LINUX_RETURN_FROM_IRET: u64 = (-4095_i64) as u64;
+pub(super) const LINUX_RETURN_FROM_IRET: u64 = crate::trusted::entry::RETURN_FROM_IRET;
 pub(super) const LINUX_EPERM: u64 = u64::MAX;
 pub(super) const LINUX_EIO: u64 = u64::MAX - 4;
 pub(super) const LINUX_ENXIO: u64 = u64::MAX - 5;

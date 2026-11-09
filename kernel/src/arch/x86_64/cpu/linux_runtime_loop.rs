@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(crate) fn execute_linux_process_child(
@@ -15,7 +16,7 @@ pub(crate) fn execute_linux_process_child(
     // The gate is installed before APs enter userspace. Avoid rewriting every
     // CPU's IDT while another CPU may already be executing the same path.
     let gate_installed = user_interrupt_surface_is_minimal()
-        || install_user_interrupt_gate(SYSCALL_VECTOR, linox_syscall_entry as *const () as usize);
+        || install_user_interrupt_gate(SYSCALL_VECTOR, EntryStub::native_system_call());
     let interrupt_surface_valid = user_interrupt_surface_is_minimal();
     let preconditions = u8::from(entry_valid)
         | (u8::from(stack_valid) << 1)
@@ -32,9 +33,9 @@ pub(crate) fn execute_linux_process_child(
         return None;
     }
     let saved_fs = active_fs_base();
-    unsafe { write_msr(FS_BASE_MSR, fs_base) };
+    let _ = msr::set_fs_base(fs_base);
     if active_fs_base() != fs_base {
-        unsafe { write_msr(FS_BASE_MSR, saved_fs) };
+        let _ = msr::set_fs_base(saved_fs);
         return None;
     }
     for (expected, value) in X86_RUNTIME
@@ -68,7 +69,7 @@ pub(crate) fn execute_linux_process_child(
         )
         .is_err()
     {
-        unsafe { write_msr(FS_BASE_MSR, saved_fs) };
+        let _ = msr::set_fs_base(saved_fs);
         return None;
     }
     // SAFETY: The caller has activated a root containing the validated RX
@@ -78,7 +79,7 @@ pub(crate) fn execute_linux_process_child(
     // validates that frame and returns to ring 3. A subsequent Linux exit(2)
     // trap captures its status and returns to the saved kernel stack because no
     // global native scheduler runtime is active.
-    unsafe { enter_linux_runtime_process(entry, stack, general.as_ptr(), 0x202) };
+    enter_linux_runtime_process(entry, stack, &general, 0x202);
     let child_fs_preserved = active_fs_base() == fs_base;
     let probe_state = X86_RUNTIME
         .PROCESS_CHILD_PROBE_STATE
@@ -92,7 +93,7 @@ pub(crate) fn execute_linux_process_child(
         .PROCESS_CHILD_EXIT_STATUS
         .get(cpu)?
         .swap(0, Ordering::SeqCst);
-    unsafe { write_msr(FS_BASE_MSR, saved_fs) };
+    let _ = msr::set_fs_base(saved_fs);
     let fs_restored = active_fs_base() == saved_fs;
     X86_RUNTIME.PROCESS_CHILD_EXECUTION_DIAGNOSTIC[cpu].store(
         0x80 | u8::from(child_fs_preserved)
@@ -128,16 +129,16 @@ pub(crate) fn resume_live_linux_process(
         write_linux_runtime_syscall_trace();
     }
     let saved_fs = active_fs_base();
-    unsafe { write_msr(FS_BASE_MSR, fs_base) };
+    let _ = msr::set_fs_base(fs_base);
     if active_fs_base() != fs_base {
-        unsafe { write_msr(FS_BASE_MSR, saved_fs) };
+        let _ = msr::set_fs_base(saved_fs);
         return false;
     }
     // SAFETY: The caller activated the generation-checked process root and
     // validated this complete return context against its private mappings.
     // A terminating or deferred Linux syscall returns through the saved kernel
     // stack installed by this entry stub.
-    unsafe { enter_linux_runtime_process(entry, stack, general.as_ptr(), rflags) };
+    enter_linux_runtime_process(entry, stack, &general, rflags);
     let returned_fs = active_fs_base();
     // A runtime process that came back to the kernel (an exit, an exec, a
     // fork, a yield or a preemption) may have left another thread current,
@@ -145,7 +146,7 @@ pub(crate) fn resume_live_linux_process(
     // entry loads the one its context names.
     let preserved = returned_fs == fs_base
         || X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) && returned_fs < 1 << 47;
-    unsafe { write_msr(FS_BASE_MSR, saved_fs) };
+    let _ = msr::set_fs_base(saved_fs);
     let restored = active_fs_base() == saved_fs;
     if !preserved
         && (X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
@@ -362,7 +363,7 @@ pub(super) enum LinuxBlockedWait {
 /// it cannot wait here (an application processor's caller restarts or
 /// waits as a thread wait).
 pub(super) fn run_other_linux_processes(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     wait: WaitOn,
@@ -375,7 +376,7 @@ pub(super) fn run_other_linux_processes(
 /// thread is ready, which may itself be only waiting to retry its call.
 /// On the boot CPU a thread always parks: its siblings run meanwhile.
 pub(super) fn run_other_linux_processes_deferring(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     wait: WaitOn,
@@ -697,10 +698,10 @@ pub(super) fn resume_parked_linux_thread(pid: u32, tid: u32) -> bool {
         .LINUX_CURRENT_PROCESS_PID
         .store(pid, Ordering::SeqCst);
     LINUX_PROCESS_SLICE[linux_cpu_slot()].store(0, Ordering::SeqCst);
-    // SAFETY: `pid` is current again: the scheduler loop restored its
-    // kernel state before resuming it; the resumed call installs its own
-    // entry state while it runs, and the runtime's is put back after.
-    unsafe { activation::resume(linux_thread_activation_owner(pid, tid), false) }.is_some()
+    // `pid` is current again: the scheduler loop restored its kernel state
+    // before resuming it; the resumed call installs its own entry state
+    // while it runs, and the runtime's is put back after.
+    activation::resume(linux_thread_activation_owner(pid, tid), false).is_some()
 }
 
 /// Ends thread `tid` of the current process `pid`, parked in a system
@@ -735,7 +736,7 @@ const LINUX_YIELD_ROTATION_MICROSECONDS: u64 = 250;
 static LINUX_YIELD_ROTATED_AT: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn linux_sched_yield_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     registers: LinuxSyscallFrame,
     user_stack: u64,
     user_rip: u64,
@@ -828,33 +829,22 @@ pub(super) fn linux_sched_yield_live_return(
 }
 
 pub(super) fn write_linux_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     context: LinuxUserContext,
 ) -> bool {
     if output.is_null() || !context.is_valid() {
         return false;
     }
-    // SAFETY: the entry assembly passes the live, aligned syscall frame and
-    // reads these return globals only after this handler returns. Interrupts
-    // remain disabled for the serialized update.
-    unsafe {
-        output.write(context.registers);
-        let entry_state = &mut *current_entry_state();
-        entry_state.kernel_frame = output as u64;
-        entry_state.user_rsp = context.rsp;
-        entry_state.user_rip = context.rip;
-        entry_state.user_rflags = context.rflags;
-    }
-    // SAFETY: the same serialized frame and globals remain exclusively owned
-    // by this syscall entry until the handler returns.
-    unsafe {
-        let entry_state = &*current_entry_state();
-        output.read() == context.registers
-            && entry_state.kernel_frame == output as u64
-            && entry_state.user_rsp == context.rsp
-            && entry_state.user_rip == context.rip
-            && entry_state.user_rflags == context.rflags
-    }
+    // The frame is the running call's (a handle writes only the live one),
+    // and the stub returns through it to the context set here.
+    output.write(context.registers)
+        && cpu_tables::set_user_return(context.rip, context.rsp, Some(context.rflags))
+        && output.read() == Some(context.registers)
+        && cpu_tables::entry_state().is_some_and(|entry_state| {
+            entry_state.user_rsp == context.rsp
+                && entry_state.user_rip == context.rip
+                && entry_state.user_rflags == context.rflags
+        })
 }
 
 /// The Linox-internal system call the vDSO's preemption entry makes; above
@@ -870,7 +860,7 @@ pub(super) const LINUX_VFORK_WAIT_SYSCALL: u64 = 0x4751;
 /// killable only; the others wait until the vfork returns.
 #[inline(never)]
 pub(super) fn linux_vfork_wait_live(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
 ) -> u64 {
     const SIGSTOP: u64 = 19;
@@ -932,7 +922,7 @@ pub(super) static LINUX_THREAD_CPU_MARK: [AtomicU64; CPU_ENTRY_STATE_LIMIT] =
 /// through the frame. None when there is no such thread or the switch
 /// cannot be made, and the preemption yields the process as before.
 pub(super) fn linux_preempted_owner_switches_to_kept_thread(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     preempted: &LinuxPreemptedContext,
 ) -> Option<u64> {
     let current = current_linux_thread_handle()?;
@@ -1018,7 +1008,7 @@ pub(super) fn linux_preempted_owner_switches_to_kept_thread(
 /// r11 are live there, not clobbered as by a system call); with nothing to
 /// deliver after all, the process carries on where it was.
 pub(super) fn linux_deliver_signal_to_interrupted(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     preempted: &LinuxPreemptedContext,
 ) -> u64 {
     let general = preempted.general;
@@ -1067,7 +1057,7 @@ pub(super) fn linux_deliver_signal_to_interrupted(
 /// Returns from the current system call to `rip` with exactly the registers
 /// in `general` (`process_general` order), through the IRETQ epilogue.
 pub(super) fn write_linux_exact_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     general: [u64; 15],
     rip: u64,
     rsp: u64,
@@ -1098,19 +1088,11 @@ pub(super) fn write_linux_exact_live_return(
     if !write_linux_live_return(output, context) {
         return false;
     }
-    // SAFETY: the serialized syscall entry owns this per-CPU state until the
-    // assembly epilogue consumes it.
-    unsafe {
-        let entry_state = &mut *current_entry_state();
-        entry_state.signal_rax = general[0];
-        entry_state.signal_rcx = general[2];
-        entry_state.signal_r11 = general[10];
-    }
-    true
+    cpu_tables::set_iret_registers(general[0], general[2], general[10])
 }
 
 pub(super) fn write_linux_thread_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     handle: LinuxThreadHandle,
     context: LinuxUserContext,
 ) -> bool {
@@ -1124,15 +1106,7 @@ pub(super) fn write_linux_thread_live_return(
     // instructions. Unlike a normal SYSCALL return, RCX and R11 are then live
     // application registers rather than the return RIP and RFLAGS. Publish the
     // exact saved values for the IRETQ epilogue used by cross-thread returns.
-    // SAFETY: the serialized syscall entry owns this per-CPU state until the
-    // assembly epilogue consumes it.
-    unsafe {
-        let entry_state = &mut *current_entry_state();
-        entry_state.signal_rax = general[0];
-        entry_state.signal_rcx = general[2];
-        entry_state.signal_r11 = general[10];
-    }
-    true
+    cpu_tables::set_iret_registers(general[0], general[2], general[10])
 }
 
 /// Resumes thread `tid` of process `pid`, parked in a system call and made
@@ -1658,7 +1632,7 @@ fn make_linux_process_current(pid: u32) -> bool {
 /// finishes or suspends the runtime. `first` runs before any other.
 pub(super) fn run_linux_runtime(
     mmap: u64,
-    saved_msrs: [u64; 5],
+    saved_msrs: SyscallMsrs,
     first: Option<u32>,
 ) -> LinuxElfResult {
     start_linux_smp_runtime();
@@ -1676,7 +1650,7 @@ pub(super) fn run_linux_runtime(
 /// ran without a failure.
 fn finish_linux_runtime(
     mmap: u64,
-    saved_msrs: [u64; 5],
+    saved_msrs: SyscallMsrs,
     mut forks_completed: bool,
 ) -> LinuxElfResult {
     if !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {

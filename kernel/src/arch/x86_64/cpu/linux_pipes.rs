@@ -260,7 +260,7 @@ pub(super) fn linux_open_named_fifo(flags: u64, handle: crate::linux_overlay::Ha
 /// a pipe opened only for reading into them; SPLICE_F_NONBLOCK makes one
 /// attempt (EAGAIN), and otherwise the call waits as writev or readv does.
 pub(super) fn linux_vmsplice_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     descriptor: u64,
     vectors: u64,
@@ -382,7 +382,7 @@ fn linux_splice_moved(moved: usize, failure: Option<u64>) -> LinuxSpliceStep {
 /// starts again, as a blocking pipe read does. Filling a pipe or socket with
 /// no reader raises SIGPIPE.
 fn linux_splice_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     number: u64,
     nonblocking: bool,
@@ -436,7 +436,7 @@ fn linux_splice_nonblocking(flags: u64, ends: [(u64, LinuxSpliceEnd); 2]) -> boo
 /// whose offset is the pointed-to value if given (left as it was in the
 /// file) or else the file position.
 pub(super) fn linux_splice(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     (source, source_offset): (u64, u64),
     (sink, sink_offset): (u64, u64),
@@ -487,7 +487,7 @@ pub(super) fn linux_splice(
 /// tee(2): copies up to `length` bytes from one pipe to another without
 /// consuming them.
 pub(super) fn linux_tee(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     source: u64,
     sink: u64,

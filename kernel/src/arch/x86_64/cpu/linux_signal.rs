@@ -196,7 +196,7 @@ pub(super) fn linux_rt_sigqueueinfo(
     thread: Option<u64>,
     signal: u64,
     information: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -573,7 +573,7 @@ fn linux_note_timer_signal_delivery(signal: u64, code: i32, value: u64) {
 }
 
 pub(super) fn linux_rt_sigtimedwait_live_return(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     set: u64,
     information: u64,
@@ -1450,7 +1450,7 @@ pub(super) fn linux_default_signal_stops(signal: u64) -> bool {
 /// with no frame to return through.
 fn linux_stop_current(
     signal: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     resume: LinuxUserContext,
 ) -> u64 {
     let pid = current_linux_process_pid();
@@ -1833,7 +1833,7 @@ fn linux_saved_target_signal_mask(target: u32) -> u64 {
 pub(super) fn linux_kill(
     pid: u64,
     generated: (u64, i32, Option<u64>),
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -1898,7 +1898,7 @@ pub(super) fn linux_kill(
 /// in Linux, the rest of the domain running meanwhile).
 fn linux_stop_in_call(
     signal: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     caller: LinuxUserContext,
     traced: bool,
 ) -> u64 {
@@ -2163,7 +2163,7 @@ fn linux_ptrace_regset(pid: u32, set: bool, kind: u64, iovec: u64) -> u64 {
 pub(super) fn linux_kill_current(
     generated: (u64, i32, Option<u64>),
     sender: Option<(u32, u32)>,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -2365,7 +2365,7 @@ pub(super) fn linux_kill_current(
 pub(super) fn linux_interrupt_blocked_wait(
     target: LinuxThreadHandle,
     generated: (u64, i32),
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     sender_return: LinuxUserContext,
 ) -> u64 {
     linux_deliver_signal_to_blocked_wait(
@@ -2381,7 +2381,7 @@ pub(super) fn linux_interrupt_blocked_wait(
 pub(super) fn linux_deliver_signal_to_blocked_wait(
     target: LinuxThreadHandle,
     generated: (u64, i32),
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     sender_return: LinuxUserContext,
     interrupted_result: u64,
     completed: bool,
@@ -2843,7 +2843,7 @@ pub(super) fn linux_send_resolved_thread_signal(
     target: LinuxThreadSignalTarget,
     signal: u64,
     code: i32,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -2875,7 +2875,7 @@ pub(super) fn linux_tgkill(
     thread_group: u64,
     thread: u64,
     signal: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -2910,7 +2910,7 @@ pub(super) fn linux_tgkill(
 pub(super) fn linux_tkill(
     thread: u64,
     signal: u64,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -2931,7 +2931,7 @@ pub(super) fn linux_send_thread_signal(
     target: LinuxThreadHandle,
     signal: u64,
     code: i32,
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -2999,7 +2999,7 @@ pub(super) fn linux_send_thread_signal(
 }
 
 pub(super) fn linux_deliver_pending_signal(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     interrupted: LinuxUserContext,
     return_registers: (u64, u64),
 ) -> u64 {
@@ -3042,7 +3042,7 @@ fn linux_syscall_restartable(number: u64) -> bool {
 /// EINTR, a handler installed with SA_RESTART returns into the call again,
 /// as Linux restarts it, instead of making it fail.
 pub(super) fn linux_deliver_pending_signal_restarting(
-    output: *mut LinuxSyscallFrame,
+    output: LinuxSyscallFrameHandle,
     mut interrupted: LinuxUserContext,
     return_registers: (u64, u64),
     restart: Option<u64>,
@@ -3293,7 +3293,7 @@ pub(super) fn deliver_linux_fault_signal(
     true
 }
 
-pub(super) fn linux_rt_sigreturn(output: *mut LinuxSyscallFrame, user_stack: u64) -> u64 {
+pub(super) fn linux_rt_sigreturn(output: LinuxSyscallFrameHandle, user_stack: u64) -> u64 {
     if output.is_null() || !X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
         return LINUX_EINVAL;
     }
@@ -3337,14 +3337,8 @@ pub(super) fn linux_rt_sigreturn(output: *mut LinuxSyscallFrame, user_stack: u64
     if pending_result == 0 && X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
         return 0;
     }
-    // SAFETY: the dedicated IRETQ epilogue consumes these values before this
-    // serialized syscall entry can be reused.
-    unsafe {
-        let entry_state = &mut *current_entry_state();
-        entry_state.signal_rax = restored.user.rax;
-        entry_state.signal_rcx = restored.rcx;
-        entry_state.signal_r11 = restored.r11;
-    }
+    // The IRETQ epilogue returns with these.
+    let _ = cpu_tables::set_iret_registers(restored.user.rax, restored.rcx, restored.r11);
     LINUX_RETURN_FROM_IRET
 }
 

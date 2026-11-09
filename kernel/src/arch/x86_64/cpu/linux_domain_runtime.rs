@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(crate) fn execute_auxiliary(
@@ -10,19 +11,17 @@ pub(crate) fn execute_auxiliary(
     if !install_current_scheduler_fs_base() {
         return;
     }
-    unsafe {
-        let _ = enter_user(
-            entry,
-            stack,
-            0,
-            console_handle,
-            0,
-            4,
-            domain_id,
-            service_identity,
-            0,
-        );
-    };
+    let _ = enter_user(
+        entry,
+        stack,
+        0,
+        console_handle,
+        0,
+        4,
+        domain_id,
+        service_identity,
+        0,
+    );
 }
 
 pub(crate) fn execute_packet_consumer(
@@ -37,19 +36,17 @@ pub(crate) fn execute_packet_consumer(
     if !install_current_scheduler_fs_base() {
         return;
     }
-    unsafe {
-        let _ = enter_user(
-            entry,
-            stack,
-            expected_sequence,
-            packet_handle,
-            u64::from(more_pending),
-            4,
-            domain_id,
-            service_identity,
-            0,
-        );
-    };
+    let _ = enter_user(
+        entry,
+        stack,
+        expected_sequence,
+        packet_handle,
+        u64::from(more_pending),
+        4,
+        domain_id,
+        service_identity,
+        0,
+    );
 }
 
 pub(crate) fn execute_native_auxiliary(
@@ -63,19 +60,17 @@ pub(crate) fn execute_native_auxiliary(
     if !install_current_scheduler_fs_base() {
         return;
     }
-    unsafe {
-        let _ = enter_user(
-            entry,
-            stack,
-            boot_info,
-            capability,
-            0,
-            4,
-            domain_id,
-            service_identity,
-            0,
-        );
-    };
+    let _ = enter_user(
+        entry,
+        stack,
+        boot_info,
+        capability,
+        0,
+        4,
+        domain_id,
+        service_identity,
+        0,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -115,19 +110,17 @@ pub(crate) fn execute_native_controller(
             .store(0, Ordering::Release);
         return;
     }
-    unsafe {
-        let _ = enter_user(
-            entry,
-            stack,
-            console_handle,
-            host_handle,
-            network_handle,
-            4,
-            domain_id,
-            service_identity,
-            root_handle,
-        );
-    };
+    let _ = enter_user(
+        entry,
+        stack,
+        console_handle,
+        host_handle,
+        network_handle,
+        4,
+        domain_id,
+        service_identity,
+        root_handle,
+    );
 }
 
 pub(crate) fn resume_native_controller(domain_id: u64) -> bool {
@@ -145,9 +138,9 @@ pub(crate) fn resume_native_controller(domain_id: u64) -> bool {
         return false;
     }
     let general = context.general();
-    // SAFETY: the scheduler retained the complete validated controller trap
-    // context while its lifecycle request was serviced by the kernel.
-    unsafe { enter_linux_process(entry, stack, general.as_ptr(), context.flags()) };
+    // The scheduler retained the complete validated controller trap context
+    // while its lifecycle request was serviced by the kernel.
+    process_user_enter(entry, stack, &general, context.flags());
     true
 }
 
@@ -831,8 +824,12 @@ fn redraw_container_console(slot: usize) {
     }
 }
 
-pub(super) fn container_control(domain_id: u64, capability: u64, frame: *mut UserTrapFrame) -> u64 {
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
+pub(super) fn container_control(
+    domain_id: u64,
+    capability: u64,
+    frame: Option<&mut UserTrapFrame>,
+) -> u64 {
+    let Some(frame) = frame else {
         return u64::MAX - 2;
     };
     if !domain::handle_permits(domain_id, capability, 1, Rights::MANAGE) {
@@ -1833,10 +1830,7 @@ pub(super) fn scrub_service_restart_stack() -> bool {
     let Some((root, stack_top)) = scheduler::service_restart_stack_mapping() else {
         return false;
     };
-    let active_root: u64;
-    unsafe {
-        asm!("mov {}, cr3", out(reg) active_root, options(nomem, nostack, preserves_flags));
-    }
+    let active_root = crate::trusted::root::current();
     let Some(stack_base) = stack_top.checked_sub(PAGE_SIZE as u64) else {
         return false;
     };
@@ -1847,18 +1841,10 @@ pub(super) fn scrub_service_restart_stack() -> bool {
     let mut observed = [0xff_u8; 128];
     let mut scrubbed = true;
     for offset in (0..PAGE_SIZE).step_by(zeroes.len()) {
-        scrubbed &= unsafe {
-            raw_copy_to_user(
-                (stack_base as usize + offset) as *mut u8,
-                zeroes.as_ptr(),
-                zeroes.len(),
-            ) == 0
-                && raw_copy_from_user(
-                    observed.as_mut_ptr(),
-                    (stack_base as usize + offset) as *const u8,
-                    observed.len(),
-                ) == 0
-        } && observed == zeroes;
+        let address = stack_base + offset as u64;
+        scrubbed &= crate::trusted::user_copy::copy_to_user(address, &zeroes) == zeroes.len()
+            && crate::trusted::user_copy::copy_from_user(address, &mut observed) == observed.len()
+            && observed == zeroes;
         if !scrubbed {
             break;
         }

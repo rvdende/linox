@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub(super) use crate::trusted::cpu_tables::CpuEntryState;
 use crate::trusted::cpu_tables::{self, CpuStackArray, CpuTables, Gate, KERNEL_GATE, USER_GATE};
+use crate::trusted::entry::EntryStub;
 use crate::trusted::{control, tsc};
 
 use super::{
@@ -77,12 +78,6 @@ pub(crate) fn install_for_cpu(cpu: usize) -> bool {
     CPU_TABLES.install(cpu) && entry_state_is_installed() && exception_gates_are_valid(cpu)
 }
 
-/// This CPU's entry state, for the entry paths, which read and write it as
-/// the stubs do through GS.
-pub(super) fn current_entry_state() -> *mut CpuEntryState {
-    CPU_TABLES.current_entry_state()
-}
-
 /// A copy of this CPU's entry state, for checks.
 pub(super) fn current_entry_state_copy() -> Option<CpuEntryState> {
     CPU_TABLES.current_entry_state_copy()
@@ -94,11 +89,7 @@ pub(super) fn with_entry_state_restored<R>(body: impl FnOnce() -> R) -> R {
 }
 
 fn entry_state_is_installed() -> bool {
-    // The exception stubs' table cpu.rs declares is the one the trusted core
-    // reads the exception gates from.
-    core::ptr::addr_of!(super::linox_exception_entries).cast::<usize>()
-        == cpu_tables::exception_entries()
-        && CPU_TABLES.current_index().is_some()
+    CPU_TABLES.current_index().is_some()
 }
 
 pub(crate) fn current_cpu_index() -> usize {
@@ -261,13 +252,13 @@ pub(crate) fn stack_guard_pages() -> [usize; CPU_ENTRY_STATE_LIMIT * 10] {
 }
 
 /// Installs a non-exception interrupt gate while interrupts are disabled.
-pub(crate) fn install_interrupt_gate(vector: u8, handler: usize) -> bool {
-    if vector < 32 || handler == 0 {
+pub(crate) fn install_interrupt_gate(vector: u8, stub: EntryStub) -> bool {
+    if vector < 32 {
         return false;
     }
     // Bootstrap remains single-threaded with interrupts disabled, and the
     // vector is outside the exception range.
-    if !CPU_TABLES.set_gate_on_every_cpu(vector, handler, KERNEL_GATE) {
+    if !CPU_TABLES.set_gate_on_every_cpu(vector, Some(stub), KERNEL_GATE) {
         return false;
     }
     let entry = CPU_TABLES.gate(current_cpu_index(), usize::from(vector));
@@ -281,17 +272,17 @@ pub(crate) fn clear_interrupt_gate(vector: u8) -> bool {
     }
     // The caller has quiesced the interrupt source and keeps interrupts
     // disabled while replacing this non-reserved gate.
-    CPU_TABLES.set_gate_on_every_cpu(vector, 0, KERNEL_GATE)
+    CPU_TABLES.set_gate_on_every_cpu(vector, None, KERNEL_GATE)
         && CPU_TABLES
             .gate(current_cpu_index(), usize::from(vector))
             .is_missing()
 }
 
-pub(super) fn install_user_interrupt_gate(vector: u8, handler: usize) -> bool {
-    if vector < 32 || handler == 0 {
+pub(super) fn install_user_interrupt_gate(vector: u8, stub: EntryStub) -> bool {
+    if vector < 32 {
         return false;
     }
-    CPU_TABLES.set_gate_on_every_cpu(vector, handler, USER_GATE)
+    CPU_TABLES.set_gate_on_every_cpu(vector, Some(stub), USER_GATE)
         && CPU_TABLES
             .gate(current_cpu_index(), usize::from(vector))
             .attributes

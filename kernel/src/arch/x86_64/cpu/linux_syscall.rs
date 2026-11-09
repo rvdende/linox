@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 /// Every this many system calls of a domain, one line names the process,
@@ -45,9 +46,9 @@ pub(super) fn linux_syscall_entries_here() -> &'static AtomicU64 {
     &LINUX_SYSCALL_ENTRIES[cpu]
 }
 
-pub(super) extern "sysv64" fn linux_syscall_handler(
+pub(crate) extern "sysv64" fn linux_syscall_handler(
     number: u64,
-    registers: *mut LinuxSyscallFrame,
+    registers: LinuxSyscallFrameHandle,
     user_stack: u64,
     user_rip: u64,
     user_rflags: u64,
@@ -66,9 +67,7 @@ pub(super) extern "sysv64" fn linux_syscall_handler(
     let inotify = if registers.is_null() {
         None
     } else {
-        // SAFETY: as in linux_syscall_dispatch, the entry stub passes the
-        // aligned base of the saved register frame.
-        let saved = unsafe { registers.read() };
+        let saved = registers.read().unwrap_or(LinuxSyscallFrame::ZERO);
         let argument = |index: usize| saved.argument(index).unwrap_or(0);
         linux_inotify_before(
             number,
@@ -147,14 +146,12 @@ fn linux_syscall_may_change_waits(number: u64) -> bool {
 /// trace, and a traced process's children are traced too.
 fn linux_strace_call(
     number: u64,
-    registers: *mut LinuxSyscallFrame,
+    registers: LinuxSyscallFrameHandle,
 ) -> Option<crate::linux_strace::Call> {
     if registers.is_null() || !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Relaxed) {
         return None;
     }
-    // SAFETY: as in linux_syscall_dispatch, the entry stub passes the
-    // aligned base of the saved register frame.
-    let saved = unsafe { registers.read() };
+    let saved = registers.read().unwrap_or(LinuxSyscallFrame::ZERO);
     let argument = |index: usize| saved.argument(index).unwrap_or(0);
     // Arguments in order: rdi, rsi, rdx, r10.
     let arguments = [argument(5), argument(4), argument(3), argument(0)];
@@ -229,7 +226,7 @@ fn linux_environment_requests_strace(address: u64) -> bool {
 /// reaches the caller as the call returns (fcntl38).
 fn linux_syscall_dispatch(
     number: u64,
-    registers: *mut LinuxSyscallFrame,
+    registers: LinuxSyscallFrameHandle,
     (user_stack, user_rip, user_rflags): (u64, u64, u64),
     inotify: Option<LinuxInotifyCall>,
 ) -> u64 {
@@ -239,9 +236,7 @@ fn linux_syscall_dispatch(
         return LINUX_RETURN_TO_KERNEL;
     }
     crate::linux_profile::count_syscall(number);
-    // SAFETY: the assembly entry stub passes the aligned base of the exact
-    // twelve-register frame represented by LinuxSyscallFrame.
-    let saved_registers = unsafe { registers.read() };
+    let saved_registers = registers.read().unwrap_or(LinuxSyscallFrame::ZERO);
     let fast_runtime_syscall = X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Acquire)
         && X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::Acquire)
         && !X86_RUNTIME.ELF_PROBE_SECCOMP_STRICT.load(Ordering::Acquire)
@@ -2553,14 +2548,11 @@ fn linux_syscall_dispatch(
     // at a system call holds exactly those values anyway.)
     if switched_thread && result != LINUX_RETURN_TO_KERNEL && result != LINUX_RETURN_FROM_IRET {
         if let Some(slot) = current_linux_thread_slot() {
-            // SAFETY: the serialized syscall entry owns this per-CPU state
-            // until the assembly epilogue consumes it.
-            unsafe {
-                let entry_state = &mut *current_entry_state();
-                entry_state.signal_rax = result;
-                entry_state.signal_rcx = X86_RUNTIME.LINUX_THREAD_RCXS[slot].load(Ordering::SeqCst);
-                entry_state.signal_r11 = X86_RUNTIME.LINUX_THREAD_R11S[slot].load(Ordering::SeqCst);
-            }
+            let _ = cpu_tables::set_iret_registers(
+                result,
+                X86_RUNTIME.LINUX_THREAD_RCXS[slot].load(Ordering::SeqCst),
+                X86_RUNTIME.LINUX_THREAD_R11S[slot].load(Ordering::SeqCst),
+            );
             return LINUX_RETURN_FROM_IRET;
         }
     }
