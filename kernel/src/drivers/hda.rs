@@ -11,10 +11,11 @@
 //! controller and discards stale lines before reading what the controller
 //! wrote; on a snooping controller that costs a few cache-line flushes.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use super::pci::{Function, Identity};
-use super::{delay_ms, flush_cache, wait_until_ms, DmaPage, DmaRegion};
+use super::{delay_ms, wait_until_ms, DmaRegion};
+use crate::trusted::dma::{DmaPages, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const CAPABILITIES: usize = 0x00;
@@ -95,10 +96,10 @@ const AMD_MISC_CONTROL: u8 = 0x40;
 const AMD_MISC_CONTROL_SHIFT: u32 = 16;
 const AMD_ENABLE_SNOOP: u32 = 0x02;
 
-static mut CORB: DmaPage = DmaPage::ZERO;
-static mut RIRB: DmaPage = DmaPage::ZERO;
-static mut BUFFER_LIST: DmaPage = DmaPage::ZERO;
-static mut SAMPLES: [DmaPage; AUDIO_PAGES] = [DmaPage::ZERO; AUDIO_PAGES];
+static CORB: StaticDma<1> = StaticDma::new();
+static RIRB: StaticDma<1> = StaticDma::new();
+static BUFFER_LIST: StaticDma<1> = StaticDma::new();
+static SAMPLES: StaticDma<AUDIO_PAGES> = StaticDma::new();
 
 /// Returns whether `device` is a High Definition Audio controller.
 pub(crate) fn is_supported(device: &Identity) -> bool {
@@ -108,10 +109,10 @@ pub(crate) fn is_supported(device: &Identity) -> bool {
 /// The memory HD Audio controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 4] {
     [
-        DmaRegion::of(addr_of!(CORB)),
-        DmaRegion::of(addr_of!(RIRB)),
-        DmaRegion::of(addr_of!(BUFFER_LIST)),
-        DmaRegion::of(addr_of!(SAMPLES)),
+        DmaRegion::from(CORB.region()),
+        DmaRegion::from(RIRB.region()),
+        DmaRegion::from(BUFFER_LIST.region()),
+        DmaRegion::from(SAMPLES.region()),
     ]
 }
 
@@ -126,6 +127,8 @@ pub(crate) enum Error {
     NoOutputStream,
     NoOutputPath,
     StreamResetTimedOut,
+    /// Another controller holds the driver's DMA pages.
+    Busy,
 }
 
 /// One output pin of a codec, as its default configuration describes it.
@@ -183,20 +186,28 @@ pub(crate) struct Codec {
 /// A reset controller with its command rings running.
 pub(crate) struct Controller {
     registers: Mmio,
+    corb: DmaPages,
+    rirb: DmaPages,
+    buffer_list: DmaPages,
+    samples: DmaPages,
     corb_write: u16,
     rirb_read: u16,
     codecs: u16,
 }
 
 impl Controller {
-    /// Resets `function` and starts its CORB and RIRB.
-    ///
-    /// # Safety
-    ///
-    /// `function` must be an HD Audio controller that nothing else drives,
-    /// with its registers and this driver's DMA pages identity mapped. Only
-    /// one controller may be open at a time.
-    pub(crate) unsafe fn open(function: Function) -> Result<Self, Error> {
+    /// Resets `function` and starts its CORB and RIRB. `function` must be
+    /// an HD Audio controller that nothing else drives; only one controller
+    /// can be open at a time (it holds the driver's DMA pages).
+    pub(crate) fn open(function: Function) -> Result<Self, Error> {
+        let (Some(corb), Some(rirb), Some(buffer_list), Some(samples)) = (
+            CORB.claim(),
+            RIRB.claim(),
+            BUFFER_LIST.claim(),
+            SAMPLES.claim(),
+        ) else {
+            return Err(Error::Busy);
+        };
         let base = function
             .memory_bar(0)
             .and_then(|bar| Mmio::firmware(bar, REGISTER_BYTES))
@@ -236,22 +247,21 @@ impl Controller {
             return Err(Error::NoCodecs);
         }
 
-        (*addr_of_mut!(CORB)).0.fill(0);
-        (*addr_of_mut!(RIRB)).0.fill(0);
-        flush_cache(addr_of!(CORB) as usize, 4096);
-        flush_cache(addr_of!(RIRB) as usize, 4096);
-        let corb = addr_of!(CORB) as u64;
-        let rirb = addr_of!(RIRB) as u64;
-        base.write::<u32>(CORB_LOW, corb as u32);
-        base.write::<u32>(CORB_HIGH, (corb >> 32) as u32);
+        corb.fill(0, 4096, 0);
+        rirb.fill(0, 4096, 0);
+        corb.flush_cache(0, 4096);
+        rirb.flush_cache(0, 4096);
+        let (corb_address, rirb_address) = (corb.device_address(0), rirb.device_address(0));
+        base.write::<u32>(CORB_LOW, corb_address as u32);
+        base.write::<u32>(CORB_HIGH, (corb_address >> 32) as u32);
         base.write::<u8>(CORB_SIZE, RING_256);
         base.write::<u16>(CORB_WRITE, 0);
         base.write::<u16>(CORB_READ, CORB_READ_RESET);
         let _ = wait_until_ms(10, || base.read::<u16>(CORB_READ) & CORB_READ_RESET != 0);
         base.write::<u16>(CORB_READ, 0);
         let _ = wait_until_ms(10, || base.read::<u16>(CORB_READ) & CORB_READ_RESET == 0);
-        base.write::<u32>(RIRB_LOW, rirb as u32);
-        base.write::<u32>(RIRB_HIGH, (rirb >> 32) as u32);
+        base.write::<u32>(RIRB_LOW, rirb_address as u32);
+        base.write::<u32>(RIRB_HIGH, (rirb_address >> 32) as u32);
         base.write::<u8>(RIRB_SIZE, RING_256);
         base.write::<u16>(RIRB_WRITE, RIRB_WRITE_RESET);
         // Controllers may stop writing responses once this many are
@@ -262,6 +272,10 @@ impl Controller {
         base.write::<u8>(RIRB_CONTROL, RING_RUN);
         Ok(Self {
             registers: base,
+            corb,
+            rirb,
+            buffer_list,
+            samples,
             corb_write: 0,
             rirb_read: 0,
             codecs,
@@ -334,23 +348,20 @@ impl Controller {
             .window(STREAMS + inputs * STREAM_STRIDE, STREAM_STRIDE)
             .ok_or(Error::NoOutputStream)?;
 
-        let bytes = fill_tone();
+        let bytes = fill_tone(&self.samples);
         let half = (bytes / 2) as u32;
-        let samples = addr_of!(SAMPLES) as u64;
-        // SAFETY: the buffer list page belongs to this driver; its two
-        // entries each cover half of the sample pages.
-        unsafe {
-            let list = addr_of_mut!(BUFFER_LIST).cast::<u32>();
-            for (index, address) in [samples, samples + u64::from(half)].into_iter().enumerate() {
-                let entry = list.add(index * 4);
-                entry.write_volatile(address as u32);
-                entry.add(1).write_volatile((address >> 32) as u32);
-                entry.add(2).write_volatile(half);
-                entry.add(3).write_volatile(0);
-            }
+        let samples = self.samples.device_address(0);
+        // The buffer list's two entries each cover half of the sample pages.
+        for (index, address) in [samples, samples + u64::from(half)].into_iter().enumerate() {
+            let entry = index * 16;
+            self.buffer_list.write::<u32>(entry, address as u32);
+            self.buffer_list
+                .write::<u32>(entry + 4, (address >> 32) as u32);
+            self.buffer_list.write::<u32>(entry + 8, half);
+            self.buffer_list.write::<u32>(entry + 12, 0);
         }
-        flush_cache(addr_of!(BUFFER_LIST) as usize, 4096);
-        flush_cache(samples as usize, bytes);
+        self.buffer_list.flush_cache(0, 4096);
+        self.samples.flush_cache(0, bytes);
 
         stream.write::<u32>(STREAM_CONTROL, STREAM_RESET);
         if !wait_until_ms(100, || {
@@ -364,7 +375,7 @@ impl Controller {
         }) {
             return Err(Error::StreamResetTimedOut);
         }
-        let list = addr_of!(BUFFER_LIST) as u64;
+        let list = self.buffer_list.device_address(0);
         stream.write::<u32>(STREAM_BDL_LOW, list as u32);
         stream.write::<u32>(STREAM_BDL_HIGH, (list >> 32) as u32);
         stream.write::<u32>(STREAM_LENGTH, bytes as u32);
@@ -422,16 +433,10 @@ impl Controller {
 
     fn send(&mut self, command: u32) -> Result<u32, Error> {
         self.corb_write = (self.corb_write + 1) % RING_ENTRIES as u16;
-        // SAFETY: the CORB page belongs to this driver, and the controller
-        // only reads entries up to the write pointer.
-        let entry = unsafe {
-            let entry = addr_of_mut!(CORB)
-                .cast::<u32>()
-                .add(usize::from(self.corb_write));
-            entry.write_volatile(command);
-            entry
-        };
-        flush_cache(entry as usize, 4);
+        // The controller only reads entries up to the write pointer.
+        let entry = usize::from(self.corb_write) * 4;
+        self.corb.write::<u32>(entry, command);
+        self.corb.flush_cache(entry, 4);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.registers.write::<u16>(CORB_WRITE, self.corb_write);
         let next = (self.rirb_read + 1) % RING_ENTRIES as u16;
@@ -441,13 +446,12 @@ impl Controller {
             return Err(Error::CommandTimedOut);
         }
         self.rirb_read = next;
-        // SAFETY: the controller wrote the response before moving its
-        // write pointer; each entry is a response and a codec tag.
-        let entry = unsafe { addr_of!(RIRB).cast::<u32>().add(usize::from(next) * 2) };
+        // The controller wrote the response before moving its write
+        // pointer; each entry is a response and a codec tag.
+        let entry = usize::from(next) * 8;
         // Drop any stale cached copy of the entry the controller wrote.
-        flush_cache(entry as usize, 8);
-        // SAFETY: as above.
-        let response = unsafe { entry.read_volatile() };
+        self.rirb.flush_cache(entry, 8);
+        let response = self.rirb.read::<u32>(entry);
         self.registers.write::<u8>(RIRB_STATUS, RIRB_STATUS_CLEAR);
         Ok(response)
     }
@@ -484,21 +488,19 @@ impl IntoIterator for CodecAddresses {
 }
 
 /// Fills the sample pages with a 440 Hz square wave in 16-bit stereo and
-/// returns their length in bytes.
-fn fill_tone() -> usize {
+/// returns their length in bytes. No stream runs while they are written.
+fn fill_tone(samples: &DmaPages) -> usize {
     let frames = AUDIO_PAGES * 4096 / 4;
     let half_period = (SAMPLE_RATE / TONE_HZ / 2) as usize;
-    // SAFETY: the sample pages belong to this driver and no stream is
-    // running while they are written.
-    let samples =
-        unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(SAMPLES).cast::<i16>(), frames * 2) };
-    for (frame, pair) in samples.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+    for frame in 0..frames {
         let level = if (frame / half_period).is_multiple_of(2) {
             TONE_AMPLITUDE
         } else {
             -TONE_AMPLITUDE
         };
-        pair.fill(level);
+        // Left and right, each a little-endian 16-bit sample.
+        let sample = u32::from(level as u16);
+        samples.write::<u32>(frame * 4, sample | sample << 16);
     }
     frames * 4
 }

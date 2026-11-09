@@ -4,11 +4,12 @@
 //! The driver exists to test the shared network code in QEMU; the PCs it is
 //! aimed at mostly carry Realtek controllers.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use super::net::{Nic, FRAME_LIMIT};
 use super::pci::{Function, Identity};
-use super::{delay_ms, wait_until_ms, DmaPage, DmaRegion};
+use super::{delay_ms, wait_until_ms, DmaRegion};
+use crate::trusted::dma::{DmaPages, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const VENDOR_INTEL: u16 = 0x8086;
@@ -53,12 +54,11 @@ const TRANSMIT_TIMEOUT_MS: u64 = 100;
 /// The 82574's memory BAR (datasheet section 9.3.11): 128 KiB.
 const REGISTER_BYTES: usize = 0x2_0000;
 
-static mut RECEIVE_RING: DmaPage = DmaPage::ZERO;
-static mut TRANSMIT_RING: DmaPage = DmaPage::ZERO;
-static mut RECEIVE_BUFFERS: [DmaPage; RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096] =
-    [DmaPage::ZERO; RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096];
-static mut TRANSMIT_BUFFERS: [DmaPage; TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096] =
-    [DmaPage::ZERO; TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096];
+static RECEIVE_RING: StaticDma<1> = StaticDma::new();
+static TRANSMIT_RING: StaticDma<1> = StaticDma::new();
+static RECEIVE_BUFFERS: StaticDma<{ RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096 }> = StaticDma::new();
+static TRANSMIT_BUFFERS: StaticDma<{ TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096 }> =
+    StaticDma::new();
 
 /// Returns whether `device` is an 82574.
 pub(crate) fn is_supported(device: &Identity) -> bool {
@@ -68,16 +68,20 @@ pub(crate) fn is_supported(device: &Identity) -> bool {
 /// The memory 82574 controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 4] {
     [
-        DmaRegion::of(addr_of!(RECEIVE_RING)),
-        DmaRegion::of(addr_of!(TRANSMIT_RING)),
-        DmaRegion::of(addr_of!(RECEIVE_BUFFERS)),
-        DmaRegion::of(addr_of!(TRANSMIT_BUFFERS)),
+        DmaRegion::from(RECEIVE_RING.region()),
+        DmaRegion::from(TRANSMIT_RING.region()),
+        DmaRegion::from(RECEIVE_BUFFERS.region()),
+        DmaRegion::from(TRANSMIT_BUFFERS.region()),
     ]
 }
 
 /// A running controller.
 pub(crate) struct Controller {
     registers: Mmio,
+    receive_ring: DmaPages,
+    transmit_ring: DmaPages,
+    receive_buffers: DmaPages,
+    transmit_buffers: DmaPages,
     mac: [u8; 6],
     next_receive: usize,
     next_transmit: usize,
@@ -85,14 +89,14 @@ pub(crate) struct Controller {
 
 impl Controller {
     /// Resets the controller and starts its receive and transmit rings.
-    ///
-    /// # Safety
-    ///
-    /// `function` must be an 82574 that nothing else drives, with its
-    /// registers and this driver's DMA pages identity mapped. Only one
-    /// controller may be open at a time.
-    pub(crate) unsafe fn open(function: Function) -> Option<Self> {
+    /// `function` must be an 82574 that nothing else drives; only one
+    /// controller can be open at a time (it holds the driver's DMA pages).
+    pub(crate) fn open(function: Function) -> Option<Self> {
         let registers = Mmio::firmware(function.memory_bar(0)?, REGISTER_BYTES)?;
+        let receive_ring = RECEIVE_RING.claim()?;
+        let transmit_ring = TRANSMIT_RING.claim()?;
+        let receive_buffers = RECEIVE_BUFFERS.claim()?;
+        let transmit_buffers = TRANSMIT_BUFFERS.claim()?;
         function.enable_memory_and_bus_master();
         registers.write::<u32>(INTERRUPT_MASK_CLEAR, u32::MAX);
         registers.write::<u32>(CONTROL, registers.read::<u32>(CONTROL) | CONTROL_RESET);
@@ -122,22 +126,21 @@ impl Controller {
             registers.write::<u32>(MULTICAST_TABLE + index * 4, 0);
         }
 
-        let receive_ring = addr_of_mut!(RECEIVE_RING).cast::<u64>();
         for index in 0..RECEIVE_DESCRIPTORS {
-            receive_ring
-                .add(index * 2)
-                .write_volatile(receive_buffer(index) as u64);
-            receive_ring.add(index * 2 + 1).write_volatile(0);
+            receive_ring.write::<u64>(
+                index * 16,
+                receive_buffers.device_address(index * BUFFER_SIZE),
+            );
+            receive_ring.write::<u64>(index * 16 + 8, 0);
         }
-        let transmit_ring = addr_of_mut!(TRANSMIT_RING).cast::<u64>();
         for index in 0..TRANSMIT_DESCRIPTORS * 2 {
-            transmit_ring.add(index).write_volatile(0);
+            transmit_ring.write::<u64>(index * 8, 0);
         }
         write64(
             &registers,
             RECEIVE_BASE_LOW,
             RECEIVE_BASE_HIGH,
-            receive_ring as u64,
+            receive_ring.device_address(0),
         );
         registers.write::<u32>(RECEIVE_LENGTH, (RECEIVE_DESCRIPTORS * 16) as u32);
         registers.write::<u32>(RECEIVE_HEAD, 0);
@@ -146,7 +149,7 @@ impl Controller {
             &registers,
             TRANSMIT_BASE_LOW,
             TRANSMIT_BASE_HIGH,
-            transmit_ring as u64,
+            transmit_ring.device_address(0),
         );
         registers.write::<u32>(TRANSMIT_LENGTH, (TRANSMIT_DESCRIPTORS * 16) as u32);
         registers.write::<u32>(TRANSMIT_HEAD, 0);
@@ -165,6 +168,10 @@ impl Controller {
         );
         Some(Self {
             registers,
+            receive_ring,
+            transmit_ring,
+            receive_buffers,
+            transmit_buffers,
             mac,
             next_receive: 0,
             next_transmit: 0,
@@ -187,72 +194,45 @@ impl Nic for Controller {
             return false;
         }
         let index = self.next_transmit;
-        // SAFETY: the descriptor and its buffer belong to this driver, and
-        // the controller is done with them (checked below before reuse).
-        unsafe {
-            let buffer = transmit_buffer(index);
-            core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer, frame.len());
-            let descriptor = addr_of_mut!(TRANSMIT_RING).cast::<u64>().add(index * 2);
-            descriptor.write_volatile(buffer as u64);
-            let command = COMMAND_REPORT_STATUS | COMMAND_INSERT_FCS | DESCRIPTOR_END_OF_PACKET;
-            descriptor
-                .add(1)
-                .write_volatile(frame.len() as u64 | u64::from(command) << 24);
-        }
+        // The controller is done with the descriptor and its buffer
+        // (checked below before reuse).
+        let buffer = index * BUFFER_SIZE;
+        self.transmit_buffers.write_bytes(buffer, frame);
+        let descriptor = index * 16;
+        self.transmit_ring
+            .write::<u64>(descriptor, self.transmit_buffers.device_address(buffer));
+        let command = COMMAND_REPORT_STATUS | COMMAND_INSERT_FCS | DESCRIPTOR_END_OF_PACKET;
+        self.transmit_ring.write::<u64>(
+            descriptor + 8,
+            frame.len() as u64 | u64::from(command) << 24,
+        );
         self.next_transmit = (index + 1) % TRANSMIT_DESCRIPTORS;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.registers
             .write::<u32>(TRANSMIT_TAIL, self.next_transmit as u32);
+        // The controller writes the status byte back.
         wait_until_ms(TRANSMIT_TIMEOUT_MS, || {
-            // SAFETY: the status byte is written back by the controller.
-            let status = unsafe {
-                addr_of!(TRANSMIT_RING)
-                    .cast::<u8>()
-                    .add(index * 16 + 12)
-                    .read_volatile()
-            };
-            status & DESCRIPTOR_DONE != 0
+            self.transmit_ring.read::<u8>(index * 16 + 12) & DESCRIPTOR_DONE != 0
         })
     }
 
     fn receive(&mut self, buffer: &mut [u8; FRAME_LIMIT]) -> Option<usize> {
         let index = self.next_receive;
-        // SAFETY: the descriptor belongs to this driver; the controller set
-        // its done bit after writing the buffer.
-        unsafe {
-            let descriptor = addr_of_mut!(RECEIVE_RING).cast::<u8>().add(index * 16);
-            let status = descriptor.add(12).read_volatile();
-            if status & DESCRIPTOR_DONE == 0 {
-                return None;
-            }
-            let length = usize::from(descriptor.add(8).cast::<u16>().read_volatile());
-            let copied = length.min(FRAME_LIMIT);
-            core::ptr::copy_nonoverlapping(receive_buffer(index), buffer.as_mut_ptr(), copied);
-            descriptor.add(12).write_volatile(0);
-            self.next_receive = (index + 1) % RECEIVE_DESCRIPTORS;
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            self.registers.write::<u32>(RECEIVE_TAIL, index as u32);
-            Some(copied)
+        // The controller sets the done bit after writing the buffer.
+        let descriptor = index * 16;
+        let status = self.receive_ring.read::<u8>(descriptor + 12);
+        if status & DESCRIPTOR_DONE == 0 {
+            return None;
         }
-    }
-}
-
-fn receive_buffer(index: usize) -> *mut u8 {
-    // SAFETY: index is below RECEIVE_DESCRIPTORS, so the offset stays in
-    // the buffer array.
-    unsafe {
-        addr_of_mut!(RECEIVE_BUFFERS)
-            .cast::<u8>()
-            .add(index * BUFFER_SIZE)
-    }
-}
-
-fn transmit_buffer(index: usize) -> *mut u8 {
-    // SAFETY: as for receive_buffer.
-    unsafe {
-        addr_of_mut!(TRANSMIT_BUFFERS)
-            .cast::<u8>()
-            .add(index * BUFFER_SIZE)
+        let length = usize::from(self.receive_ring.read::<u16>(descriptor + 8));
+        let copied = length.min(FRAME_LIMIT);
+        self.receive_buffers
+            .read_bytes(index * BUFFER_SIZE, &mut buffer[..copied]);
+        self.receive_ring.write::<u8>(descriptor + 12, 0);
+        self.next_receive = (index + 1) % RECEIVE_DESCRIPTORS;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.registers.write::<u32>(RECEIVE_TAIL, index as u32);
+        Some(copied)
     }
 }
 

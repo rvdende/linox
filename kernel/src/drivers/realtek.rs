@@ -26,11 +26,12 @@
 //! The chip-specific tuning r8169 applies (EEE, PCIe PHY tables, power
 //! saving) is skipped. It has not run on hardware yet.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use super::net::{Nic, FRAME_LIMIT};
 use super::pci::{Function, Identity};
-use super::{wait_until_ms, DmaPage, DmaRegion};
+use super::{wait_until_ms, DmaRegion};
+use crate::trusted::dma::{DmaPages, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const VENDOR_REALTEK: u16 = 0x10ec;
@@ -115,12 +116,11 @@ const TRANSMIT_TIMEOUT_MS: u64 = 100;
 /// 2.5GBASE-T negotiation can take about three seconds.
 const LINK_TIMEOUT_MS: u64 = 6000;
 
-static mut RECEIVE_RING: DmaPage = DmaPage::ZERO;
-static mut TRANSMIT_RING: DmaPage = DmaPage::ZERO;
-static mut RECEIVE_BUFFERS: [DmaPage; RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096] =
-    [DmaPage::ZERO; RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096];
-static mut TRANSMIT_BUFFERS: [DmaPage; TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096] =
-    [DmaPage::ZERO; TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096];
+static RECEIVE_RING: StaticDma<1> = StaticDma::new();
+static TRANSMIT_RING: StaticDma<1> = StaticDma::new();
+static RECEIVE_BUFFERS: StaticDma<{ RECEIVE_DESCRIPTORS * BUFFER_SIZE / 4096 }> = StaticDma::new();
+static TRANSMIT_BUFFERS: StaticDma<{ TRANSMIT_DESCRIPTORS * BUFFER_SIZE / 4096 }> =
+    StaticDma::new();
 
 /// What the controller reports about itself and its link.
 pub(crate) struct Report {
@@ -146,20 +146,16 @@ pub(crate) fn can_transfer(device: &Identity) -> bool {
 /// The memory Realtek controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 4] {
     [
-        DmaRegion::of(addr_of!(RECEIVE_RING)),
-        DmaRegion::of(addr_of!(TRANSMIT_RING)),
-        DmaRegion::of(addr_of!(RECEIVE_BUFFERS)),
-        DmaRegion::of(addr_of!(TRANSMIT_BUFFERS)),
+        DmaRegion::from(RECEIVE_RING.region()),
+        DmaRegion::from(TRANSMIT_RING.region()),
+        DmaRegion::from(RECEIVE_BUFFERS.region()),
+        DmaRegion::from(TRANSMIT_BUFFERS.region()),
     ]
 }
 
-/// Reads the identity and link state of a supported controller.
-///
-/// # Safety
-///
-/// `function` must be a supported controller whose memory BAR is identity
-/// mapped. Reading these registers has no side effects.
-pub(crate) unsafe fn probe(function: Function) -> Option<Report> {
+/// Reads the identity and link state of a supported controller. Reading
+/// these registers has no side effects.
+pub(crate) fn probe(function: Function) -> Option<Report> {
     // BAR 0 is I/O space on these chips; the registers are mirrored in BAR 2.
     let base = Mmio::firmware(function.memory_bar(2)?, REGISTER_BYTES)?;
     function.enable_memory();
@@ -212,6 +208,10 @@ fn link(base: &Mmio) -> (Option<u32>, bool) {
 /// A running RTL8125 or RTL8126.
 pub(crate) struct Controller {
     registers: Mmio,
+    receive_ring: DmaPages,
+    transmit_ring: DmaPages,
+    receive_buffers: DmaPages,
+    transmit_buffers: DmaPages,
     mac: [u8; 6],
     next_receive: usize,
     next_transmit: usize,
@@ -230,22 +230,36 @@ pub(crate) enum Error {
     NotResponding,
     UnknownChip(u32),
     ResetTimedOut,
+    /// Another controller holds the driver's DMA pages.
+    Busy,
 }
 
 impl Controller {
     /// Resets the controller, starts its rings, and waits for the link to
     /// come back.
     ///
-    /// # Safety
-    ///
-    /// `function` must satisfy `can_transfer`, nothing else may drive it,
-    /// and its registers and this driver's DMA pages must be identity
-    /// mapped. Only one controller may be open at a time.
-    pub(crate) unsafe fn open(function: Function) -> Result<Self, Error> {
+    /// `function` must satisfy `can_transfer` and nothing else may drive
+    /// it; only one controller can be open at a time (it holds the
+    /// driver's DMA pages).
+    pub(crate) fn open(function: Function) -> Result<Self, Error> {
         let base = function
             .memory_bar(2)
             .and_then(|bar| Mmio::firmware(bar, REGISTER_BYTES))
             .ok_or(Error::NoMemoryBar)?;
+        let (
+            Some(receive_ring),
+            Some(transmit_ring),
+            Some(receive_buffers),
+            Some(transmit_buffers),
+        ) = (
+            RECEIVE_RING.claim(),
+            TRANSMIT_RING.claim(),
+            RECEIVE_BUFFERS.claim(),
+            TRANSMIT_BUFFERS.claim(),
+        )
+        else {
+            return Err(Error::Busy);
+        };
         // Registers first, bus mastering only once the chip is quiet.
         function.enable_memory();
         let transmit = base.read::<u32>(TRANSMIT_CONFIG);
@@ -292,30 +306,37 @@ impl Controller {
         base.write::<u32>(INTERRUPT_STATUS_8125, u32::MAX);
         mac_ocp_modify(&base, OCP_DESCRIPTOR_FORMAT, 1 << 0, 0);
 
-        let receive_ring = addr_of_mut!(RECEIVE_RING).cast::<u32>();
         for index in 0..RECEIVE_DESCRIPTORS {
             write_descriptor(
-                receive_ring,
+                &receive_ring,
                 index,
-                receive_buffer(index),
+                receive_buffers.device_address(index * BUFFER_SIZE),
                 receive_ready(index),
             );
         }
-        let transmit_ring = addr_of_mut!(TRANSMIT_RING).cast::<u32>();
         for index in 0..TRANSMIT_DESCRIPTORS {
             let end = if index == TRANSMIT_DESCRIPTORS - 1 {
                 DESCRIPTOR_RING_END
             } else {
                 0
             };
-            write_descriptor(transmit_ring, index, transmit_buffer(index), end);
+            write_descriptor(
+                &transmit_ring,
+                index,
+                transmit_buffers.device_address(index * BUFFER_SIZE),
+                end,
+            );
         }
 
         base.write::<u8>(CONFIG_LOCK, CONFIG_UNLOCKED);
-        base.write::<u32>(TRANSMIT_RING_HIGH, (transmit_ring as u64 >> 32) as u32);
-        base.write::<u32>(TRANSMIT_RING_LOW, transmit_ring as u32);
-        base.write::<u32>(RECEIVE_RING_HIGH, (receive_ring as u64 >> 32) as u32);
-        base.write::<u32>(RECEIVE_RING_LOW, receive_ring as u32);
+        let (transmit_address, receive_address) = (
+            transmit_ring.device_address(0),
+            receive_ring.device_address(0),
+        );
+        base.write::<u32>(TRANSMIT_RING_HIGH, (transmit_address >> 32) as u32);
+        base.write::<u32>(TRANSMIT_RING_LOW, transmit_address as u32);
+        base.write::<u32>(RECEIVE_RING_HIGH, (receive_address >> 32) as u32);
+        base.write::<u32>(RECEIVE_RING_LOW, receive_address as u32);
         base.write::<u16>(RECEIVE_MAX_SIZE, BUFFER_SIZE as u16);
         base.write::<u8>(CONFIG_LOCK, CONFIG_LOCKED);
         base.write::<u32>(MISC, base.read::<u32>(MISC) & !MISC_RXDV_GATED);
@@ -346,6 +367,10 @@ impl Controller {
         let _ = wait_until_ms(LINK_TIMEOUT_MS, || link(&base).0.is_some());
         Ok(Self {
             registers: base,
+            receive_ring,
+            transmit_ring,
+            receive_buffers,
+            transmit_buffers,
             mac,
             next_receive: 0,
             next_transmit: 0,
@@ -369,36 +394,33 @@ impl Nic for Controller {
             return false;
         }
         let index = self.next_transmit;
-        let ring = addr_of_mut!(TRANSMIT_RING).cast::<u32>();
-        // SAFETY: the descriptor and its buffer belong to this driver, and
-        // the controller released the descriptor (checked below).
-        unsafe {
-            if ring.add(index * 4).read_volatile() & DESCRIPTOR_OWNED != 0 {
-                return false;
-            }
-            let buffer = transmit_buffer(index);
-            core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer, frame.len());
-            // Pad to the 60-byte minimum; the controller appends the FCS.
-            let length = frame.len().max(60);
-            buffer.add(frame.len()).write_bytes(0, length - frame.len());
-            let end = if index == TRANSMIT_DESCRIPTORS - 1 {
-                DESCRIPTOR_RING_END
-            } else {
-                0
-            };
-            write_descriptor(
-                ring,
-                index,
-                buffer,
-                DESCRIPTOR_OWNED | end | DESCRIPTOR_FIRST | DESCRIPTOR_LAST | length as u32,
-            );
+        // The controller must have released the descriptor.
+        if self.transmit_ring.read::<u32>(index * 16) & DESCRIPTOR_OWNED != 0 {
+            return false;
         }
+        let buffer = index * BUFFER_SIZE;
+        self.transmit_buffers.write_bytes(buffer, frame);
+        // Pad to the 60-byte minimum; the controller appends the FCS.
+        let length = frame.len().max(60);
+        self.transmit_buffers
+            .fill(buffer + frame.len(), length - frame.len(), 0);
+        let end = if index == TRANSMIT_DESCRIPTORS - 1 {
+            DESCRIPTOR_RING_END
+        } else {
+            0
+        };
+        write_descriptor(
+            &self.transmit_ring,
+            index,
+            self.transmit_buffers.device_address(buffer),
+            DESCRIPTOR_OWNED | end | DESCRIPTOR_FIRST | DESCRIPTOR_LAST | length as u32,
+        );
         self.next_transmit = (index + 1) % TRANSMIT_DESCRIPTORS;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.registers.write::<u16>(TRANSMIT_POLL_8125, 1);
+        // The controller clears the owned bit once it is done.
         let sent = wait_until_ms(TRANSMIT_TIMEOUT_MS, || {
-            // SAFETY: the controller clears the owned bit once it is done.
-            unsafe { ring.add(index * 4).read_volatile() & DESCRIPTOR_OWNED == 0 }
+            self.transmit_ring.read::<u32>(index * 16) & DESCRIPTOR_OWNED == 0
         });
         if !sent {
             // The chip still owns the descriptor; later sends would find
@@ -410,33 +432,36 @@ impl Nic for Controller {
 
     fn receive(&mut self, buffer: &mut [u8; FRAME_LIMIT]) -> Option<usize> {
         let index = self.next_receive;
-        let ring = addr_of_mut!(RECEIVE_RING).cast::<u32>();
-        // SAFETY: the descriptor belongs to this driver; the controller
-        // cleared its owned bit after writing the buffer.
-        unsafe {
-            let status = ring.add(index * 4).read_volatile();
-            if status & DESCRIPTOR_OWNED != 0 {
-                return None;
-            }
-            let length = (status & 0x3fff) as usize;
-            let complete = status & (DESCRIPTOR_FIRST | DESCRIPTOR_LAST)
-                == DESCRIPTOR_FIRST | DESCRIPTOR_LAST
-                && status & RECEIVE_ERROR == 0
-                && length > 4;
-            // The length includes the FCS.
-            let copied = if complete {
-                let copied = (length - 4).min(FRAME_LIMIT);
-                core::ptr::copy_nonoverlapping(receive_buffer(index), buffer.as_mut_ptr(), copied);
-                copied
-            } else {
-                0
-            };
-            write_descriptor(ring, index, receive_buffer(index), receive_ready(index));
-            self.next_receive = (index + 1) % RECEIVE_DESCRIPTORS;
-            // An errored frame is dropped; report an empty frame so callers
-            // keep polling.
-            Some(copied)
+        // The controller clears the owned bit after writing the buffer.
+        let status = self.receive_ring.read::<u32>(index * 16);
+        if status & DESCRIPTOR_OWNED != 0 {
+            return None;
         }
+        let length = (status & 0x3fff) as usize;
+        let complete = status & (DESCRIPTOR_FIRST | DESCRIPTOR_LAST)
+            == DESCRIPTOR_FIRST | DESCRIPTOR_LAST
+            && status & RECEIVE_ERROR == 0
+            && length > 4;
+        let receive_buffer = index * BUFFER_SIZE;
+        // The length includes the FCS.
+        let copied = if complete {
+            let copied = (length - 4).min(FRAME_LIMIT);
+            self.receive_buffers
+                .read_bytes(receive_buffer, &mut buffer[..copied]);
+            copied
+        } else {
+            0
+        };
+        write_descriptor(
+            &self.receive_ring,
+            index,
+            self.receive_buffers.device_address(receive_buffer),
+            receive_ready(index),
+        );
+        self.next_receive = (index + 1) % RECEIVE_DESCRIPTORS;
+        // An errored frame is dropped; report an empty frame so callers
+        // keep polling.
+        Some(copied)
     }
 }
 
@@ -450,41 +475,16 @@ fn receive_ready(index: usize) -> u32 {
     DESCRIPTOR_OWNED | end | BUFFER_SIZE as u32
 }
 
-/// Writes descriptor `index`: its buffer address, then its first word, so
-/// the controller never sees an owned descriptor without its buffer.
-///
-/// # Safety
-///
-/// `ring` must be one of this driver's descriptor rings with room for
-/// `index`.
-unsafe fn write_descriptor(ring: *mut u32, index: usize, buffer: *mut u8, first: u32) {
-    let descriptor = ring.add(index * 4);
-    descriptor.add(1).write_volatile(0);
-    descriptor.add(2).write_volatile(buffer as u32);
-    descriptor
-        .add(3)
-        .write_volatile((buffer as u64 >> 32) as u32);
+/// Writes descriptor `index` of `ring`: its buffer address, then its first
+/// word, so the controller never sees an owned descriptor without its
+/// buffer.
+fn write_descriptor(ring: &DmaPages, index: usize, buffer: u64, first: u32) {
+    let descriptor = index * 16;
+    ring.write::<u32>(descriptor + 4, 0);
+    ring.write::<u32>(descriptor + 8, buffer as u32);
+    ring.write::<u32>(descriptor + 12, (buffer >> 32) as u32);
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    descriptor.write_volatile(first);
-}
-
-fn receive_buffer(index: usize) -> *mut u8 {
-    // SAFETY: index is below RECEIVE_DESCRIPTORS, so the offset stays in
-    // the buffer array.
-    unsafe {
-        addr_of_mut!(RECEIVE_BUFFERS)
-            .cast::<u8>()
-            .add(index * BUFFER_SIZE)
-    }
-}
-
-fn transmit_buffer(index: usize) -> *mut u8 {
-    // SAFETY: as for receive_buffer.
-    unsafe {
-        addr_of_mut!(TRANSMIT_BUFFERS)
-            .cast::<u8>()
-            .add(index * BUFFER_SIZE)
-    }
+    ring.write::<u32>(descriptor, first);
 }
 
 /// Reads MAC OCP register `register` (an even address below 0x10000).

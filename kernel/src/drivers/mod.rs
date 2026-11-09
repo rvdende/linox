@@ -95,6 +95,13 @@ impl DmaRegion {
     }
 }
 
+impl From<(u64, u64)> for DmaRegion {
+    /// A `trusted::dma::StaticDma` region, (start, length).
+    fn from((start, length): (u64, u64)) -> Self {
+        Self { start, length }
+    }
+}
+
 /// A 4 KiB page usable as a DMA buffer: the kernel image is identity mapped,
 /// so its address is also its physical address.
 #[repr(C, align(4096))]

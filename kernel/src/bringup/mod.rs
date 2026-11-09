@@ -23,7 +23,7 @@ use crate::drivers::net::{self, Nic};
 use crate::drivers::{
     ahci, amd_iommu, clock, e1000e, gpt, hda, keyboard, nvme, pci, realtek, say, xhci, BlockDevice,
 };
-use crate::trusted::{firmware, mmio::Mmio};
+use crate::trusted::{dma::StaticDma, firmware, mmio::Mmio};
 use crate::{BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 
 pub use trap::report_panic;
@@ -370,7 +370,7 @@ fn report_network() {
             // SAFETY: bring-up is the only driver of this controller, and the
             // firmware identity map covers its registers and DMA pages.
             set_stage("network: Intel 82574");
-            let Some(mut nic) = (unsafe { e1000e::Controller::open(address) }) else {
+            let Some(mut nic) = e1000e::Controller::open(address) else {
                 say!("Intel 82574 reset failed\n");
                 return;
             };
@@ -390,9 +390,7 @@ fn report_network() {
             );
             return;
         }
-        // SAFETY: the device is a supported Realtek controller with an
-        // identity-mapped BAR, and probing only reads registers.
-        let Some(report) = (unsafe { realtek::probe(address) }) else {
+        let Some(report) = realtek::probe(address) else {
             say!("Realtek {:04x} registers unavailable\n", device.device);
             return;
         };
@@ -418,8 +416,7 @@ fn report_network() {
         // controller (which powers it up and renegotiates) with or without
         // a link now.
         set_stage("network: Realtek reset and link");
-        // SAFETY: as for the 82574 above.
-        match unsafe { realtek::Controller::open(address) } {
+        match realtek::Controller::open(address) {
             Ok(mut nic) => match nic.link_speed() {
                 Some(speed) => {
                     say!("linox:   link up at {} Mb/s after reset\n", speed);
@@ -448,9 +445,7 @@ fn report_audio() {
             device.vendor,
             device.device
         );
-        // SAFETY: bring-up is the only driver of this controller, and the
-        // firmware identity map covers its registers and DMA pages.
-        let mut controller = match unsafe { hda::Controller::open(address) } {
+        let mut controller = match hda::Controller::open(address) {
             Ok(controller) => controller,
             Err(error) => {
                 say!(", {:?}\n", error);
@@ -496,8 +491,7 @@ fn play_test_tones() {
         if !hda::is_supported(&device) {
             return;
         }
-        // SAFETY: as in report_audio.
-        let Ok(mut controller) = (unsafe { hda::Controller::open(device.address) }) else {
+        let Ok(mut controller) = hda::Controller::open(device.address) else {
             return;
         };
         let mut codecs = [const { None }; 15];
@@ -554,9 +548,7 @@ fn report_disks(remapping: &mut Remapping) -> (usize, usize) {
     let (controllers, _) = functions(pci::Identity::is_ahci);
     let mut slot = 0;
     for function in controllers.iter().flatten() {
-        // SAFETY: bring-up mode is the only driver of these controllers, and
-        // the firmware identity map covers their registers.
-        let (base, ports, version) = match unsafe { ahci::open_controller(*function) } {
+        let (base, ports, version) = match ahci::open_controller(*function) {
             Ok(opened) => opened,
             Err(error) => {
                 say!(
@@ -582,9 +574,7 @@ fn report_disks(remapping: &mut Remapping) -> (usize, usize) {
             if slot == ahci::MAX_PORTS {
                 break;
             }
-            // SAFETY: the controller was opened above and each port uses its
-            // own DMA set.
-            match unsafe { ahci::Disk::open(&base, port, slot) } {
+            match ahci::Disk::open(&base, port, slot) {
                 Ok(mut disk) => {
                     slot += 1;
                     let bytes = disk.sectors.saturating_mul(u64::from(disk.sector_size));
@@ -875,9 +865,7 @@ fn reset(boot_info: &BootInfo, kind: u32) {
     set_stage("shutting down NVMe before reset");
     let (controllers, _) = functions(pci::Identity::is_nvme);
     for function in controllers.iter().flatten() {
-        // SAFETY: bring-up is the only driver of its NVMe controllers, and
-        // the firmware identity map covers their registers.
-        if unsafe { nvme::shutdown(*function) } {
+        if nvme::shutdown(*function) {
             say!(
                 "linox: NVMe {:02x}:{:02x}.{} shut down\n",
                 function.bus,
@@ -1171,13 +1159,16 @@ fn verify_dma_confinement(
     function: pci::Function,
     remapping: &mut Remapping,
 ) {
-    static mut PROBE: crate::drivers::DmaPage = crate::drivers::DmaPage::ZERO;
-    let probe = core::ptr::addr_of_mut!(PROBE);
-    // SAFETY: only this check uses the probe page.
-    unsafe { (*probe).0.fill(0x5a) };
-    let result = controller.read_block_to(0, probe as u64);
-    // SAFETY: as above; a successful stray DMA would have changed it.
-    let untouched = unsafe { (*probe).0.iter().all(|byte| *byte == 0x5a) };
+    static PROBE: StaticDma<1> = StaticDma::new();
+    // Only this check uses the probe page.
+    let Some(page) = PROBE.claim() else {
+        return;
+    };
+    let probe = page.device_address(0);
+    page.fill(0, 4096, 0x5a);
+    let result = controller.read_block_to(0, probe);
+    // A successful stray DMA would have changed it.
+    let untouched = (0..4096).all(|offset| page.read::<u8>(offset) == 0x5a);
     // Emulated units may log faults with nonstandard encodings, so any
     // event from the controller counts as evidence; the page is the test.
     let mut fault = None;
@@ -1191,7 +1182,7 @@ fn verify_dma_confinement(
     if untouched {
         say!(
             "linox:   AMD-Vi blocked a stray DMA from this controller to {:#x}",
-            probe as u64
+            probe
         );
         match fault {
             Some(fault) => say!(
@@ -1209,7 +1200,7 @@ fn verify_dma_confinement(
     } else {
         say!(
             "linox:   WARNING: AMD-Vi did not stop a stray DMA to {:#x} (command {})\n",
-            probe as u64,
+            probe,
             if result.is_ok() {
                 "completed"
             } else {
@@ -1270,9 +1261,7 @@ fn report_mcfg(table: &[u8]) {
 fn test_disk_writes() {
     let (controllers, _) = functions(pci::Identity::is_nvme);
     for function in controllers.iter().flatten() {
-        // SAFETY: bring-up mode is the only user of this controller, and the
-        // firmware identity map covers its registers and the static DMA pages.
-        let mut controller = match unsafe { nvme::Controller::open(*function) } {
+        let mut controller = match nvme::Controller::open(*function) {
             Ok((controller, _)) => controller,
             Err(error) => {
                 say!(
@@ -1354,9 +1343,7 @@ fn probe_nvme(function: pci::Function, remapping: &mut Remapping) -> bool {
         function.device,
         function.function
     );
-    // SAFETY: bring-up mode is the only user of this controller, and the
-    // firmware identity map covers its registers and the static DMA pages.
-    let (mut controller, identity) = match unsafe { nvme::Controller::open(function) } {
+    let (mut controller, identity) = match nvme::Controller::open(function) {
         Ok(opened) => opened,
         Err(error) => {
             say!("initialization failed: {:?}\n", error);

@@ -8,11 +8,12 @@
 //! Section numbers refer to the NVM Express Base Specification 2.0 and the
 //! NVM Command Set Specification 1.0.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use super::gpt::{self, WritableExtent};
 use super::pci::Function;
-use super::{wait_until, BlockDevice, DmaPage, DmaRegion};
+use super::{wait_until, BlockDevice, DmaRegion};
+use crate::trusted::dma::{DmaPages, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const REGISTER_CAPABILITIES: usize = 0x00;
@@ -47,11 +48,11 @@ const IDENTIFY_CONTROLLER: u32 = 0x01;
 const IDENTIFY_ACTIVE_NAMESPACES: u32 = 0x02;
 const COMMAND_TIMEOUT_SECONDS: u64 = 5;
 
-static mut ADMIN_SUBMISSION: DmaPage = DmaPage::ZERO;
-static mut ADMIN_COMPLETION: DmaPage = DmaPage::ZERO;
-static mut IO_SUBMISSION: DmaPage = DmaPage::ZERO;
-static mut IO_COMPLETION: DmaPage = DmaPage::ZERO;
-static mut DATA: DmaPage = DmaPage::ZERO;
+static ADMIN_SUBMISSION: StaticDma<1> = StaticDma::new();
+static ADMIN_COMPLETION: StaticDma<1> = StaticDma::new();
+static IO_SUBMISSION: StaticDma<1> = StaticDma::new();
+static IO_COMPLETION: StaticDma<1> = StaticDma::new();
+static DATA: StaticDma<1> = StaticDma::new();
 
 // The fields are reported through Debug, which dead-code analysis ignores.
 #[allow(dead_code)]
@@ -81,11 +82,13 @@ pub(crate) enum Error {
     OutOfRange,
     /// The extent belongs to another disk's partition table.
     WrongDisk,
+    /// Another controller holds the driver's DMA pages.
+    Busy,
 }
 
 struct Queue {
-    entries: *mut u8,
-    completions: *mut u8,
+    entries: DmaPages,
+    completions: DmaPages,
     tail: u16,
     head: u16,
     phase: bool,
@@ -99,6 +102,10 @@ pub(crate) struct Controller {
     registers: Mmio,
     admin: Queue,
     io: Queue,
+    /// The page data transfers go through.
+    data: DmaPages,
+    /// The last transfer's data, copied out of `data` for the caller.
+    buffer: [u8; 4096],
     next_command: u16,
     pub(crate) namespace: u32,
     pub(crate) block_size: u32,
@@ -120,11 +127,26 @@ impl Controller {
     /// Resets and enables the controller, identifies it, and opens the first
     /// active namespace for reading.
     ///
-    /// # Safety
-    ///
-    /// `function` must be an NVMe controller that no other code drives, and
-    /// its registers and the static DMA pages must be identity mapped.
-    pub(crate) unsafe fn open(function: Function) -> Result<(Self, ControllerIdentity), Error> {
+    /// `function` must be an NVMe controller that no other code drives;
+    /// only one controller can be open at a time (it holds the driver's DMA
+    /// pages).
+    pub(crate) fn open(function: Function) -> Result<(Self, ControllerIdentity), Error> {
+        let (
+            Some(admin_submission),
+            Some(admin_completion),
+            Some(io_submission),
+            Some(io_completion),
+            Some(data),
+        ) = (
+            ADMIN_SUBMISSION.claim(),
+            ADMIN_COMPLETION.claim(),
+            IO_SUBMISSION.claim(),
+            IO_COMPLETION.claim(),
+            DATA.claim(),
+        )
+        else {
+            return Err(Error::Busy);
+        };
         let bar = function.memory_bar(0).ok_or(Error::NoMemoryBar)?;
         // The controller properties; the doorbells follow once CAP says
         // how far apart they are.
@@ -157,14 +179,14 @@ impl Controller {
         }
 
         let admin = Queue::new(
-            addr_of_mut!(ADMIN_SUBMISSION.0).cast(),
-            addr_of_mut!(ADMIN_COMPLETION.0).cast(),
+            admin_submission,
+            admin_completion,
             DOORBELL_BASE,
             DOORBELL_BASE + doorbell_stride,
         );
         let io = Queue::new(
-            addr_of_mut!(IO_SUBMISSION.0).cast(),
-            addr_of_mut!(IO_COMPLETION.0).cast(),
+            io_submission,
+            io_completion,
             DOORBELL_BASE + 2 * doorbell_stride,
             DOORBELL_BASE + 3 * doorbell_stride,
         );
@@ -173,12 +195,12 @@ impl Controller {
         write64(
             &registers,
             REGISTER_ADMIN_SUBMISSION_QUEUE,
-            admin.entries as u64,
+            admin.entries.device_address(0),
         );
         write64(
             &registers,
             REGISTER_ADMIN_COMPLETION_QUEUE,
-            admin.completions as u64,
+            admin.completions.device_address(0),
         );
         // Section 3.5.1: configure CC, then enable in a second write. CAP
         // may change after the first CC write, so the timeout is read again.
@@ -202,6 +224,8 @@ impl Controller {
             registers,
             admin,
             io,
+            data,
+            buffer: [0; 4096],
             next_command: 0,
             namespace: 0,
             block_size: 0,
@@ -228,15 +252,16 @@ impl Controller {
         }
         let mut command = [0_u32; 16];
         command[1] = self.namespace;
-        command[6] = data_address() as u32;
-        command[7] = (data_address() >> 32) as u32;
+        command[6] = self.data_address() as u32;
+        command[7] = (self.data_address() >> 32) as u32;
         command[10] = block as u32;
         command[11] = (block >> 32) as u32;
         command[12] = count - 1;
         self.submit(false, OPCODE_READ, command)?;
-        // SAFETY: the controller finished writing the page before completing.
-        let page = unsafe { &*addr_of!(DATA) };
-        Ok(&page.0[..bytes as usize])
+        // The controller finished writing the page before completing.
+        let bytes = bytes as usize;
+        self.data.read_bytes(0, &mut self.buffer[..bytes]);
+        Ok(&self.buffer[..bytes])
     }
 
     /// Writes `data`, whole blocks and at most one page, starting at `block`,
@@ -264,15 +289,12 @@ impl Controller {
         if header.is_none_or(|header| header.disk != extent.disk()) {
             return Err(Error::WrongDisk);
         }
-        // SAFETY: no transfer is using the data page while it is filled.
-        unsafe {
-            let page = &mut *addr_of_mut!(DATA);
-            page.0[..data.len()].copy_from_slice(data);
-        }
+        // No transfer is using the data page while it is filled.
+        self.data.write_bytes(0, data);
         let mut command = [0_u32; 16];
         command[1] = self.namespace;
-        command[6] = data_address() as u32;
-        command[7] = (data_address() >> 32) as u32;
+        command[6] = self.data_address() as u32;
+        command[7] = (self.data_address() >> 32) as u32;
         command[10] = block as u32;
         command[11] = (block >> 32) as u32;
         command[12] = count - 1;
@@ -300,17 +322,18 @@ impl Controller {
 
     fn identify_controller(&mut self) -> Result<ControllerIdentity, Error> {
         let mut command = [0_u32; 16];
-        command[6] = data_address() as u32;
-        command[7] = (data_address() >> 32) as u32;
+        command[6] = self.data_address() as u32;
+        command[7] = (self.data_address() >> 32) as u32;
         command[10] = IDENTIFY_CONTROLLER;
         self.submit(true, OPCODE_IDENTIFY, command)?;
-        // SAFETY: Identify completed into the data page.
-        let data = unsafe { &(*addr_of!(DATA)).0 };
+        let version = self.registers.read::<u32>(REGISTER_VERSION);
+        // Identify completed into the data page.
+        let data = self.copy_data();
         let mut identity = ControllerIdentity {
             serial: [0; 20],
             model: [0; 40],
             firmware: [0; 8],
-            version: self.registers.read::<u32>(REGISTER_VERSION),
+            version,
         };
         identity.serial.copy_from_slice(&data[4..24]);
         identity.model.copy_from_slice(&data[24..64]);
@@ -320,12 +343,12 @@ impl Controller {
 
     fn open_namespace(&mut self) -> Result<(), Error> {
         let mut command = [0_u32; 16];
-        command[6] = data_address() as u32;
-        command[7] = (data_address() >> 32) as u32;
+        command[6] = self.data_address() as u32;
+        command[7] = (self.data_address() >> 32) as u32;
         command[10] = IDENTIFY_ACTIVE_NAMESPACES;
         self.submit(true, OPCODE_IDENTIFY, command)?;
-        // SAFETY: Identify completed into the data page.
-        let data = unsafe { &(*addr_of!(DATA)).0 };
+        // Identify completed into the data page.
+        let data = self.copy_data();
         let namespace = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if namespace == 0 {
             return Err(Error::NoNamespace);
@@ -334,8 +357,8 @@ impl Controller {
         command[1] = namespace;
         command[10] = IDENTIFY_NAMESPACE;
         self.submit(true, OPCODE_IDENTIFY, command)?;
-        // SAFETY: Identify completed into the data page.
-        let data = unsafe { &(*addr_of!(DATA)).0 };
+        // Identify completed into the data page.
+        let data = self.copy_data();
         let block_count = u64::from_le_bytes(data[0..8].try_into().unwrap_or([0; 8]));
         // FLBAS (NVM Command Set section 4.1.5.1): bits 3:0 and, with more
         // than 16 formats, bits 6:5 above them select the LBA format.
@@ -357,18 +380,30 @@ impl Controller {
         Ok(())
     }
 
+    fn data_address(&self) -> u64 {
+        self.data.device_address(0)
+    }
+
+    /// Copies the data page into `buffer` and returns it.
+    fn copy_data(&mut self) -> &[u8; 4096] {
+        self.data.read_bytes(0, &mut self.buffer);
+        &self.buffer
+    }
+
     fn create_io_queues(&mut self) -> Result<(), Error> {
         let size = u32::from(QUEUE_ENTRIES - 1) << 16;
         let mut command = [0_u32; 16];
-        command[6] = self.io.completions as u32;
-        command[7] = (self.io.completions as u64 >> 32) as u32;
+        let completions = self.io.completions.device_address(0);
+        command[6] = completions as u32;
+        command[7] = (completions >> 32) as u32;
         command[10] = size | 1;
         // Physically contiguous, interrupts disabled.
         command[11] = 1;
         self.submit(true, OPCODE_CREATE_IO_COMPLETION_QUEUE, command)?;
 
-        command[6] = self.io.entries as u32;
-        command[7] = (self.io.entries as u64 >> 32) as u32;
+        let entries = self.io.entries.device_address(0);
+        command[6] = entries as u32;
+        command[7] = (entries >> 32) as u32;
         command[10] = size | 1;
         // Completion queue 1, physically contiguous.
         command[11] = (1 << 16) | 1;
@@ -383,31 +418,27 @@ impl Controller {
         self.next_command = self.next_command.wrapping_add(1);
         command[0] = u32::from(opcode) | u32::from(identifier) << 16;
         let queue = if admin { &mut self.admin } else { &mut self.io };
-        // SAFETY: the queue memory is a static DMA page owned by this driver.
-        unsafe {
-            let slot = queue
-                .entries
-                .add(usize::from(queue.tail) * 64)
-                .cast::<u32>();
-            for (index, word) in command.iter().enumerate() {
-                slot.add(index).write_volatile(*word);
-            }
+        let slot = usize::from(queue.tail) * 64;
+        for (index, word) in command.iter().enumerate() {
+            queue.entries.write::<u32>(slot + index * 4, *word);
         }
         queue.tail = (queue.tail + 1) % QUEUE_ENTRIES;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.registers
             .write::<u32>(queue.submission_doorbell, u32::from(queue.tail));
 
-        let completion = queue.completions as usize + usize::from(queue.head) * 16;
+        // Dword 3 of the completion entry at the head.
+        let completion = usize::from(queue.head) * 16 + 12;
         let phase = queue.phase;
+        let completions = &queue.completions;
         if !wait_until(COMMAND_TIMEOUT_SECONDS, || {
-            (read_dma32(completion, 12) >> 16 & 1 != 0) == phase
+            (completions.read::<u32>(completion) >> 16 & 1 != 0) == phase
         }) {
             self.broken = true;
             return Err(Error::CommandTimedOut(opcode));
         }
-        let status = (read_dma32(completion, 12) >> 17) as u16;
-        let completed = read_dma32(completion, 12) as u16;
+        let status = (queue.completions.read::<u32>(completion) >> 17) as u16;
+        let completed = queue.completions.read::<u32>(completion) as u16;
         queue.head += 1;
         if queue.head == QUEUE_ENTRIES {
             queue.head = 0;
@@ -429,16 +460,13 @@ impl Controller {
 
 impl Queue {
     fn new(
-        entries: *mut u8,
-        completions: *mut u8,
+        entries: DmaPages,
+        completions: DmaPages,
         submission_doorbell: usize,
         completion_doorbell: usize,
     ) -> Self {
-        // SAFETY: both pointers are static DMA pages owned by this driver.
-        unsafe {
-            entries.write_bytes(0, 4096);
-            completions.write_bytes(0, 4096);
-        }
+        entries.fill(0, 4096, 0);
+        completions.fill(0, 4096, 0);
         Self {
             entries,
             completions,
@@ -457,10 +485,8 @@ impl Queue {
 /// at its next start. The bring-up shell does this before reboot and
 /// power-off.
 ///
-/// # Safety
-///
 /// `function` must be an NVMe controller that no other code drives.
-pub(crate) unsafe fn shutdown(function: Function) -> bool {
+pub(crate) fn shutdown(function: Function) -> bool {
     match function
         .memory_bar(0)
         .and_then(|bar| Mmio::firmware(bar, DOORBELL_BASE))
@@ -489,21 +515,12 @@ fn shutdown_registers(registers: &Mmio) -> bool {
 /// The memory NVMe controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 5] {
     [
-        DmaRegion::of(addr_of!(ADMIN_SUBMISSION)),
-        DmaRegion::of(addr_of!(ADMIN_COMPLETION)),
-        DmaRegion::of(addr_of!(IO_SUBMISSION)),
-        DmaRegion::of(addr_of!(IO_COMPLETION)),
-        DmaRegion::of(addr_of!(DATA)),
+        DmaRegion::from(ADMIN_SUBMISSION.region()),
+        DmaRegion::from(ADMIN_COMPLETION.region()),
+        DmaRegion::from(IO_SUBMISSION.region()),
+        DmaRegion::from(IO_COMPLETION.region()),
+        DmaRegion::from(DATA.region()),
     ]
-}
-
-fn data_address() -> u64 {
-    addr_of!(DATA) as u64
-}
-
-fn read_dma32(base: usize, offset: usize) -> u32 {
-    // SAFETY: callers pass the driver's identity-mapped DMA memory.
-    unsafe { ((base + offset) as *const u32).read_volatile() }
 }
 
 /// Reads a 64-bit register as two 32-bit reads, low half first.

@@ -4,10 +4,11 @@
 //! EXT, so it never modifies a disk. It drives one command slot per port
 //! without interrupts.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use super::pci::Function;
-use super::{wait_until_ms, BlockDevice, DmaPage, DmaRegion};
+use super::{wait_until_ms, BlockDevice, DmaRegion};
+use crate::trusted::dma::{DmaPages, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const HBA_GLOBAL_CONTROL: usize = 0x04;
@@ -51,16 +52,16 @@ const REGISTER_BYTES: usize = PORT_BASE + 32 * PORT_STRIDE;
 /// Ports the driver can drive at once; each needs three DMA pages.
 pub(crate) const MAX_PORTS: usize = 8;
 
-static mut COMMAND_LISTS: [DmaPage; MAX_PORTS] = [DmaPage::ZERO; MAX_PORTS];
-static mut COMMAND_TABLES: [DmaPage; MAX_PORTS] = [DmaPage::ZERO; MAX_PORTS];
-static mut BUFFERS: [DmaPage; MAX_PORTS] = [DmaPage::ZERO; MAX_PORTS];
+static COMMAND_LISTS: StaticDma<MAX_PORTS> = StaticDma::new();
+static COMMAND_TABLES: StaticDma<MAX_PORTS> = StaticDma::new();
+static BUFFERS: StaticDma<MAX_PORTS> = StaticDma::new();
 
 /// The memory AHCI controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 3] {
     [
-        DmaRegion::of(addr_of!(COMMAND_LISTS)),
-        DmaRegion::of(addr_of!(COMMAND_TABLES)),
-        DmaRegion::of(addr_of!(BUFFERS)),
+        DmaRegion::from(COMMAND_LISTS.region()),
+        DmaRegion::from(COMMAND_TABLES.region()),
+        DmaRegion::from(BUFFERS.region()),
     ]
 }
 
@@ -80,7 +81,13 @@ pub(crate) enum Error {
 pub(crate) struct Disk {
     port: usize,
     registers: Mmio,
-    slot: usize,
+    /// The DMA set the port uses: its command list (and received FISes),
+    /// command table and data buffer.
+    command_list: DmaPages,
+    command_table: DmaPages,
+    data: DmaPages,
+    /// The last read's data, copied out of `data` for the caller.
+    buffer: [u8; 4096],
     pub(crate) sectors: u64,
     pub(crate) sector_size: u32,
     pub(crate) model: [u8; 40],
@@ -88,12 +95,9 @@ pub(crate) struct Disk {
 }
 
 /// Takes the controller from firmware, enables AHCI mode, and returns its
-/// registers, the bitmap of implemented ports and its version.
-///
-/// # Safety
-///
-/// `function` must be an AHCI controller that no other code drives.
-pub(crate) unsafe fn open_controller(function: Function) -> Result<(Mmio, u32, u32), Error> {
+/// registers, the bitmap of implemented ports and its version. `function`
+/// must be an AHCI controller that no other code drives.
+pub(crate) fn open_controller(function: Function) -> Result<(Mmio, u32, u32), Error> {
     let base = function
         .memory_bar(5)
         .and_then(|bar| Mmio::firmware(bar, REGISTER_BYTES))
@@ -122,14 +126,17 @@ impl Disk {
     /// identifies its disk.
     /// `slot` selects which of the driver's DMA page sets the port uses.
     ///
-    /// # Safety
-    ///
-    /// The controller must have been opened with [`open_controller`], and no
-    /// other code may use `port` or DMA set `slot`.
-    pub(crate) unsafe fn open(base: &Mmio, port: usize, slot: usize) -> Result<Self, Error> {
-        if slot >= MAX_PORTS {
+    /// The controller must have been opened with [`open_controller`], and
+    /// no other code may use `port`; a DMA set held by another disk is
+    /// refused as [`Error::NoDevice`].
+    pub(crate) fn open(base: &Mmio, port: usize, slot: usize) -> Result<Self, Error> {
+        let (Some(command_list), Some(command_table), Some(data)) = (
+            COMMAND_LISTS.claim_page(slot),
+            COMMAND_TABLES.claim_page(slot),
+            BUFFERS.claim_page(slot),
+        ) else {
             return Err(Error::NoDevice);
-        }
+        };
         let registers = base
             .window(PORT_BASE + port * PORT_STRIDE, PORT_STRIDE)
             .ok_or(Error::NoDevice)?;
@@ -151,10 +158,9 @@ impl Disk {
         }) {
             return Err(Error::StopTimedOut);
         }
-        let command_list = addr_of_mut!(COMMAND_LISTS).cast::<DmaPage>().add(slot);
-        (*command_list).0.fill(0);
+        command_list.fill(0, 4096, 0);
         // The command list uses the first 1 KiB; received FISes the next 256 bytes.
-        let list = command_list as u64;
+        let list = command_list.device_address(0);
         let fis = list + 1024;
         registers.write::<u32>(PORT_COMMAND_LIST, list as u32);
         registers.write::<u32>(PORT_COMMAND_LIST + 4, (list >> 32) as u32);
@@ -175,14 +181,18 @@ impl Disk {
         let mut disk = Self {
             port,
             registers,
-            slot,
+            command_list,
+            command_table,
+            data,
+            buffer: [0; 4096],
             sectors: 0,
             sector_size: 512,
             model: [0; 40],
             serial: [0; 20],
         };
         disk.issue(ATA_IDENTIFY_DEVICE, 0, 0, 512)?;
-        let identify = &(*addr_of!(BUFFERS).cast::<DmaPage>().add(slot)).0;
+        disk.data.read_bytes(0, &mut disk.buffer);
+        let identify = disk.buffer;
         let word =
             |index: usize| u16::from_le_bytes([identify[index * 2], identify[index * 2 + 1]]);
         // ATA strings store each pair of characters big-endian.
@@ -207,40 +217,38 @@ impl Disk {
     }
 
     fn issue(&mut self, command: u8, lba: u64, count: u16, bytes: u32) -> Result<(), Error> {
-        // SAFETY: the DMA pages for `slot` belong to this disk.
-        unsafe {
-            let header = addr_of_mut!(COMMAND_LISTS)
-                .cast::<DmaPage>()
-                .add(self.slot)
-                .cast::<u32>();
-            let table = addr_of_mut!(COMMAND_TABLES)
-                .cast::<DmaPage>()
-                .add(self.slot);
-            let buffer = addr_of_mut!(BUFFERS).cast::<DmaPage>().add(self.slot);
-            (*table).0.fill(0);
-            // Header 0: five-dword FIS, device-to-host (read), one PRD entry.
-            header.write_volatile(5 | 1 << 16);
-            header.add(1).write_volatile(0);
-            header.add(2).write_volatile(table as u32);
-            header.add(3).write_volatile((table as u64 >> 32) as u32);
-            let fis = &mut (*table).0;
-            fis[0] = FIS_HOST_TO_DEVICE;
-            fis[1] = 0x80;
-            fis[2] = command;
-            fis[4] = lba as u8;
-            fis[5] = (lba >> 8) as u8;
-            fis[6] = (lba >> 16) as u8;
-            fis[7] = 0x40;
-            fis[8] = (lba >> 24) as u8;
-            fis[9] = (lba >> 32) as u8;
-            fis[10] = (lba >> 40) as u8;
-            fis[12] = count as u8;
-            fis[13] = (count >> 8) as u8;
-            let prd = table.cast::<u32>().add(0x80 / 4);
-            prd.write_volatile(buffer as u32);
-            prd.add(1).write_volatile((buffer as u64 >> 32) as u32);
-            prd.add(3).write_volatile(bytes - 1);
-        }
+        let header = &self.command_list;
+        let table = &self.command_table;
+        let table_address = table.device_address(0);
+        let buffer = self.data.device_address(0);
+        table.fill(0, 4096, 0);
+        // Header 0: five-dword FIS, device-to-host (read), one PRD entry.
+        header.write::<u32>(0, 5 | 1 << 16);
+        header.write::<u32>(4, 0);
+        header.write::<u32>(8, table_address as u32);
+        header.write::<u32>(12, (table_address >> 32) as u32);
+        table.write_bytes(
+            0,
+            &[
+                FIS_HOST_TO_DEVICE,
+                0x80,
+                command,
+                0,
+                lba as u8,
+                (lba >> 8) as u8,
+                (lba >> 16) as u8,
+                0x40,
+                (lba >> 24) as u8,
+                (lba >> 32) as u8,
+                (lba >> 40) as u8,
+                0,
+                count as u8,
+                (count >> 8) as u8,
+            ],
+        );
+        table.write::<u32>(0x80, buffer as u32);
+        table.write::<u32>(0x84, (buffer >> 32) as u32);
+        table.write::<u32>(0x8c, bytes - 1);
         let registers = &self.registers;
         if !wait_until_ms(COMMAND_TIMEOUT_MS, || {
             registers.read::<u32>(PORT_TASK_FILE) & (TASK_FILE_BUSY | TASK_FILE_DATA_REQUEST) == 0
@@ -288,8 +296,9 @@ impl BlockDevice for Disk {
         }
         self.issue(ATA_READ_DMA_EXT, block, count as u16, bytes as u32)
             .ok()?;
-        // SAFETY: the read completed into this disk's buffer page.
-        let page = unsafe { &*addr_of!(BUFFERS).cast::<DmaPage>().add(self.slot) };
-        Some(&page.0[..bytes as usize])
+        // The read completed into this disk's buffer page.
+        let bytes = bytes as usize;
+        self.data.read_bytes(0, &mut self.buffer[..bytes]);
+        Some(&self.buffer[..bytes])
     }
 }
