@@ -711,6 +711,71 @@ still take the DMA page as a (physical, direct-map) pair, checked into a
 `DmaView` (`DmaView::from_direct_map`, which the check script confines to
 `pci.rs` and the memory layer) until `address_space.rs` passes its lease.
 
+**Done so far (2026-11-09, continued): the CPU core's tables, user
+copies and the heap into the core.** `trusted/` now also holds:
+`cpu_tables` (each CPU's GDT, TSS, IDT, the entry-state record the
+system-call stubs reach through GS, and the stacks the TSS names, in one
+zero-initialized `static` the CPU core instantiates; `install` takes a CPU
+index once, writes the kernel's fixed segments and the exception gates
+from `cpu.rs`'s stub table itself, and loads them; gates are atomics, so
+the boot checks read them without `unsafe`), `user_copy` (the
+fault-recovering copies to and from user memory, which first walk the
+loaded tables and copy only the leading run of pages mapped present and
+user-accessible, writable for a copy out, so no argument reaches kernel
+memory), `heap` (the `GlobalAlloc`, its slabs and frame runs; `heap.rs`
+keeps the accounting and helpers), `random` (RDRAND behind a CPUID-checked
+handle), `scratch` (the generated /proc files' buffers, below), `tsc`'s
+RDPID and RDTSCP, `control`'s CR2 and task-register reads, and the cache
+flush (`dma`, its only user). A crash report's console recovery takes a
+`crash::FatalReport` that only `crash::recover_console` makes, so
+`ClaimCell::release_abandoned` and `framebuffer::recover` are safe
+functions. `cpu/native_services.rs` turns the native trap frame into a
+reference once, where `cpu.rs` hands it over, and passes it down (31 -> 2
+sites); `cpu/linux_user_memory.rs` keeps one, the user-fault frame `cpu.rs`
+hands it. `cpu/architecture.rs`, `cpu/linux_system.rs`, `heap.rs`,
+`framebuffer.rs` and `drivers/mod.rs` carry `#![forbid(unsafe_code)]`, and
+`lib.rs` no longer allows unsafe code in `drivers`, `framebuffer` or
+`heap` (8 modules left). Site counts (from main at 4e8ec815):
+`native_services.rs` 31 -> 2, `architecture.rs` 22 -> 0, `heap.rs` 7 -> 0,
+`boot_verify.rs` 6 -> 1, `linux_user_memory.rs` 6 -> 1,
+`boot_verify_elf.rs` 4 -> 3, `linux_system.rs` 3 -> 0, `linux_procfs.rs`
+2 -> 2, `linux_cgroupfs.rs` 2 -> 1, `drivers/mod.rs` 2 -> 0,
+`framebuffer.rs` 1 -> 0, `image_store.rs` 1 -> 1 (87 -> 11 over these
+files); kernel `unsafe` blocks 410 -> 363, blocks without a SAFETY comment
+179 -> 121, `static mut` 3 -> 0.
+
+What these files keep, and why:
+- `boot_verify.rs` and `boot_verify_elf.rs` call `cpu.rs`'s `enter_user`,
+  whose user-entry stub overwrites the CPU's saved return stack, so a
+  nested entry would return to a dead frame; it becomes safe when the
+  entry moves into `trusted::entry` with a per-CPU "in user mode" guard
+  (`cpu.rs` is the scheduler rework's now). `boot_verify_elf.rs` also
+  reads and clears the signal context through `linux_signal_context()`,
+  an `UnsafeCell` in `cpu/linux_process_state.rs` (same).
+- `native_services.rs` (`dispatch_charged_call`, `exit_result`) and
+  `linux_user_memory.rs` (`handle_user_fault`) take the frame pointer
+  `cpu.rs`'s stubs pass; the stubs could pass a reference once they live in
+  `trusted::entry`.
+- `linux_procfs.rs` and `linux_cgroupfs.rs` render /proc/uptime,
+  /proc/meminfo and /proc/self/cgroup into a `trusted::scratch` buffer
+  (no longer a `static mut`) and return it as `&'static [u8]`, valid until
+  the next read, which the kernel-entry lock orders after every reader's
+  copy. `linux_regular_file` returns that type to `linux_mmap.rs` and
+  `linux_syscall.rs`; an owned or guarded file (Linux's seq_file keeps a
+  buffer per open file) makes these safe. The check script keeps
+  `ScratchBuffer` to these two files.
+- `image_store.rs`'s `retire` frees a published root filesystem whose
+  entries `published_rootfs` hands out as `Entry<'static>`, which `cpu/`
+  (the exec and path-walk code among it) holds; a lifetime tied to the
+  publication makes `PublishedImage::retire` safe.
+- `cpu_tables`' known gap: a gate above vector 31 takes the handler
+  address its caller names (the callers pass `trusted::entry`'s stubs and
+  `cpu.rs`'s system-call entry); a typed stub handle closes it once
+  `cpu.rs`'s stubs are in `trusted::entry`. `cpu/linux_system.rs` still
+  names `X86_RUNTIME.LINUX_BOOT_ID` (now an `OwnedState` of its own) so
+  that the unused cell in `cpu.rs`'s owner does not fail the build; both
+  go with the next change to that owner.
+
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
 operations of eight `unsafe fn`s in `cpu.rs` and step 4 adds one line at the
