@@ -9,8 +9,8 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 146 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 146 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 144 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 144 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
@@ -31,7 +31,6 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "arch/x86_64/cpu/linux_user_memory.rs 1"
     "image_store.rs 1"
     "lib.rs 0"
     "trusted/ap_start.rs 1"
@@ -90,6 +89,7 @@ forbidding_files=(
     "arch/x86_64/cpu/linux_cgroupfs.rs"
     "arch/x86_64/cpu/linux_domain_runtime.rs"
     "arch/x86_64/cpu/linux_exec.rs"
+    "arch/x86_64/cpu/linux_mmap.rs"
     "arch/x86_64/cpu/linux_process_lifecycle.rs"
     "arch/x86_64/cpu/linux_process_vm.rs"
     "arch/x86_64/cpu/linux_procfs.rs"
@@ -99,6 +99,7 @@ forbidding_files=(
     "arch/x86_64/cpu/linux_syscall.rs"
     "arch/x86_64/cpu/linux_system.rs"
     "arch/x86_64/cpu/linux_thread.rs"
+    "arch/x86_64/cpu/linux_user_memory.rs"
     "arch/x86_64/cpu/native_services.rs"
     "arch/x86_64/iommu.rs"
     "arch/x86_64/paging.rs"

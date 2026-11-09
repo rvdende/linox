@@ -764,10 +764,9 @@ in the next paragraph):
 
 **Done so far (2026-11-09, continued): every entry stub, the context
 switch and the CPU core's owner cells.** `cpu/` is unsafe-free apart
-from `linux_process_state.rs`'s process records (below) and the files of
-the memory-layer change (`linux_user_memory.rs`, `linux_mmap.rs`,
-`linux_process_vm.rs`, `linux_procfs.rs`, `linux_cgroupfs.rs`); `cpu.rs`
-keeps only the `Sync` impl of the owner that holds those records.
+from `linux_process_state.rs`'s process records (below), and every file
+in it but that one carries `#![forbid(unsafe_code)]`; `cpu.rs` keeps only
+the `Sync` impl of the owner that holds those records.
 - `trusted::entry` holds every stub: the native and Linux system-call
   entries, the exception, NMI and breakpoint stubs, the interrupt stubs
   and the two user-entry stubs. Handlers take their frame by reference
@@ -794,9 +793,8 @@ keeps only the `Sync` impl of the owner that holds those records.
   state is reached only through field accessors that check GS names an
   installed record (`set_user_return` validates the context it writes,
   `set_iret_registers`, `live_kernel_frame`), never as a raw pointer.
-- `trusted::user_copy` holds the copy loops and SMAP-lifting closure
-  (re-exported by `cpu.rs` for `address_space.rs`'s unsafe callers) and
-  the fault-fixup self-test; `trusted::msr` FS_BASE, EFER.NXE and the
+- `trusted::user_copy` holds the copy loops (now private to it) and the
+  fault-fixup self-test; `trusted::msr` FS_BASE, EFER.NXE and the
   `syscall` MSRs (LSTAR only ever the stub); `trusted::control` CR4's
   protection features, CR4.TSD and `int3`; `trusted::root` loads a
   process root only as a `paging::ValidatedUserRootFrames`; `trusted::xstate`
@@ -813,40 +811,41 @@ keeps only the `Sync` impl of the owner that holds those records.
   `crate::pod!`, which checks every field is listed, `Pod`, and that the
   sizes add up; the signal frame copies use `bytes_of`/`bytes_of_mut`.
 - Owner cells: the per-CPU-bank signal context is words of atomics
-  (`current_linux_signal_context`, `set_current_linux_signal_context`;
-  `linux_mmap.rs` keeps a compatibility view whose `read` is an `unsafe
-  fn` until that file moves), the process snapshot lists and each domain's
+  (`current_linux_signal_context`, `set_current_linux_signal_context`),
+  the process snapshot lists and each domain's
   saved extended state are `ClaimCell`s, fork copies records with slice
-  copies and exec's scratch buffers are heap `Vec`s. The scheduler's
+  copies and exec's scratch buffers are heap `Vec`s. `linux_mmap.rs` reads
+  the signal context that way and `linux_user_memory.rs`'s
+  `handle_user_fault` takes `&mut UserFaultFrame`, so both are
+  unsafe-free. The scheduler's
   per-process workspace is published whole, so
   `OwnedStateClaim::publish_initialized` is gone. The unused
   `LINUX_BOOT_ID` cell and its placeholder line are gone.
-- Site counts (from main at 02a8030f): `cpu.rs` 39 -> 1, `activation.rs`
+- Site counts (from 02a8030f): `cpu.rs` 39 -> 1, `activation.rs`
   15 -> 0, `linux_runtime_loop.rs` 14 -> 0, `linux_signal.rs` (cpu) 12 -> 0,
-  `linux_process_state.rs` 12 -> 8, `execution.rs` 10 -> 0,
+  `linux_process_state.rs` 12 -> 7, `execution.rs` 10 -> 0,
   `linux_domain_runtime.rs` 8 -> 0, `linux_exec.rs` 5 -> 0,
   `linux_syscall.rs` 4 -> 0, `linux_process_lifecycle.rs` 4 -> 0,
   `boot_verify_elf.rs` 3 -> 0, `native_services.rs` 2 -> 0,
-  `boot_verify.rs`, `linux_thread.rs`, `linux_scheduler.rs` 1 -> 0,
-  `scheduler.rs` 4 -> 3; all of these but `cpu.rs`,
-  `linux_process_state.rs` and `scheduler.rs` carry
-  `#![forbid(unsafe_code)]`. Kernel `unsafe` blocks 353 -> 273 (from main at b65ee6eb, with the signal queues), blocks
-  without a SAFETY comment 115 -> 36; `lib.rs` allows unsafe code in 6 modules.
+  `boot_verify.rs`, `linux_thread.rs`, `linux_scheduler.rs`,
+  `linux_mmap.rs`, `linux_user_memory.rs` 1 -> 0, `scheduler.rs` 4 -> 3,
+  `linux_signal.rs` 8 -> 0 (the signal queues, above). Against main at
+  dc5e832a (228 blocks, 49 without a SAFETY comment, 5 modules allowed
+  unsafe code): 144 blocks, with SAFETY comments now outnumbering them
+  (174), and `lib.rs` allows unsafe code in 4 modules (`arch`,
+  `image_store`, `scheduler`, `trusted`).
 
 Still to do here, and why:
 - The process records (`linux_process_state.rs`, 8 sites, and the `Sync`
   impl in `cpu.rs`): `linux_process_record` and the runtime-state
   accessors return `&'static mut` into frame-allocated records, about 90
-  call sites hold them across calls (some fetch the same record twice),
-  and `linux_process_vm.rs` and `linux_procfs.rs` (the memory-layer
-  change's files) call them too. Making them sound means per-record
+  call sites hold them across calls (some fetch the same record twice). Making them sound means per-record
   ownership: a record per slot in its own lock, taken by a guard that
   lives for one operation, with the call sites restructured around it.
 - `scheduler.rs` (3): `active_process_scheduler_workspace` and
   `runtime_mut` return `&'static mut` from an `OwnedState`, and
-  `linux_process.rs` (the memory-layer change's file) holds the
-  workspace that way at about 25 call sites; the same guard pattern, once
-  that file can change.
+  `linux_process.rs` holds the workspace that way at about 14 call sites;
+  the same guard pattern.
 - Splitting `kernel_entry_lock` (SCHEDULER.md step 6, M3) needs the two
   items above first: they are the last owners whose soundness rests on it.
 

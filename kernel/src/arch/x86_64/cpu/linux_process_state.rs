@@ -16,36 +16,6 @@ pub(super) fn set_current_linux_signal_context(context: LinuxSignalContext) {
     }
 }
 
-/// The signal context as `cpu/linux_mmap.rs` (another change's file) reads
-/// it, in an `unsafe` block: `linux_signal_context().get().cast_const()
-/// .read()`. It goes when that file calls `current_linux_signal_context`.
-pub(super) fn linux_signal_context() -> LinuxSignalContextView {
-    LinuxSignalContextView
-}
-
-/// See `linux_signal_context`.
-pub(super) struct LinuxSignalContextView;
-
-impl LinuxSignalContextView {
-    pub(super) fn get(&self) -> Self {
-        Self
-    }
-
-    pub(super) fn cast_const(self) -> Self {
-        self
-    }
-
-    /// The context (`current_linux_signal_context`).
-    ///
-    /// # Safety
-    ///
-    /// None: it is `unsafe` only so the caller's `unsafe` block stays valid
-    /// until that file moves to `current_linux_signal_context`.
-    pub(super) unsafe fn read(self) -> LinuxSignalContext {
-        current_linux_signal_context()
-    }
-}
-
 /// The record for process slot `slot` of domain instance `instance`,
 /// allocated on first use.
 pub(super) fn linux_process_record(

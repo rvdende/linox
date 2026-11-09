@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(super) fn copy_linux_cpu_location(cpu_address: u64, node_address: u64) -> bool {
@@ -383,17 +384,10 @@ pub(super) fn copy_to_linux_user(address: u64, input: &[u8]) -> bool {
     crate::trusted::user_copy::copy_to_user(address, input) == input.len()
 }
 
-pub(super) fn handle_user_fault(frame: *mut UserFaultFrame) -> u64 {
+pub(super) fn handle_user_fault(frame: &mut UserFaultFrame) -> u64 {
     let _kernel_entry = crate::sync::kernel_entry_lock();
     // A refusal recorded before this fault is not this fault's.
     let _ = memory::take_user_frames_refused();
-    // SAFETY: `frame` is null or the frame `cpu.rs`'s user-fault entry stub
-    // pushed on this CPU's kernel stack and handed to `user_fault_handler`,
-    // its only caller; the stub reads it back only after this returns, so
-    // this is the one reference to it meanwhile.
-    let Some(frame) = (unsafe { frame.as_mut() }) else {
-        return u64::MAX;
-    };
     let fault_domain = scheduler::current_domain();
     let failure_policy = fault_domain.and_then(domain::service_failure_policy);
     let service_fault = failure_policy == Some(domain::ServiceFailurePolicy::RestartManaged);

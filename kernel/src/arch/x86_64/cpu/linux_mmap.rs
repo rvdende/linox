@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(super) fn linux_user_stack_pointer_valid(user_stack: u64) -> bool {
@@ -23,9 +24,9 @@ pub(super) fn linux_user_stack_pointer_valid(user_stack: u64) -> bool {
     if !X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
         return false;
     }
-    // SAFETY: active signal delivery owns this context until the serialized
+    // Active signal delivery owns this context until the serialized
     // rt_sigreturn or abort path clears active and the record.
-    let signal = unsafe { linux_signal_context().get().cast_const().read() };
+    let signal = current_linux_signal_context();
     let alt_base = signal.alt_stack_pointer;
     let alt_size = signal.alt_stack_size;
     let frame_uses_alt_stack = alt_base != 0

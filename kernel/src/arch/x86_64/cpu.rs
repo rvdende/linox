@@ -3837,7 +3837,7 @@ pub(crate) extern "sysv64" fn user_fault_handler(frame: &mut UserFaultFrame) -> 
     crate::cpu_time::back_from_user();
     crate::sync::kernel_entry_return_from_user();
     let result = crate::linux_profile::span(crate::linux_profile::Span::UserFault, || {
-        handle_user_fault(core::ptr::from_mut(frame))
+        handle_user_fault(frame)
     });
     // Back to user mode unless the fault returns to the kernel.
     if result != u64::MAX {
