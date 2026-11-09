@@ -2150,18 +2150,13 @@ pub(crate) fn release_unmapped_shmem() {
     let mut cursor = 0;
     loop {
         let next = locked_with(|overlay, spares| {
-            let Overlay {
-                nodes, mappings, ..
-            } = &*overlay;
-            let found = nodes
-                .iter()
-                .flat_map(|chunk| chunk.iter())
-                .enumerate()
-                .skip(cursor)
-                .find(|(_, node)| {
-                    node.active && node.data == Data::Shmem && !mapped_in(mappings, node.handle)
+            let found = (cursor..overlay.slot_count()).find(|place| {
+                overlay.node_at(*place).is_some_and(|node| {
+                    node.active
+                        && node.data == Data::Shmem
+                        && !mapped_in(&overlay.mappings, node.handle)
                 })
-                .map(|(place, _)| place);
+            });
             let Some(place) = found else {
                 return Ok(None);
             };
