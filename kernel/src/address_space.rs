@@ -585,57 +585,32 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         }
 
         // The initial stack is laid out in a copy of the page and copied
-        // back in one piece below.
+        // back in one piece.
         let stack_page = Frame::leased(stack_frame)?;
         let mut stack = [0; PAGE_SIZE];
         stack_page.read_bytes(0, &mut stack);
         let arguments = crate::published_rootfs::launch_arguments(init)?;
-        let path_environment = b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0";
-        let pwd_environment = b"PWD=/\0";
-        let mut argument_offsets = [0_usize; 3];
-        let mut string_offset = PAGE_SIZE;
-        for index in (0..arguments.count).rev() {
-            let value = arguments.values[index];
-            string_offset = string_offset.checked_sub(value.len().checked_add(1)?)?;
-            stack[string_offset..string_offset + value.len()].copy_from_slice(value);
-            stack[string_offset + value.len()] = 0;
-            argument_offsets[index] = string_offset;
-        }
-        let pwd_environment_offset = string_offset.checked_sub(pwd_environment.len())?;
-        let path_environment_offset = pwd_environment_offset.checked_sub(path_environment.len())?;
-        let platform_offset = path_environment_offset.checked_sub(LINUX_PLATFORM.len())?;
         let random = cpu::linux_startup_random()?;
-        let random_offset = platform_offset.checked_sub(random.len())?;
-        let words = arguments
-            .count
-            .checked_add(5 + crate::linux_elf::AUXILIARY_VECTOR_WORDS)?;
-        let stack_offset = (random_offset.checked_sub(words * size_of::<u64>())?) & !15;
-        let argument_addresses = argument_offsets.map(|offset| STACK_ADDRESS + offset as u64);
-        let argument_address = argument_addresses[arguments.execfn];
-        let path_environment_address = STACK_ADDRESS + path_environment_offset as u64;
-        let pwd_environment_address = STACK_ADDRESS + pwd_environment_offset as u64;
-        let platform_address = STACK_ADDRESS + platform_offset as u64;
-        let random_address = STACK_ADDRESS + random_offset as u64;
-        stack[path_environment_offset..pwd_environment_offset].copy_from_slice(path_environment);
-        stack[pwd_environment_offset..string_offset].copy_from_slice(pwd_environment);
-        stack[platform_offset..platform_offset + LINUX_PLATFORM.len()]
-            .copy_from_slice(&LINUX_PLATFORM);
-        stack[random_offset..platform_offset].copy_from_slice(&random);
-        let stack_words = [arguments.count as u64]
-            .into_iter()
-            .chain(argument_addresses[..arguments.count].iter().copied())
-            .chain([0, path_environment_address, pwd_environment_address, 0])
-            .chain(crate::linux_elf::auxiliary_vector(
-                startup,
-                argument_address,
-                platform_address,
-                random_address,
-                crate::linux_elf::VDSO_ADDRESS,
-            ));
-        for (index, value) in stack_words.enumerate() {
-            let offset = stack_offset + index * size_of::<u64>();
-            stack[offset..offset + size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
-        }
+        let stack_offset = linox_initial_stack::build(
+            &mut stack,
+            STACK_ADDRESS,
+            &linox_initial_stack::Contents {
+                arguments: &arguments.values[..arguments.count],
+                execfn: arguments.execfn,
+                environment: &[b"PATH=/bin:/usr/bin:/sbin:/usr/sbin", b"PWD=/"],
+                platform: &LINUX_PLATFORM,
+                random: &random,
+            },
+            |addresses| {
+                crate::linux_elf::auxiliary_vector(
+                    startup,
+                    addresses.execfn,
+                    addresses.platform,
+                    addresses.random,
+                    crate::linux_elf::VDSO_ADDRESS,
+                )
+            },
+        )?;
         stack_page.write_bytes(0, &stack);
         stage = 5;
 

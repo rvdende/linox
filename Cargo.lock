@@ -571,6 +571,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "linox-initial-stack"
+version = "0.1.0"
+
+[[package]]
 name = "linox-kernel"
 version = "0.1.0"
 dependencies = [
@@ -582,6 +586,7 @@ dependencies = [
  "linox-drm",
  "linox-ext2",
  "linox-image-store",
+ "linox-initial-stack",
  "linox-kernel-policy",
  "linox-keyrings",
  "linox-ktls",
