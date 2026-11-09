@@ -2212,7 +2212,6 @@ pub(super) fn linux_socket_sendmmsg(
 pub(super) fn linux_socket_send_live_return(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
-    descriptor: u64,
     result: u64,
     flags: u64,
     broken_pipe: bool,
@@ -2220,18 +2219,6 @@ pub(super) fn linux_socket_send_live_return(
     const MSG_NOSIGNAL: u64 = 0x4000;
     if (result == LINUX_EPIPE || broken_pipe) && flags & MSG_NOSIGNAL == 0 {
         linux_broken_pipe_live_return(output, caller)
-    } else if result < u64::MAX - 4095
-        && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-        && crate::linux_socket::kind(
-            linux_socket_slot(descriptor).unwrap_or(crate::linux_socket::SlotId::MAX),
-        ) == Some(crate::linux_socket::Kind::Unix)
-        && X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .load(Ordering::SeqCst)
-            != 0
-        && yield_current_linux_process(caller, result)
-    {
-        LINUX_RETURN_TO_KERNEL
     } else {
         result
     }

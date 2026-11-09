@@ -701,7 +701,7 @@ pub(super) fn linux_signal_suspend_live_return(
 pub(super) fn yield_current_linux_process(mut caller: LinuxUserContext, result: u64) -> bool {
     // A yield switches to the parent, which a thread of this process still
     // running on another CPU must not see; see linux_remote_thread_running.
-    if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) || current_linux_process_pid() == 1 {
+    if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return false;
     }
     caller.rax = result;
@@ -721,9 +721,6 @@ pub(super) fn yield_current_linux_process(mut caller: LinuxUserContext, result: 
     X86_RUNTIME
         .LINUX_PROCESS_CHILD_YIELDED
         .store(true, Ordering::SeqCst);
-    X86_RUNTIME
-        .LINUX_PROCESS_LAST_BLOCKED_PID
-        .store(pid, Ordering::SeqCst);
     true
 }
 
@@ -940,15 +937,6 @@ pub(super) fn linux_poll_wait_live_return(
         if let Some(target) = ready_linux_thread_handle() {
             break 'target target;
         }
-        if waits_for_parent_unix_peer
-            && X86_RUNTIME
-                .LINUX_PROCESS_SCHEDULER_NESTING
-                .load(Ordering::SeqCst)
-                != 0
-            && yield_current_linux_process(caller, 0)
-        {
-            return LINUX_RETURN_TO_KERNEL;
-        }
         // pause and sigsuspend wait in the call, as a timed wait with no
         // deadline, until a signal ends it: resumed for anything else, it
         // waits again, as a thread wait once a sibling thread is ready.
@@ -958,7 +946,6 @@ pub(super) fn linux_poll_wait_live_return(
             wait_kind,
             LINUX_THREAD_WAIT_PAUSE | LINUX_THREAD_WAIT_SIGSUSPEND
         ) && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-            && current_linux_process_pid() != 1
         {
             let slot = usize::from(current.slot);
             let number = if wait_kind == LINUX_THREAD_WAIT_PAUSE {

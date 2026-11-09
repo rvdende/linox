@@ -188,29 +188,6 @@ pub(super) struct LinuxForkExecFlagGuard {
     pids_restored: core::cell::Cell<bool>,
 }
 
-/// Marks a domain-exec fork transaction as running. It re-runs only the
-/// injected process until that exits, so forks made inside it keep running
-/// the child first: a child left waiting in the run queue would never run.
-pub(super) struct LinuxDomainExecGuard;
-
-impl LinuxDomainExecGuard {
-    pub(super) fn enter() -> Self {
-        X86_RUNTIME
-            .LINUX_DOMAIN_EXEC_DEPTH
-            .fetch_add(1, Ordering::SeqCst);
-        Self
-    }
-}
-
-impl Drop for LinuxDomainExecGuard {
-    fn drop(&mut self) {
-        let depth = X86_RUNTIME.LINUX_DOMAIN_EXEC_DEPTH.load(Ordering::SeqCst);
-        X86_RUNTIME
-            .LINUX_DOMAIN_EXEC_DEPTH
-            .store(depth.saturating_sub(1), Ordering::SeqCst);
-    }
-}
-
 impl LinuxForkExecFlagGuard {
     pub(super) fn capture() -> Self {
         Self {

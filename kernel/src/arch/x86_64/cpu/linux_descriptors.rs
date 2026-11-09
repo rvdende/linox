@@ -1102,6 +1102,7 @@ impl LinuxDescriptorOffset {
 }
 
 fn sync_saved_linux_open_file_offset(id: u64, value: u64) {
+    sync_live_linux_open_file_offset(id, value);
     // Every saved table is looked at only if it can hold the id: with a
     // thousand processes, looking through each one's descriptors on every
     // read made a read of a file opened since take a millisecond.
@@ -1118,6 +1119,44 @@ fn sync_saved_linux_open_file_offset(id: u64, value: u64) {
         for descriptor in 0..state.descriptors.open_file_ids.len() {
             if state.descriptors.open_file_ids[descriptor] == id {
                 state.descriptors.offsets[descriptor] = value;
+            }
+        }
+    }
+}
+
+/// Sets open file `id`'s offset to `value` in the live banks of this
+/// domain other than this CPU's: a process that runs on another CPU, or has
+/// threads there, holds its descriptor table in its bank, and the save when
+/// it leaves that CPU would put back the offset it had. A parent and the
+/// children it forked share an open file and run on different CPUs at once
+/// now that the parent goes on after a fork (fork07: a hundred children each
+/// read one byte, and the parent then read past them).
+fn sync_live_linux_open_file_offset(id: u64, value: u64) {
+    let current = linux_cpu_bank();
+    let instance = linux_execution_instance();
+    for bank in 0..LINUX_CPU_BANK_LIMIT {
+        if bank == current
+            || LINUX_BANK_USERS[bank].load(Ordering::Acquire) == 0
+            || LINUX_BANK_PID[bank].load(Ordering::Acquire) == 0
+            || usize::from(LINUX_BANK_INSTANCE[bank].load(Ordering::Acquire)) != instance
+        {
+            continue;
+        }
+        let tables = [
+            (
+                &X86_RUNTIME.ELF_PROBE_STDIO_OPEN_FILE_IDS.at_bank(bank)[..],
+                &X86_RUNTIME.ELF_PROBE_STDIO_OFFSETS.at_bank(bank)[..],
+            ),
+            (
+                &X86_RUNTIME.ELF_PROBE_OPEN_FILE_IDS.at_bank(bank)[..],
+                &X86_RUNTIME.ELF_PROBE_DESCRIPTOR_OFFSETS.at_bank(bank)[..],
+            ),
+        ];
+        for (ids, offsets) in tables {
+            for (cell, offset) in ids.iter().zip(offsets) {
+                if cell.load(Ordering::SeqCst) == id {
+                    offset.store(value, Ordering::SeqCst);
+                }
             }
         }
     }

@@ -218,10 +218,11 @@ pub(crate) const LINUX_RUNTIME_HEAP_PAGES: usize = 16;
 const EXCEPTION_STACK_SIZE: usize = 4 * 1024 * 1024;
 const EXCEPTION_STACK_STORAGE_SIZE: usize = PAGE_SIZE + EXCEPTION_STACK_SIZE + PAGE_SIZE;
 const EXCEPTION_STACK_TOP_OFFSET: usize = PAGE_SIZE + EXCEPTION_STACK_SIZE;
-// Linux processes run nested inside their parents' system calls on the kernel
-// stack of the CPU that entered the domain, so a process tree such as
-// sh > cargo > rustc > cc > collect2 > ld needs far more than one syscall's
-// worth; 512 KiB overflowed. Match the boot CPU's stack.
+// A CPU's own kernel stack holds its scheduler loop and, on an application
+// processor, the process it runs and that process's system calls (the boot
+// CPU runs them on activation stacks). Processes once ran nested inside
+// their parents' calls here, where 512 KiB overflowed; it keeps the boot
+// CPU's size.
 const CPU_KERNEL_STACK_SIZE: usize = 2 * 1024 * 1024;
 const CPU_KERNEL_STACK_STORAGE_SIZE: usize = PAGE_SIZE + CPU_KERNEL_STACK_SIZE + PAGE_SIZE;
 const CPU_KERNEL_STACK_TOP_OFFSET: usize = PAGE_SIZE + CPU_KERNEL_STACK_SIZE;
@@ -619,10 +620,8 @@ struct X86RuntimeOwner {
     LINUX_PROCESS_CHILD_STATUS: RuntimeRef<CpuBankedAtomicU8>,
     LINUX_PROCESS_CHILD_YIELDED: RuntimeRef<CpuBankedAtomicBool>,
     LINUX_PROCESS_CHILD_YIELD_PID: RuntimeRef<CpuBankedAtomicU32>,
-    LINUX_PROCESS_LAST_BLOCKED_PID: RuntimeRef<CpuBankedAtomicU32>,
-    LINUX_DOMAIN_EXEC_DEPTH: RuntimeRef<CpuBankedAtomicU32>,
+    CONTAINER_EXEC_CHILD: RuntimeRef<[AtomicU32; control_abi::DOMAIN_LIMIT]>,
     LINUX_PROCESS_RELEASE_PARENT_ON_EXEC: RuntimeRef<CpuBankedAtomicBool>,
-    LINUX_PROCESS_SCHEDULER_NESTING: RuntimeRef<CpuBankedAtomicU32>,
     LINUX_PROCESS_SNAPSHOT_SCRATCH: RuntimeRef<LinuxProcessSnapshotScratch>,
     LINUX_PROCESS_SNAPSHOT_STAGE: RuntimeRef<CpuBankedAtomicU8>,
     LINUX_PROCESS_SNAPSHOT_VALIDATED: RuntimeRef<CpuBankedAtomicBool>,
@@ -1151,13 +1150,9 @@ static X86_RUNTIME: X86RuntimeOwner = X86RuntimeOwner {
     LINUX_PROCESS_CHILD_STATUS: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_CHILD_STATUS),
     LINUX_PROCESS_CHILD_YIELDED: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_CHILD_YIELDED),
     LINUX_PROCESS_CHILD_YIELD_PID: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_CHILD_YIELD_PID),
-    LINUX_PROCESS_LAST_BLOCKED_PID: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_LAST_BLOCKED_PID),
-    LINUX_DOMAIN_EXEC_DEPTH: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_DOMAIN_EXEC_DEPTH),
+    CONTAINER_EXEC_CHILD: RuntimeRef(&X86_RUNTIME_BACKING_CONTAINER_EXEC_CHILD),
     LINUX_PROCESS_RELEASE_PARENT_ON_EXEC: RuntimeRef(
         &X86_RUNTIME_BACKING_LINUX_PROCESS_RELEASE_PARENT_ON_EXEC,
-    ),
-    LINUX_PROCESS_SCHEDULER_NESTING: RuntimeRef(
-        &X86_RUNTIME_BACKING_LINUX_PROCESS_SCHEDULER_NESTING,
     ),
     LINUX_PROCESS_SNAPSHOT_SCRATCH: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_SNAPSHOT_SCRATCH),
     LINUX_PROCESS_SNAPSHOT_STAGE: RuntimeRef(&X86_RUNTIME_BACKING_LINUX_PROCESS_SNAPSHOT_STAGE),
@@ -1820,21 +1815,16 @@ static X86_RUNTIME_BACKING_LINUX_INIT_EXIT_KILL_ROUNDS: BankedAtomicU32 = Banked
 const LINUX_INIT_EXIT_KILL_ROUND_LIMIT: u32 = 10_000;
 /// Rounds after which init's exit ends killed processes itself.
 const LINUX_INIT_EXIT_FORCE_ROUND: u32 = 100;
-/// The process that most recently yielded because it could not make
-/// progress; see run_other_linux_processes.
-static X86_RUNTIME_BACKING_LINUX_PROCESS_LAST_BLOCKED_PID: CpuBankedAtomicU32 =
-    CpuBankedAtomicU32::new(0);
-/// How many domain-exec fork transactions are running; see
-/// LinuxDomainExecGuard.
-static X86_RUNTIME_BACKING_LINUX_DOMAIN_EXEC_DEPTH: CpuBankedAtomicU32 = CpuBankedAtomicU32::new(0);
+/// Per domain, the process its last `domain exec` runs (0: none): the
+/// console is the command's until it exits (`load_linux_domain_exec`).
+static X86_RUNTIME_BACKING_CONTAINER_EXEC_CHILD: [AtomicU32; control_abi::DOMAIN_LIMIT] =
+    [const { AtomicU32::new(0) }; control_abi::DOMAIN_LIMIT];
 static X86_RUNTIME_BACKING_LINUX_PROCESS_RELEASE_PARENT_ON_EXEC: CpuBankedAtomicBool =
     CpuBankedAtomicBool::new(false);
 static X86_RUNTIME_BACKING_LINUX_PROCESS_CHILD_STATUS: CpuBankedAtomicU8 =
     CpuBankedAtomicU8::new(0);
 static X86_RUNTIME_BACKING_LINUX_CURRENT_PROCESS_PID: CpuBankedAtomicU32 =
     CpuBankedAtomicU32::new(1);
-static X86_RUNTIME_BACKING_LINUX_PROCESS_SCHEDULER_NESTING: CpuBankedAtomicU32 =
-    CpuBankedAtomicU32::new(0);
 static X86_RUNTIME_BACKING_LINUX_PROCESS_WAIT_COUNT: BankedAtomicU32 = BankedAtomicU32::new(0);
 static X86_RUNTIME_BACKING_LINUX_TTY_SESSION: BankedAtomicU32 = BankedAtomicU32::new(0);
 static X86_RUNTIME_BACKING_LINUX_TTY_FOREGROUND_GROUP: BankedAtomicU32 = BankedAtomicU32::new(0);

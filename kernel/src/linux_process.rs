@@ -3363,22 +3363,6 @@ pub(crate) fn resume_runtime_process_registry() -> bool {
     valid
 }
 
-pub(crate) fn reset_runtime_scheduler_bindings() -> bool {
-    if let Some(run_queue) = scheduler::active_process_scheduler_workspace() {
-        run_queue.retire_all();
-        if !scheduler::release_process_scheduler_workspace() {
-            return false;
-        }
-    }
-    let Some(table) = live_process_table_mut() else {
-        return false;
-    };
-    for process in table.processes.iter_mut().flatten() {
-        process.scheduler_thread = None;
-    }
-    true
-}
-
 fn finish_live_process_registry_with_refresh_floor(refresh_floor: u32) -> bool {
     let Some(instance) = active_process_instance() else {
         return true;
@@ -3760,17 +3744,6 @@ pub(crate) fn live_process_sleep_due(pid: u32, now: u64) -> bool {
             .and_then(|handle| table.process(handle))
             .and_then(Process::marked_asleep_until)
             .is_some_and(|deadline| deadline <= now)
-    })
-}
-
-/// Whether process `pid` sleeps in a futex wait nothing has ended by `now`
-/// (`Process::is_asleep`): resuming it would only find it waiting again.
-pub(crate) fn live_process_futex_asleep(pid: u32, now: u64) -> bool {
-    live_process_table_mut().is_some_and(|table| {
-        table
-            .handle_by_pid(pid)
-            .and_then(|handle| table.process(handle))
-            .is_some_and(|process| process.is_asleep(now))
     })
 }
 
@@ -5602,31 +5575,6 @@ pub(crate) fn dispatch_live_process(pid: u32) -> Option<LiveProcessDispatch> {
     table.dispatch(handle)
 }
 
-pub(crate) fn yield_live_process(pid: u32) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let handle = table.handle_by_pid(pid)?;
-    let process = table.process(handle)?;
-    let address_space = process.address_space.as_ref()?;
-    let context = process.context?;
-    let thread = process.scheduler_thread?;
-    let scheduler_context = context.scheduler_context(address_space)?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
-    let selected = run_queue.yield_current(thread, scheduler_context)?;
-    let selected_handle = table
-        .processes
-        .iter()
-        .flatten()
-        .find(|process| process.scheduler_thread == Some(selected.handle()))?
-        .handle;
-    (table
-        .process(selected_handle)?
-        .context?
-        .scheduler_context(table.process(selected_handle)?.address_space.as_ref()?)?
-        == selected.context())
-    .then(|| table.dispatch(selected_handle))
-    .flatten()
-}
-
 #[inline(never)]
 /// Says why `prepare_fork` refused: the parent's registry state, or a full
 /// process table.
@@ -6215,7 +6163,10 @@ pub(crate) fn resume_live_parent_after_child_exec(pid: u32) -> Option<LiveProces
 }
 
 /// Makes process `pid`, ready in the run queue, current on this CPU, which
-/// runs no process: another CPU of the domain taking it to run.
+/// runs no process: a CPU's scheduler loop taking it to run. The registry's
+/// context is the one entered: a write to it while the process waited (a
+/// signal's frame, a call's result, a restart) is newer than the copy the
+/// run queue kept from its last release.
 pub(crate) fn claim_live_process(pid: u32) -> Option<LiveProcessDispatch> {
     let table = live_process_table_mut()?;
     let handle = table.handle_by_pid(pid)?;
@@ -6227,13 +6178,72 @@ pub(crate) fn claim_live_process(pid: u32) -> Option<LiveProcessDispatch> {
     let context = process.context?.scheduler_context(space)?;
     let thread = process.scheduler_thread?;
     let run_queue = scheduler::active_process_scheduler_workspace()?;
-    let claimed = run_queue.claim(thread)?;
-    if claimed.context() != context {
-        // Put it back as it was.
-        let _ = run_queue.release(thread, claimed.context());
-        return None;
+    run_queue.claim(thread)?;
+    let dispatched = table.dispatch(handle);
+    if dispatched.is_none() {
+        let _ = run_queue.release(thread, context);
     }
-    table.dispatch(handle)
+    dispatched
+}
+
+/// Starts a domain runtime's run queue with its init, ready: the runtime
+/// loop owns the queue from the start and picks every process from it, init
+/// included (docs/SCHEDULER.md), so a fork only adds its child. The queue
+/// goes when the runtime ends (`retire_lone_live_process`).
+pub(crate) fn start_runtime_scheduler() -> bool {
+    let Some(table) = live_process_table_mut() else {
+        return false;
+    };
+    let Some(init) = table.init else {
+        return false;
+    };
+    if table
+        .process(init)
+        .is_some_and(|process| process.scheduler_thread.is_some())
+    {
+        return true;
+    }
+    let domain = table.scheduler_domain();
+    let Some(run_queue) = scheduler::acquire_process_scheduler_workspace() else {
+        return false;
+    };
+    if !table.admit_to_scheduler(init, run_queue, domain) {
+        let _ = scheduler::release_process_scheduler_workspace();
+        return false;
+    }
+    true
+}
+
+/// Makes running process `pid` issue system call `number` again when it is
+/// next entered: its saved instruction pointer goes back over the
+/// `syscall` instruction (two bytes) and its rax names the call, as a
+/// restarted call is re-issued. False when it has no context.
+pub(crate) fn restart_live_process_call(pid: u32, number: u64) -> bool {
+    let Some(table) = live_process_table_mut() else {
+        return false;
+    };
+    let Some(process) = table
+        .handle_by_pid(pid)
+        .and_then(|handle| table.process_mut(handle))
+        .filter(|process| process.state == ProcessState::Running)
+    else {
+        return false;
+    };
+    let Some(mut context) = process.context else {
+        return false;
+    };
+    context.rip = context.rip.wrapping_sub(2);
+    context.general[PROCESS_RAX_INDEX] = number;
+    process.context = Some(context);
+    true
+}
+
+/// The value process `pid`'s interrupted system call returns when it is
+/// next entered (its saved rax).
+pub(crate) fn live_process_return_value(pid: u32) -> Option<u64> {
+    let table = live_process_table_mut()?;
+    let process = table.process(table.handle_by_pid(pid)?)?;
+    Some(process.context?.general[PROCESS_RAX_INDEX])
 }
 
 /// After the last other scheduled process of the domain ended: process
@@ -6361,28 +6371,6 @@ pub(crate) fn complete_live_process_exit_detached(pid: u32, status: u8) -> bool 
         && release_live_process_address_space(space)
         && crate::linux_sysv_ipc::drop_process_attachments(pid).is_ok()
         && table.exit_after_current_address_space_retired(handle, status)
-}
-
-pub(crate) fn switch_live_process(from_pid: u32, to_pid: u32) -> Option<LiveProcessDispatch> {
-    let table = live_process_table_mut()?;
-    let from_handle = table.handle_by_pid(from_pid)?;
-    let to_handle = table.handle_by_pid(to_pid)?;
-    let from = table.process(from_handle)?;
-    let to = table.process(to_handle)?;
-    let from_space = from.address_space.as_ref()?;
-    let to_space = to.address_space.as_ref()?;
-    let from_context = from.context?;
-    let to_context = to.context?;
-    let from_thread = from.scheduler_thread?;
-    let to_thread = to.scheduler_thread?;
-    let from_scheduler_context = from_context.scheduler_context(from_space)?;
-    let to_scheduler_context = to_context.scheduler_context(to_space)?;
-    let run_queue = scheduler::active_process_scheduler_workspace()?;
-    let resumed = run_queue.switch_current(from_thread, from_scheduler_context, to_thread)?;
-    if resumed.handle() != to_thread || resumed.context() != to_scheduler_context {
-        return None;
-    }
-    table.dispatch(to_handle)
 }
 
 /// `pid`'s SCHED_DEADLINE runtime, deadline and period.

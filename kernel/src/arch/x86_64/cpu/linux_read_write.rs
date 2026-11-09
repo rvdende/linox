@@ -1323,16 +1323,28 @@ pub(super) fn linux_descriptor_read_live_return(
     // stop the whole domain until someone types: a ready sibling thread runs
     // (brush reads input on its own thread, so its main thread must be able
     // to finish `exit`), or other processes do, and the read checks again.
-    if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Acquire)
-        && linux_console_input_descriptor(descriptor)
-        && active_container_slot().is_some_and(|slot| {
+    // While a `domain exec` command has the console, only it and what it
+    // started read it; the rest of the domain waits for the console as a
+    // background process group waits for its terminal, and a console the
+    // command gave back on exiting is read (and the domain suspended) as
+    // a detached one.
+    let console_attached = || {
+        active_container_slot().is_some_and(|slot| {
             X86_RUNTIME.CONTAINER_CONSOLE_ATTACHED[slot].load(Ordering::Acquire)
         })
+    };
+    if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::Acquire)
+        && linux_console_input_descriptor(descriptor)
+        && console_attached()
     {
-        if crate::console_nonblocking() && !crate::serial_input_ready() {
+        if crate::console_nonblocking()
+            && (!crate::serial_input_ready() || linux_console_held_by_domain_exec())
+        {
             return LINUX_EAGAIN;
         }
-        while !crate::serial_input_ready() {
+        while console_attached()
+            && (!crate::serial_input_ready() || linux_console_held_by_domain_exec())
+        {
             if ready_linux_thread_handle().is_some() || current_linux_runtime_cpu_index() != 0 {
                 return linux_retry_later_live_return(output, caller, LINUX_READ_SYSCALL);
             }
@@ -1369,7 +1381,13 @@ pub(super) fn linux_descriptor_read_live_return(
             .LINUX_RUNTIME_SUSPEND_REQUESTED
             .swap(false, Ordering::AcqRel)
     {
-        if count == 0 || !save_suspended_linux_runtime(caller, address, count, false) {
+        // The read is recorded with the suspension: a domain exec run while
+        // the domain is suspended has it issued again.
+        let suspended = LinuxUserContext {
+            rax: LINUX_READ_SYSCALL,
+            ..caller
+        };
+        if count == 0 || !save_suspended_linux_runtime(suspended, address, count, false) {
             return LINUX_EINVAL;
         }
         return LINUX_RETURN_TO_KERNEL;
@@ -1464,7 +1482,11 @@ pub(super) fn linux_descriptor_readv_live_return(
             Ok(snapshot) => snapshot,
             Err(error) => return error,
         };
-        if vector_count == 0 || !save_suspended_linux_runtime(caller, ranges[0].0, 1, false) {
+        let suspended = LinuxUserContext {
+            rax: LINUX_READV_SYSCALL,
+            ..caller
+        };
+        if vector_count == 0 || !save_suspended_linux_runtime(suspended, ranges[0].0, 1, false) {
             return LINUX_EINVAL;
         }
         return LINUX_RETURN_TO_KERNEL;

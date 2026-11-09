@@ -96,9 +96,6 @@ fn copy_linux_bank_transients(from: usize, to: usize) {
         LINUX_PROCESS_CHILD_STATUS,
         LINUX_PROCESS_RELEASE_PARENT_ON_EXEC,
         LINUX_FORK_REQUESTED,
-        LINUX_PROCESS_SCHEDULER_NESTING,
-        LINUX_PROCESS_LAST_BLOCKED_PID,
-        LINUX_DOMAIN_EXEC_DEPTH,
         LINUX_PARENT_RESUMED,
         LINUX_FORK_CHILD_STACK,
         LINUX_FORK_SHARE_VM,
@@ -1252,8 +1249,8 @@ pub(crate) fn run_application_processor_runtime(cpu: usize) {
         // would, and pinned to another CPU it slept for good (a usleep after
         // sched_setaffinity, which not even its alarm ended). One asleep
         // until a deadline that has passed is taken here too: the boot CPU
-        // may be held for milliseconds by a process it runs nested (24 ms
-        // past a sleeper's deadline), and an idle CPU resumes it on time.
+        // may be held for milliseconds by the process it runs (24 ms past a
+        // sleeper's deadline), and an idle CPU resumes it on time.
         let picked = linux_process::ready_live_process_after(after, now, |pid| {
             pid != 1
                 && linux_process::live_process_status(pid).is_some_and(|status| {
@@ -1387,45 +1384,82 @@ impl Drop for LinuxProcessPin {
 pub(super) const LINUX_SMP_IDLE_SPIN_TICKS: u64 = 50_000;
 
 /// Runs process `pid`, ready and run by no other CPU, on this CPU, which
-/// runs no process, until it waits, yields or exits; then settles it as
-/// `run_scheduled_linux_process` does and leaves the CPU with no process.
+/// runs no process, until it waits, yields, is preempted or exits; then
+/// settles it and leaves the CPU with no process: an exit ends it
+/// (`settle_linux_process_exit`), anything else puts it back among the
+/// ready ones. A fork it asks for is made on the way and the process goes
+/// on, as Linux runs a fork's parent first: the child waits in the run
+/// queue for a scheduler loop to take it. Every scheduler loop, the boot
+/// CPU's and the application processors', runs processes here.
 fn run_linux_process_on_this_cpu(pid: u32) -> bool {
-    let Some(selected) = linux_process::claim_live_process(pid) else {
-        return false;
+    run_linux_process_here(pid) != LinuxRunOutcome::Failed
+}
+
+/// How a process run by a scheduler loop came back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LinuxRunOutcome {
+    /// It waits, yielded, was preempted or exited, and was settled.
+    Settled,
+    /// It is the domain's init and it ended: its state stays current on
+    /// this CPU for the runtime's teardown.
+    InitEnded,
+    /// It could not be run or settled.
+    Failed,
+}
+
+/// `run_linux_process_on_this_cpu`, saying whether the process was init and
+/// ended (exited, or ended by a signal or a fault it could not handle):
+/// that ends the runtime, which tears down from init's state, so it is left
+/// current instead of being saved (its threads are gone, so a save would
+/// keep nothing).
+pub(super) fn run_linux_process_here(pid: u32) -> LinuxRunOutcome {
+    let Some(mut selected) = linux_process::claim_live_process(pid) else {
+        return LinuxRunOutcome::Failed;
     };
     if !restore_saved_linux_process_runtime_state(pid) || !restore_linux_process_extended_state(pid)
     {
         let _ = linux_process::release_live_process(pid);
-        return false;
+        return LinuxRunOutcome::Failed;
     }
     X86_RUNTIME
         .LINUX_CURRENT_PROCESS_PID
         .store(pid, Ordering::SeqCst);
-    let pending_sigkill = linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
-        .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
-        && !activation::is_parked(linux_activation_owner(pid));
-    let mut resumed = if pending_sigkill {
-        linux_terminate_by_default_signal(LINUX_SIGKILL) == LINUX_RETURN_TO_KERNEL
-    } else {
-        X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .fetch_add(1, Ordering::SeqCst);
-        let resumed =
-            sync_live_linux_process_address_space(pid) && run_dispatched_linux_process(&selected);
-        let nesting = X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .load(Ordering::SeqCst);
-        X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .store(nesting.saturating_sub(1), Ordering::SeqCst);
-        resumed
+    let resumed = loop {
+        // A parked process is resumed even when killed: its wait sees the
+        // signal and ends the process from its own stack.
+        let pending_sigkill = linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
+            .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
+            && !activation::is_parked(linux_activation_owner(pid));
+        let resumed = if pending_sigkill {
+            linux_terminate_by_default_signal(LINUX_SIGKILL) == LINUX_RETURN_TO_KERNEL
+        } else {
+            sync_live_linux_process_address_space(pid) && run_dispatched_linux_process(&selected)
+        };
+        if !resumed || !X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
+            break resumed;
+        }
+        // The parent of a fork goes on with the child's pid as its result.
+        if !execute_deferred_live_fork() {
+            break false;
+        }
+        match linux_process::dispatch_live_process(pid) {
+            Some(parent) => selected = parent,
+            None => break false,
+        }
     };
-    while resumed && X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
-        resumed = execute_deferred_live_fork();
+    let _ = take_linux_child_yield(pid);
+    if pid == 1
+        && (X86_RUNTIME.ELF_PROBE_COMPLETED.load(Ordering::SeqCst)
+            || !X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst))
+    {
+        return if resumed && linux_process::release_live_process(pid) {
+            LinuxRunOutcome::InitEnded
+        } else {
+            LinuxRunOutcome::Failed
+        };
     }
     save_current_linux_process_runtime_state(pid);
     let saved = save_linux_process_extended_state(pid);
-    let _ = take_linux_child_yield(pid);
     let settled = match take_linux_child_exit(pid) {
         Some(status) => settle_linux_process_exit(pid, status),
         None => linux_process::release_live_process(pid),
@@ -1434,7 +1468,11 @@ fn run_linux_process_on_this_cpu(pid: u32) -> bool {
     X86_RUNTIME
         .LINUX_CURRENT_PROCESS_PID
         .store(0, Ordering::SeqCst);
-    resumed && saved && settled
+    if resumed && saved && settled {
+        LinuxRunOutcome::Settled
+    } else {
+        LinuxRunOutcome::Failed
+    }
 }
 
 /// Ends process `pid`, current on this CPU, which exited with `status`: its
@@ -1475,6 +1513,15 @@ pub(super) fn settle_linux_process_exit(pid: u32, status: u8) -> bool {
     }
     discard_linux_process_extended_state(pid);
     wake_linux_descriptor_waits();
+    // A domain exec's command that ends gives the console back.
+    if let Some(slot) = active_container_slot() {
+        if X86_RUNTIME.CONTAINER_EXEC_CHILD[slot]
+            .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            X86_RUNTIME.CONTAINER_CONSOLE_ATTACHED[slot].store(false, Ordering::Release);
+        }
+    }
     exited && release_linux_process_runtime_slot(pid)
 }
 
@@ -1686,8 +1733,8 @@ static LINUX_WAKEUP_PREEMPTED_DEADLINE: [AtomicU64; CPU_ENTRY_STATE_LIMIT] =
 /// Whether a process marked asleep has reached its deadline, and this CPU's
 /// tick has not yet ended a slice for that deadline: wakeup preemption.
 /// A marked sleeper runs again at a scheduling point, and a process this
-/// CPU runs (nested in another's system call, or for a whole slice) would
-/// otherwise hold that off for up to its slice, 50 ms (sleeps woke up to
+/// CPU runs for a whole slice would otherwise hold that off for up to its
+/// slice, 50 ms (sleeps woke up to
 /// 24 ms late). Once per deadline: if the yield's scheduler runs another
 /// process first, the sleeper waits for the next scheduling point, not a
 /// slice ended on every tick.
@@ -1748,19 +1795,19 @@ pub(crate) fn linux_application_processor_tick(frame: &mut UserInterruptFrame) {
     }
 }
 
-/// Called on a timer tick that interrupted user mode: when a process other
-/// than init has used its slice and was entered by the scheduler (so a
-/// return to the kernel goes back to it), saves the exact interrupted
-/// registers and sends the process to the vDSO's preemption entry, whose
-/// system call yields it (`linux_complete_timer_preemption`). Linux
-/// preempts at the tick itself; doing it through a system call reuses the
-/// normal return-to-kernel path.
+/// Called on a timer tick that interrupted user mode: when a process has
+/// used its slice (every process, init too, is entered by a scheduler
+/// loop, which takes the yield), saves the exact interrupted registers and
+/// sends the process to the vDSO's preemption entry, whose system call
+/// yields it (`linux_complete_timer_preemption`). Linux preempts at the
+/// tick itself; doing it through a system call reuses the normal
+/// return-to-kernel path.
 pub(super) fn linux_preempt_process_from_timer(frame: &mut UserInterruptFrame) {
     // On an application processor too: a process it runs as the owner
-    // (run_linux_process_on_this_cpu) is entered under the scheduler
-    // nesting that takes the yield, and one pinned there with a busy thread
-    // current otherwise keeps the CPU from its other threads for good
-    // (nice05's two busy threads and main thread on one CPU).
+    // (run_linux_process_on_this_cpu) is yielded to its loop, and one
+    // pinned there with a busy thread current otherwise keeps the CPU from
+    // its other threads for good (nice05's two busy threads and main thread
+    // on one CPU).
     if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return;
     }
@@ -1784,9 +1831,7 @@ pub(super) fn linux_preempt_process_from_timer(frame: &mut UserInterruptFrame) {
     // holds, which only the owner runs, from ever running: dirtyc0w_shmem's
     // eight busy threads).
     let preemptible = linux_preemption_yield_taken(pid) || ready_linux_thread_handle().is_some();
-    if (entry..entry + 9).contains(&context.rip)
-        || !signal_due && (pid == 1 || !preemptible || signal)
-    {
+    if (entry..entry + 9).contains(&context.rip) || !signal_due && (!preemptible || signal) {
         return;
     }
     let preempted = LinuxPreemptedContext {
@@ -1822,18 +1867,14 @@ pub(super) fn linux_preempt_process_from_timer(frame: &mut UserInterruptFrame) {
     }
 }
 
-/// Whether a timer preemption of process `pid` can yield it: the scheduler
-/// that entered it takes the yield, or the fork transaction running it as
-/// its child (once it has its own memory).
+/// Whether a timer preemption of process `pid` can yield it: a runtime's
+/// processes are all entered by a scheduler loop, which takes the yield,
+/// except a child still in its parent's memory (a vfork child, until it
+/// executes or exits).
 pub(super) fn linux_preemption_yield_taken(pid: u32) -> bool {
-    let nesting = X86_RUNTIME
-        .LINUX_PROCESS_SCHEDULER_NESTING
-        .load(Ordering::SeqCst);
-    let transaction_child = X86_RUNTIME
-        .LINUX_PROCESS_CHILD_YIELD_PID
-        .load(Ordering::SeqCst)
-        == pid;
-    (nesting != 0 || transaction_child) && !linux_process::live_process_shares_parent_vm(pid)
+    X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
+        && linux_light_thread_here().is_none()
+        && !linux_process::live_process_shares_parent_vm(pid)
 }
 
 /// The preemption entry's system call (`user_rip` just after it): records
@@ -1919,10 +1960,6 @@ pub(super) fn linux_complete_timer_preemption(
     X86_RUNTIME
         .LINUX_PROCESS_CHILD_YIELDED
         .store(true, Ordering::SeqCst);
-    // Others go first next time, as after a yield.
-    X86_RUNTIME
-        .LINUX_PROCESS_LAST_BLOCKED_PID
-        .store(pid, Ordering::SeqCst);
     Some(LINUX_RETURN_TO_KERNEL)
 }
 

@@ -347,11 +347,10 @@ pub(super) enum LinuxBlockedWait {
 }
 
 /// Lets other processes in the domain run while the current one blocks in
-/// syscall `number`. Processes run cooperatively, nested inside the fork or
-/// wait syscalls of their ancestors, and only init drives the run queue. Any
-/// other process therefore yields to its executor and restarts the syscall
-/// when resumed, as Linux restarts an interrupted wait. Returns `None` when
-/// nothing else can run.
+/// syscall `number`: the process, init included, parks in the call and the
+/// scheduler loop that ran it runs others, then resumes it to look at its
+/// wait again (where it cannot park, it yields with the call set to
+/// restart). Returns `None` when nothing else can run.
 pub(super) fn run_other_linux_processes(
     output: *mut LinuxSyscallFrame,
     caller: LinuxUserContext,
@@ -369,8 +368,7 @@ pub(super) fn run_other_linux_processes_deferring(
     number: u64,
     defer_to_siblings: bool,
 ) -> Option<LinuxBlockedWait> {
-    // Processes run nested on the boot CPU's kernel stack; a thread on an
-    // application processor has no process tree to run.
+    // The boot verification probe has no scheduler loop to wait in.
     if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return None;
     }
@@ -381,6 +379,8 @@ pub(super) fn run_other_linux_processes_deferring(
             migrate_current_linux_thread_to_owner(caller, number),
         ));
     }
+    // Only the boot CPU enters processes on activation stacks that can park;
+    // an application processor's caller restarts or yields the call.
     if current_linux_runtime_cpu_index() != 0 {
         return None;
     }
@@ -391,109 +391,74 @@ pub(super) fn run_other_linux_processes_deferring(
         return None;
     }
     let pid = current_linux_process_pid();
-    if pid != 1 {
-        // A signal that arrived while this call waited interrupts it (EINTR,
-        // or a restart after an SA_RESTART handler), as in Linux, instead of
-        // the call waiting again.
-        let signal_was_active = X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst);
-        let mut interrupted = caller;
-        interrupted.rax = LINUX_EINTR;
-        let delivered = linux_deliver_pending_signal_restarting(
-            output,
-            interrupted,
-            (caller.rip, caller.rflags),
-            Some(number),
-        );
-        if delivered != 0 {
-            return Some(LinuxBlockedWait::Return(delivered));
-        }
-        if !signal_was_active && X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
-            return Some(LinuxBlockedWait::Return(0));
-        }
-        // Yield as if to restart the call (what whoever entered this process
-        // expects), then park in it: the call keeps its place and checks its
-        // wait again when resumed. Where it cannot park, the call restarts
-        // from user mode instead.
-        let mut restart = caller;
-        restart.rip = caller.rip.wrapping_sub(LINUX_SYSCALL_INSTRUCTION_SIZE);
-        if !yield_current_linux_process(restart, number) {
-            return None;
-        }
-        // Waiting in the call: /proc shows it sleeping until dispatched.
-        linux_process::set_live_process_waiting(pid, true);
-        if !park_linux_process(pid) {
-            if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
-                serial_write("linox: process cannot park pid/cpu/call/activation: ");
-                for value in [
-                    u64::from(pid),
-                    current_cpu_index_checked().unwrap_or(99) as u64,
-                    number,
-                    u64::from(activation::is_running(linux_activation_owner(pid))),
-                ] {
-                    serial_write_u64(value);
-                    serial_write(" ");
-                }
-                serial_write("\r\n");
-            }
-            return Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL));
-        }
-        // Resumed to be killed: SIGKILL ends the process from inside its
-        // wait, as Linux's fatal signals wake a sleeping task to exit.
-        if linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
-            .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
-        {
-            return Some(LinuxBlockedWait::Return(linux_terminate_by_default_signal(
-                LINUX_SIGKILL,
-            )));
-        }
-        // A wait for children looks for them before a signal interrupts it,
-        // as Linux's does: the exit signal of the child it waits for must not
-        // end it with EINTR (clone301). A signal still pending when nothing
-        // turns up interrupts the next round.
-        if matches!(number, LINUX_WAIT4_SYSCALL | LINUX_WAITID_SYSCALL) {
-            return Some(LinuxBlockedWait::Recheck);
-        }
-        // A sleep writes the time it has left before a signal interrupts
-        // it (the next round delivers the signal first thing): asleep since
-        // its last round, the time it wrote then was stale (nanosleep02).
-        if matches!(
-            number,
-            LINUX_NANOSLEEP_SYSCALL | LINUX_CLOCK_NANOSLEEP_SYSCALL
-        ) {
-            return Some(LinuxBlockedWait::Recheck);
-        }
-        let mut interrupted = caller;
-        interrupted.rax = LINUX_EINTR;
-        let delivered = linux_deliver_pending_signal_restarting(
-            output,
-            interrupted,
-            (caller.rip, caller.rflags),
-            Some(number),
-        );
-        return Some(if delivered != 0 {
-            LinuxBlockedWait::Return(delivered)
-        } else if X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
-            LinuxBlockedWait::Return(0)
-        } else {
-            LinuxBlockedWait::Recheck
-        });
+    // A signal that arrived while this call waited interrupts it (EINTR,
+    // or a restart after an SA_RESTART handler), as in Linux, instead of
+    // the call waiting again.
+    let signal_was_active = X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst);
+    let mut interrupted = caller;
+    interrupted.rax = LINUX_EINTR;
+    let delivered = linux_deliver_pending_signal_restarting(
+        output,
+        interrupted,
+        (caller.rip, caller.rflags),
+        Some(number),
+    );
+    if delivered != 0 {
+        return Some(LinuxBlockedWait::Return(delivered));
     }
-    if !refresh_linux_process_registry_for_wait(caller) {
+    if !signal_was_active && X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
+        return Some(LinuxBlockedWait::Return(0));
+    }
+    // Record the call set to restart, then park in it: the call keeps its
+    // place and checks its wait again when the loop resumes it. Where it
+    // cannot park, the call restarts from user mode instead.
+    let mut restart = caller;
+    restart.rip = caller.rip.wrapping_sub(LINUX_SYSCALL_INSTRUCTION_SIZE);
+    if !yield_current_linux_process(restart, number) {
         return None;
     }
-    // Init waits on its own stack: the runtime loop runs the others and
-    // resumes it here. Where it cannot park (entered below another's
-    // frames), it runs one of them nested in this call instead.
+    // Waiting in the call: /proc shows it sleeping until dispatched.
+    linux_process::set_live_process_waiting(pid, true);
     if !park_linux_process(pid) {
-        if !run_one_other_linux_process(pid) {
-            return None;
+        if LINUX_PARK_REFUSALS.fetch_add(1, Ordering::Relaxed) < 8 {
+            serial_write("linox: process cannot park pid/cpu/call/activation: ");
+            for value in [
+                u64::from(pid),
+                current_cpu_index_checked().unwrap_or(99) as u64,
+                number,
+                u64::from(activation::is_running(linux_activation_owner(pid))),
+            ] {
+                serial_write_u64(value);
+                serial_write(" ");
+            }
+            serial_write("\r\n");
         }
-        if !restore_linux_process_live_return(output, pid) {
-            return Some(LinuxBlockedWait::Return(LINUX_EINVAL));
-        }
-    }
-    if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
         return Some(LinuxBlockedWait::Return(LINUX_RETURN_TO_KERNEL));
+    }
+    // Resumed to be killed: SIGKILL ends the process from inside its
+    // wait, as Linux's fatal signals wake a sleeping task to exit.
+    if linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
+        .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
+    {
+        return Some(LinuxBlockedWait::Return(linux_terminate_by_default_signal(
+            LINUX_SIGKILL,
+        )));
+    }
+    // A wait for children looks for them before a signal interrupts it,
+    // as Linux's does: the exit signal of the child it waits for must not
+    // end it with EINTR (clone301). A signal still pending when nothing
+    // turns up interrupts the next round.
+    if matches!(number, LINUX_WAIT4_SYSCALL | LINUX_WAITID_SYSCALL) {
+        return Some(LinuxBlockedWait::Recheck);
+    }
+    // A sleep writes the time it has left before a signal interrupts
+    // it (the next round delivers the signal first thing): asleep since
+    // its last round, the time it wrote then was stale (nanosleep02).
+    if matches!(
+        number,
+        LINUX_NANOSLEEP_SYSCALL | LINUX_CLOCK_NANOSLEEP_SYSCALL
+    ) {
+        return Some(LinuxBlockedWait::Recheck);
     }
     let mut interrupted = caller;
     interrupted.rax = LINUX_EINTR;
@@ -512,51 +477,10 @@ pub(super) fn run_other_linux_processes_deferring(
     })
 }
 
-/// Runs one process other than `pid` (init) while it waits; false when none
-/// could run. A killed process goes first: dispatching it ends it, as
-/// SIGKILL wakes a task in Linux, where it would otherwise keep its memory
-/// and process slot until its turn came. Then the deepest running
-/// descendant, most likely what init waits for (a linker under a compiler
-/// driver), unless it just yielded because it is blocked: it may be waiting
-/// for its own parent, as a forked child waiting for a reply on a
-/// socketpair does, so the rest of the run queue gets a turn first.
-fn run_one_other_linux_process(pid: u32) -> bool {
-    let now = linux_elapsed_nanoseconds().unwrap_or(0);
-    let mut descendant = None;
-    let mut ancestor = pid;
-    for _ in 0..linux_process::PROCESS_RUNTIME_LIMIT {
-        let Some(child) = linux_process::live_running_child_pid(ancestor) else {
-            break;
-        };
-        descendant = Some(child);
-        ancestor = child;
-    }
-    // One asleep in a futex wait nothing has ended only waits again: of a
-    // thousand such waiters, each turn would resume every one.
-    let descendant = descendant.filter(|child| !linux_process_asleep(*child, now));
-    let last_blocked = X86_RUNTIME
-        .LINUX_PROCESS_LAST_BLOCKED_PID
-        .swap(0, Ordering::SeqCst);
-    let preferred = descendant.filter(|child| *child != last_blocked);
-    let killed = linux_killed_process(pid);
-    killed.is_some_and(|killed| run_scheduled_linux_process(pid, Some(killed)))
-        || preferred.is_some_and(|child| run_scheduled_linux_process(pid, Some(child)))
-        || linux_process::next_ready_live_process(now, |other| other != pid)
-            .is_some_and(|next| run_scheduled_linux_process(pid, Some(next)))
-        || descendant.is_some_and(|child| run_scheduled_linux_process(pid, Some(child)))
-}
-
-/// Whether process `pid` sleeps in a futex wait that nothing has ended by
-/// `now` (`linux_process::live_process_futex_asleep`; its timers are in
-/// the deadline it sleeps to): resuming it would only find it waiting again.
-fn linux_process_asleep(pid: u32, now: u64) -> bool {
-    linux_process::live_process_futex_asleep(pid, now)
-}
-
 /// How long before its deadline a sleep (nanosleep) stops being passed over
 /// and looks at the clock itself, every round, as an unmarked sleep does,
 /// in a domain run on one CPU: a marked process is dispatched at a
-/// scheduling point after its deadline, which a process running nested may
+/// scheduling point after its deadline, which the process the loop runs may
 /// hold off for milliseconds, where one that looks for itself halts until
 /// its own deadline (nanosleep01's 1 to 25 ms sleeps woke 1-10 ms late
 /// marked to the end). With more CPUs an idle one resumes a due sleeper
@@ -669,44 +593,11 @@ fn resume_parked_linux_process(pid: u32) -> bool {
     // own while it runs, and the runtime's is put back after.
     let previous_return_stack = unsafe { (*entry_state).return_stack };
     LINUX_PROCESS_SLICE[linux_cpu_slot()].store(0, Ordering::SeqCst);
-    // SAFETY: `pid` is current again: everything that ran while it was
-    // parked ran nested as its child, which put its kernel state back.
+    // SAFETY: `pid` is current again: the scheduler loop restored its
+    // kernel state before resuming it.
     let resumed = unsafe { activation::resume(linux_activation_owner(pid)) }.is_some();
     unsafe { (*entry_state).return_stack = previous_return_stack };
     resumed
-}
-
-/// A process other than `current` with SIGKILL pending that can be
-/// dispatched: sleeping in a wait, or running as an orphan init adopted. A
-/// running process with a live parent may be one a fork transaction runs
-/// nested on the kernel stack (a child forked child-first), which must not
-/// be entered again from here.
-fn linux_killed_process(current: u32) -> Option<u32> {
-    let kill = 1_u64 << (LINUX_SIGKILL - 1);
-    let mut from = 1;
-    while let Some(pid) = linux_process::next_live_pid(from) {
-        from = pid.checked_add(1)?;
-        let dispatchable = linux_process::live_process_status(pid).is_some_and(|status| {
-            status.state == linux_process::LiveProcessState::Sleeping
-                || status.state == linux_process::LiveProcessState::Running
-                    && status.parent_pid == 1
-        });
-        if pid == current || !dispatchable {
-            continue;
-        }
-        let pending = linux_process::live_process_slot(pid).and_then(|slot| {
-            crate::linux_signal::pending_mask(
-                linux_signal_instance(),
-                crate::linux_signal::Scope::Process,
-                slot,
-            )
-            .ok()
-        });
-        if pending.is_some_and(|mask| mask & kill != 0) {
-            return Some(pid);
-        }
-    }
-    None
 }
 
 /// How often, at most, sched_yield lets other processes run.
@@ -864,8 +755,17 @@ pub(super) fn linux_vfork_wait_live(
         match run_other_linux_processes(output, caller, LINUX_VFORK_WAIT_SYSCALL) {
             Some(LinuxBlockedWait::Recheck) => {}
             Some(LinuxBlockedWait::Return(result)) => break result,
-            // Nothing else can run here: the parent goes on as it did.
-            None => break u64::from(linux_pid_seen_by(pid, child)),
+            // It cannot wait in the call here (an application processor,
+            // or a sibling thread is ready): it leaves the CPU with the wait
+            // set to restart, since the child may still be using its memory.
+            None => {
+                let mut restart = caller;
+                restart.rip = caller.rip.wrapping_sub(LINUX_SYSCALL_INSTRUCTION_SIZE);
+                if yield_current_linux_process(restart, LINUX_VFORK_WAIT_SYSCALL) {
+                    break LINUX_RETURN_TO_KERNEL;
+                }
+                break u64::from(linux_pid_seen_by(pid, child));
+            }
         }
     };
     store_current_linux_signal_mask(mask);
@@ -1161,37 +1061,6 @@ pub(super) fn run_dispatched_linux_process(process: &linux_process::LiveProcessD
     entered
 }
 
-pub(super) fn restore_linux_process_live_return(output: *mut LinuxSyscallFrame, pid: u32) -> bool {
-    let Some(process) = linux_process::dispatch_live_process(pid) else {
-        return false;
-    };
-    let general = process.general;
-    write_linux_live_return(
-        output,
-        LinuxUserContext {
-            registers: LinuxSyscallFrame {
-                r15: general[14],
-                r14: general[13],
-                r13: general[12],
-                r12: general[11],
-                rbp: general[6],
-                rbx: general[1],
-                r10: general[9],
-                r9: general[8],
-                r8: general[7],
-                rdx: general[3],
-                rsi: general[4],
-                rdi: general[5],
-            },
-            rip: process.rip,
-            rsp: process.rsp,
-            rflags: process.rflags,
-            rax: general[0],
-            fs_base: process.fs_base,
-        },
-    )
-}
-
 pub(super) fn save_suspended_linux_runtime(
     context: LinuxUserContext,
     address: u64,
@@ -1303,7 +1172,14 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
             .LINUX_RUNTIME_SUSPEND_FS_BASE
             .load(Ordering::Acquire),
     };
-    if !context.is_valid() {
+    // A background domain the loop suspended between processes has no
+    // process of its own to resume (`suspend_linux_runtime_from_loop`): a
+    // domain exec's command is then a child of init.
+    let suspended_pid = X86_RUNTIME
+        .LINUX_RUNTIME_SUSPEND_PID
+        .load(Ordering::Acquire);
+    let loop_suspended = background && suspended_pid == 0;
+    if !loop_suspended && !context.is_valid() {
         return LinuxElfResult::FAILED;
     }
     if !linux_mount::activate_initial() {
@@ -1365,12 +1241,9 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
         X86_RUNTIME
             .LINUX_RUNTIME_EXIT_STATUS
             .store(0, Ordering::Release);
-        return finish_linux_runtime(mmap, saved_msrs);
+        return finish_linux_runtime(mmap, saved_msrs, true);
     }
-    let suspended_pid = X86_RUNTIME
-        .LINUX_RUNTIME_SUSPEND_PID
-        .load(Ordering::Acquire);
-    let Some(process) = linux_process::dispatch_live_process(suspended_pid) else {
+    let Some(process) = linux_process::dispatch_live_process(suspended_pid.max(1)) else {
         serial_write("linox: suspended Linux resume process is unavailable\r\n");
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
@@ -1447,45 +1320,42 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
             .store(false, Ordering::Release);
         return LinuxElfResult::FAILED;
     }
+    // The suspended process goes on from the context its suspension saved
+    // in the registry, run by the loop as every process is: with its call's
+    // result (a background suspension) or the console byte just delivered.
+    // A domain exec's command is a child of it, ready in the run queue and
+    // run first; the suspended process goes on as it would have, a console
+    // read waiting again (the console is the command's meanwhile), so its
+    // registry context keeps its own result rather than the fork's.
     let resumed = if domain_exec {
-        execute_deferred_live_fork()
+        let result = linux_process::live_process_return_value(process.pid);
+        let forked = execute_deferred_live_fork();
+        let restored = if background {
+            result.is_some_and(|result| {
+                linux_process::set_live_process_return_value(process.pid, result)
+            })
+        } else {
+            // A console suspension records the read it was made in.
+            linux_process::restart_live_process_call(
+                process.pid,
+                X86_RUNTIME
+                    .LINUX_RUNTIME_SUSPEND_RESULT
+                    .load(Ordering::Acquire),
+            )
+        };
+        save_current_linux_process_runtime_state(process.pid);
+        forked && restored && save_linux_process_extended_state(process.pid)
     } else {
-        address_space::resume_live_linux_process(
-            process.root,
-            context.rip,
-            context.rsp,
-            context.fs_base,
-            context
-                .registers
-                .process_general(context.rax, context.rip, context.rflags),
-            context.rflags,
-        )
+        background || linux_process::set_live_process_return_value(process.pid, 1)
     };
     if !resumed {
         serial_write("linox: suspended Linux process resume rejected pid/root/rip: ");
-        serial_write_u64(u64::from(current_linux_process_pid()));
+        serial_write_u64(u64::from(process.pid));
         serial_write(" ");
         serial_write_u64(process.root.address());
         serial_write(" ");
         serial_write_u64(context.rip);
         serial_write("\r\n");
-    }
-    if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
-        let state_saved = save_container_extended_state();
-        let registry_suspended = state_saved && linux_process::suspend_runtime_process_registry();
-        let mount_deactivated = registry_suspended && linux_mount::deactivate_initial();
-        let timer_finished = timer::finish_linux_wait_timer();
-        let msrs_restored = restore_linux_syscall(saved_msrs);
-        X86_RUNTIME
-            .LINUX_RUNTIME_MODE
-            .store(false, Ordering::Release);
-        return LinuxElfResult {
-            valid: resumed && mount_deactivated && timer_finished && msrs_restored,
-            suspended: resumed && mount_deactivated && timer_finished && msrs_restored,
-            ..LinuxElfResult::FAILED
-        };
-    }
-    if !resumed {
         let _ = linux_process::finish_runtime_process_registry();
         let _ = linux_mount::deactivate_initial();
         let _ = timer::finish_linux_wait_timer();
@@ -1495,42 +1365,87 @@ pub(crate) fn resume_suspended_linux_runtime(mmap: u64) -> LinuxElfResult {
             .store(false, Ordering::Release);
         return LinuxElfResult::FAILED;
     }
-    finish_linux_runtime(mmap, saved_msrs)
+    let first = if domain_exec {
+        Some(X86_RUNTIME.CONTAINER_EXEC_CHILD[slot].load(Ordering::Acquire))
+    } else {
+        (!loop_suspended).then_some(process.pid)
+    };
+    run_linux_runtime(mmap, saved_msrs, first)
 }
 
-/// The kernel's scheduler loop for a Linux runtime, entered when init first
-/// returns to the kernel: it runs requested forks, and while init waits (it
-/// gave the CPU back with its call set to restart) runs the next process,
-/// the deepest descendant first, then init again; with nothing else ready
-/// the CPU halts until an interrupt. It ends when init exits or the domain
-/// is suspended.
-/// The runtime's scheduler loop. While init waits parked in a system call,
-/// it runs one other process at a time and resumes init to check its wait
-/// again, halting when nothing could run; it returns once init's activation
-/// has finished (init exited, the runtime is suspending, or it forked,
-/// which the loop completes first).
-fn run_linux_runtime_loop() -> bool {
+/// Suspends a background domain's runtime from the boot CPU's loop, between
+/// processes, when the timer asked it to give the CPU back
+/// (`LINUX_RUNTIME_BACKGROUND_YIELD_REQUESTED`) and no system call ending
+/// took the request (every process waiting, say): the loop itself is what
+/// resumes, with no process's call to complete (suspended pid 0).
+fn suspend_linux_runtime_from_loop() -> bool {
+    let Some(slot) = active_container_slot() else {
+        return false;
+    };
+    if X86_RUNTIME
+        .LINUX_RUNTIME_SUSPENDED
+        .swap(true, Ordering::AcqRel)
+    {
+        return false;
+    }
+    X86_RUNTIME
+        .LINUX_RUNTIME_SUSPEND_PID
+        .store(0, Ordering::Release);
+    X86_RUNTIME
+        .LINUX_RUNTIME_BACKGROUND_SUSPENDED
+        .store(true, Ordering::Release);
+    X86_RUNTIME.CONTAINER_BACKGROUND_SUSPENDED[slot].store(true, Ordering::Release);
+    true
+}
+
+/// The boot CPU's scheduler loop for a Linux runtime (docs/SCHEDULER.md,
+/// step 4). It owns the domain's run queue: it takes the ready processes in
+/// turn, init among them, and runs each on this CPU until it waits, yields,
+/// is preempted or exits (`run_linux_process_on_this_cpu`). Every process
+/// waits by parking in its call or returning to the kernel; none runs
+/// nested inside another's system call, and a fork leaves its child ready
+/// in the queue while the parent goes on. A process with SIGKILL pending
+/// goes first, as Linux wakes a killed task, and `first` (a process being
+/// resumed after a suspension, or a domain exec's command) before any. With
+/// nothing ready, or once every process has had a round without a system
+/// call, the CPU halts until an interrupt. Returns when init has ended
+/// (its state left current) or the runtime is suspending; false if a
+/// process could not be run.
+fn run_linux_runtime_loop(mut first: Option<u32>) -> bool {
     let mut entries = linux_syscall::linux_syscall_entries_here().load(Ordering::Relaxed);
     let mut idle_rounds = 0_usize;
+    let mut ran = true;
     loop {
-        while X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
-            if !execute_deferred_live_fork() {
-                return false;
-            }
-        }
-        if !activation::is_parked(linux_activation_owner(1)) {
-            return true;
+        if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
+            || X86_RUNTIME
+                .LINUX_RUNTIME_BACKGROUND_YIELD_REQUESTED
+                .swap(false, Ordering::AcqRel)
+                && suspend_linux_runtime_from_loop()
+        {
+            return ran;
         }
         linux_stall_diagnostic_from_loop();
-        if !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
-            && !run_one_other_linux_process(1)
-        {
+        let now = linux_elapsed_nanoseconds().unwrap_or(0);
+        let picked = first
+            .take()
+            .or_else(|| {
+                linux_process::ready_live_process_after(0, now, |pid| {
+                    linux_process_killed(pid) && linux_runtime_loop_may_run(pid)
+                })
+            })
+            .or_else(|| linux_process::next_ready_live_process(now, linux_runtime_loop_may_run));
+        match picked.map(run_linux_process_here) {
+            Some(LinuxRunOutcome::Settled) => {}
+            Some(LinuxRunOutcome::InitEnded) => return ran,
+            Some(LinuxRunOutcome::Failed) => {
+                serial_write("linox: runtime loop could not run pid ");
+                serial_write_u64(u64::from(picked.unwrap_or(0)));
+                serial_write("\r\n");
+                ran = false;
+            }
             // SAFETY: interrupts wake the CPU for the timer and devices; the
             // kernel-entry lock serializes the work they start.
-            linux_wait_for_interrupt();
-        }
-        if !resume_parked_linux_process(1) {
-            return false;
+            None => linux_wait_for_interrupt(),
         }
         // Rounds in which the process run only rechecked its wait and parked
         // again make no system call. Once every process has had such a round
@@ -1548,11 +1463,88 @@ fn run_linux_runtime_loop() -> bool {
     }
 }
 
-pub(super) fn finish_linux_runtime(mmap: u64, saved_msrs: [u64; 5]) -> LinuxElfResult {
+/// Whether the boot CPU's loop may run process `pid`, ready in the run
+/// queue: one whose kernel activation another CPU runs is that CPU's.
+fn linux_runtime_loop_may_run(pid: u32) -> bool {
+    !activation::is_running(linux_activation_owner(pid))
+}
+
+/// Whether the domain's console belongs to a `domain exec` command that is
+/// not the current process or one of its ancestors: the command and what
+/// it starts read the console meanwhile.
+pub(super) fn linux_console_held_by_domain_exec() -> bool {
+    let Some(slot) = active_container_slot() else {
+        return false;
+    };
+    let holder = X86_RUNTIME.CONTAINER_EXEC_CHILD[slot].load(Ordering::Acquire);
+    if holder == 0 {
+        return false;
+    }
+    let mut pid = current_linux_process_pid();
+    for _ in 0..linux_process::PROCESS_LIMIT {
+        if pid == holder {
+            return false;
+        }
+        match linux_process::live_process_parent_pid(pid) {
+            Some(parent) if parent != 0 => pid = parent,
+            _ => break,
+        }
+    }
+    true
+}
+
+/// Whether process `pid` has SIGKILL pending.
+fn linux_process_killed(pid: u32) -> bool {
+    linux_process::live_process_slot(pid)
+        .and_then(|slot| {
+            crate::linux_signal::pending_mask(
+                linux_signal_instance(),
+                crate::linux_signal::Scope::Process,
+                slot,
+            )
+            .ok()
+        })
+        .is_some_and(|mask| mask & (1_u64 << (LINUX_SIGKILL - 1)) != 0)
+}
+
+/// Makes process `pid`'s saved kernel state current on this CPU again, for
+/// the runtime's suspension or teardown, which read and keep what the
+/// running process holds.
+fn make_linux_process_current(pid: u32) -> bool {
+    X86_RUNTIME
+        .LINUX_CURRENT_PROCESS_PID
+        .store(pid, Ordering::SeqCst);
+    restore_saved_linux_process_runtime_state(pid) && restore_linux_process_extended_state(pid)
+}
+
+/// Runs the domain's processes from the boot CPU's loop, with the other
+/// CPUs of the domain, until init ends or the runtime suspends, then
+/// finishes or suspends the runtime. `first` runs before any other.
+pub(super) fn run_linux_runtime(
+    mmap: u64,
+    saved_msrs: [u64; 5],
+    first: Option<u32>,
+) -> LinuxElfResult {
     start_linux_smp_runtime();
-    let mut forks_completed = run_linux_runtime_loop();
-    if stop_linux_smp_runtime() && !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
-        // Children that ended on other CPUs left init in the run queue.
+    let ran = run_linux_runtime_loop(first);
+    stop_linux_smp_runtime();
+    // Init's state is the runtime's while it is suspended (a stop tears it
+    // down from there); an init that ended left its own current.
+    let init_current = !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
+        || make_linux_process_current(1);
+    finish_linux_runtime(mmap, saved_msrs, ran && init_current)
+}
+
+/// Suspends the runtime, or tears it down once init has ended (or the
+/// domain is being stopped); `forks_completed` says whether its processes
+/// ran without a failure.
+fn finish_linux_runtime(
+    mmap: u64,
+    saved_msrs: [u64; 5],
+    mut forks_completed: bool,
+) -> LinuxElfResult {
+    if !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
+        // Init, alone now, leaves the run queue with it.
         forks_completed &= linux_process::retire_lone_live_process(1);
     }
     if forks_completed && X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
@@ -1622,94 +1614,4 @@ pub(super) fn finish_linux_runtime(mmap: u64, saved_msrs: [u64; 5]) -> LinuxElfR
         valid,
         ..LinuxElfResult::FAILED
     }
-}
-
-fn run_scheduled_linux_process(parent_pid: u32, target_pid: Option<u32>) -> bool {
-    let _pin = LinuxProcessPin::new(parent_pid);
-    let profile_started = cfg!(feature = "linux-boot-profile").then(timer::timestamp_counter);
-    save_current_linux_process_runtime_state(parent_pid);
-    if !save_linux_process_extended_state(parent_pid) {
-        return false;
-    }
-    let selected = match target_pid {
-        Some(pid) => linux_process::switch_live_process(parent_pid, pid),
-        None => linux_process::yield_live_process(parent_pid),
-    };
-    let Some(selected) = selected else {
-        return false;
-    };
-    if selected.pid == parent_pid
-        || !restore_saved_linux_process_runtime_state(selected.pid)
-        || !restore_linux_process_extended_state(selected.pid)
-    {
-        return false;
-    }
-    X86_RUNTIME
-        .LINUX_CURRENT_PROCESS_PID
-        .store(selected.pid, Ordering::SeqCst);
-    // A parked process is resumed even when killed: its wait sees the
-    // signal and ends the process from its own stack.
-    let pending_sigkill = linux_peek_dynamic_signal(1 << (LINUX_SIGKILL - 1))
-        .is_some_and(|(_, pending)| u64::from(pending.signal) == LINUX_SIGKILL)
-        && !activation::is_parked(linux_activation_owner(selected.pid));
-    let mut resumed = if pending_sigkill {
-        linux_terminate_by_default_signal(LINUX_SIGKILL) == LINUX_RETURN_TO_KERNEL
-    } else {
-        X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .fetch_add(1, Ordering::SeqCst);
-        let resumed = sync_live_linux_process_address_space(selected.pid)
-            && run_dispatched_linux_process(&selected);
-        let nesting = X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .load(Ordering::SeqCst);
-        X86_RUNTIME
-            .LINUX_PROCESS_SCHEDULER_NESTING
-            .store(nesting.saturating_sub(1), Ordering::SeqCst);
-        resumed
-    };
-    while resumed && X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst) {
-        resumed = execute_deferred_live_fork();
-    }
-    save_current_linux_process_runtime_state(selected.pid);
-    if !save_linux_process_extended_state(selected.pid) {
-        return false;
-    }
-    let _ = take_linux_child_yield(selected.pid);
-    let exit = take_linux_child_exit(selected.pid);
-    let returned = if let Some(status) = exit {
-        // The parent that reaps it may run on another CPU, so it is not made
-        // current here; this loop's own process is.
-        settle_linux_process_exit(selected.pid, status)
-            && linux_process::claim_live_process(parent_pid).is_some()
-            && linux_process::retire_lone_live_process(parent_pid)
-    } else {
-        let parent = resumed
-            .then(|| linux_process::switch_live_process(selected.pid, parent_pid))
-            .flatten();
-        if parent.is_none_or(|dispatch| dispatch.pid != parent_pid) {
-            serial_write("linox: scheduled process return failed child/parent/resumed/dispatch: ");
-            serial_write_u64(u64::from(selected.pid));
-            serial_write(" ");
-            serial_write_u64(u64::from(parent_pid));
-            serial_write(" ");
-            serial_write_u64(u64::from(resumed));
-            serial_write(" ");
-            serial_write_u64(parent.map_or(0, |dispatch| u64::from(dispatch.pid)));
-            serial_write("\r\n");
-        }
-        parent.is_some_and(|dispatch| dispatch.pid == parent_pid)
-    };
-    X86_RUNTIME
-        .LINUX_CURRENT_PROCESS_PID
-        .store(parent_pid, Ordering::SeqCst);
-    let restored = restore_saved_linux_process_runtime_state(parent_pid)
-        && restore_linux_process_extended_state(parent_pid)
-        && returned;
-    linux_boot_profile_lifecycle_phase(6, profile_started);
-    restored
-}
-
-pub(super) fn run_next_scheduled_linux_process(parent_pid: u32) -> bool {
-    run_scheduled_linux_process(parent_pid, None)
 }

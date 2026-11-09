@@ -768,16 +768,6 @@ pub(super) fn linux_epoll_wait_duration_live_return(
             break 'target target;
         }
         if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
-            // Only init runs other processes from its own waits, as in
-            // run_other_linux_processes. Any other process yields to whatever
-            // runs it: a child running inside its parent's fork must not run
-            // that parent nested in its own system call, where the parent's
-            // exit would later return into the child's freed address space.
-            if X86_RUNTIME
-                .LINUX_PROCESS_SCHEDULER_NESTING
-                .load(Ordering::SeqCst)
-                != 0
-                || current_linux_process_pid() != 1
             {
                 // epoll_wait waits as poll does: other processes run, the
                 // call restarts with its deadline, and a signal interrupts
@@ -834,34 +824,6 @@ pub(super) fn linux_epoll_wait_duration_live_return(
                         break 'target target;
                     }
                 }
-            }
-            let parent_pid = current_linux_process_pid();
-            if refresh_linux_process_registry_for_wait(caller)
-                && run_next_scheduled_linux_process(parent_pid)
-            {
-                if X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire) {
-                    return LINUX_RETURN_TO_KERNEL;
-                }
-                let result = linux_epoll_collect(input.epoll, input.address, input.maximum)
-                    .unwrap_or_else(|error| error);
-                if !restore_linux_process_live_return(output, parent_pid) {
-                    return LINUX_EINVAL;
-                }
-                // An event already taken from the instance is the call's
-                // result even if a signal arrived meanwhile; Linux returns it
-                // and runs the handler on the way out. Only an empty wait is
-                // interrupted (EINTR).
-                let mut interrupted = caller;
-                interrupted.rax = if result == 0 { LINUX_EINTR } else { result };
-                let delivered =
-                    linux_deliver_pending_signal(output, interrupted, (caller.rip, caller.rflags));
-                return if delivered != 0 {
-                    delivered
-                } else if X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst) {
-                    0
-                } else {
-                    result
-                };
             }
         }
         // The static verification executor has no peer thread to advance a

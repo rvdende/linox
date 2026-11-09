@@ -654,14 +654,7 @@ fn linux_syscall_dispatch(
                 register(2),
                 register(1),
             );
-            linux_socket_send_live_return(
-                registers,
-                syscall_return,
-                first_argument,
-                result,
-                flags,
-                false,
-            )
+            linux_socket_send_live_return(registers, syscall_return, result, flags, false)
         }
         // A blocking receive waits by yielding, as read does; MSG_DONTWAIT
         // never waits, MSG_WAITALL keeps collecting until it is full, and
@@ -699,14 +692,7 @@ fn linux_syscall_dispatch(
         ),
         LINUX_SENDMSG_SYSCALL => {
             let result = linux_socket_sendmsg(first_argument, buffer, count);
-            linux_socket_send_live_return(
-                registers,
-                syscall_return,
-                first_argument,
-                result,
-                count,
-                false,
-            )
+            linux_socket_send_live_return(registers, syscall_return, result, count, false)
         }
         LINUX_RECVMSG_SYSCALL
             if count & (0x140 | LINUX_MSG_ERRQUEUE) == 0
@@ -732,14 +718,7 @@ fn linux_syscall_dispatch(
         LINUX_SENDMMSG_SYSCALL => {
             let flags = register(0);
             let (result, broken_pipe) = linux_socket_sendmmsg(first_argument, buffer, count, flags);
-            linux_socket_send_live_return(
-                registers,
-                syscall_return,
-                first_argument,
-                result,
-                flags,
-                broken_pipe,
-            )
+            linux_socket_send_live_return(registers, syscall_return, result, flags, broken_pipe)
         }
         LINUX_SHUTDOWN_SYSCALL => linux_socket_shutdown(first_argument, buffer),
         LINUX_GETSOCKNAME_SYSCALL => linux_socket_name(first_argument, buffer, count, false),

@@ -804,41 +804,38 @@ pub(super) fn sync_live_linux_process_address_space(pid: u32) -> bool {
     true
 }
 
-/// Resumes a parent whose fork could not be carried out, with `error` as the
-/// fork's result.
+/// The parent of a runtime fork that could not be carried out goes on with
+/// `error` as the fork's result: the scheduler loop that ran it enters it
+/// again.
 fn resume_failed_linux_fork_parent(parent_pid: u32, error: u64) -> bool {
-    if !linux_process::set_live_process_return_value(parent_pid, error) {
-        return false;
-    }
-    let Some(parent) = linux_process::dispatch_live_process(parent_pid) else {
-        return false;
-    };
-    let resumed = restore_linux_process_extended_state(parent_pid)
-        && sync_live_linux_process_address_space(parent_pid)
-        && run_dispatched_linux_process(&parent);
-    if resumed {
-        save_current_linux_process_runtime_state(parent_pid);
-    }
-    resumed
+    linux_process::set_live_process_return_value(parent_pid, error)
+        && restore_linux_process_extended_state(parent_pid)
 }
 
-/// Whether plain forks run the parent first, as Linux does by default. Off:
-/// with it on, `cargo build` inside a domain still hangs (a pipeline child
-/// waits for something its parent-first sibling never provides), which has
-/// to be found before the scheduler loop of docs/SCHEDULER.md step 3.
-const LINUX_PARENT_FIRST_FORK: bool = false;
-
-/// Finishes a parent-first fork: keeps the child's prepared state for when it
-/// is scheduled, and resumes the parent with the child's pid as the result
-/// (written by `begin_live_fork`). Kept out of line so the process-state
-/// copies it makes do not enlarge the recursive fork executor's frame.
+/// Finishes a runtime fork, run parent first as Linux runs it: keeps the
+/// child's prepared state for when a scheduler loop takes it from the run
+/// queue, and makes the parent's state current again, with the child's pid
+/// as its fork's result (written by `begin_live_fork`), for the loop that
+/// ran it to go on with it. A vfork parent instead waits in its call until
+/// the child executes or exits (`linux_vfork_wait_live`), as Linux's does;
+/// a domain exec's child is first loaded with the command it runs. Kept out
+/// of line so the process-state copies it makes do not enlarge the fork
+/// executor's frame.
 #[inline(never)]
-fn resume_linux_fork_parent_first(
+fn finish_linux_fork_parent_first(
     parent_pid: u32,
-    child_pid: u32,
+    child: &linux_process::LiveProcessDispatch,
     parent_stack: Option<(usize, u64, u64)>,
+    vfork: bool,
+    domain_exec: bool,
 ) -> bool {
-    save_current_linux_process_runtime_state(child_pid);
+    if domain_exec && !load_linux_domain_exec(child) {
+        return false;
+    }
+    save_current_linux_process_runtime_state(child.pid);
+    if domain_exec && !save_linux_process_extended_state(child.pid) {
+        return false;
+    }
     X86_RUNTIME
         .LINUX_CURRENT_PROCESS_PID
         .store(parent_pid, Ordering::SeqCst);
@@ -851,15 +848,41 @@ fn resume_linux_fork_parent_first(
         X86_RUNTIME.LINUX_THREAD_STACK_BASES[slot].store(base, Ordering::SeqCst);
         X86_RUNTIME.LINUX_THREAD_STACK_SIZES[slot].store(size, Ordering::SeqCst);
     }
-    let Some(parent) = linux_process::dispatch_live_process(parent_pid) else {
+    !vfork
+        || linux_process::set_live_process_vfork_child(parent_pid, child.pid)
+            && linux_process::restart_live_process_call(parent_pid, LINUX_VFORK_WAIT_SYSCALL)
+}
+
+/// Loads a domain exec's command (`domain exec NAME PATH`) into `child`,
+/// the fork of the suspended process made for it, whose state is current,
+/// with the domain's console as its standard streams; it becomes the
+/// domain's exec child, whose exit detaches the console again.
+fn load_linux_domain_exec(child: &linux_process::LiveProcessDispatch) -> bool {
+    let Some(slot) = active_container_slot() else {
         return false;
     };
-    let resumed =
-        sync_live_linux_process_address_space(parent_pid) && run_dispatched_linux_process(&parent);
-    if resumed {
-        save_current_linux_process_runtime_state(parent_pid);
+    let argument_size =
+        usize::from(X86_RUNTIME.CONTAINER_EXEC_ARGUMENT_SIZES[slot][0].load(Ordering::Acquire));
+    let mut path = [0_u8; DOMAIN_EXEC_ARGUMENT_CAPACITY];
+    for (byte, cell) in path[..argument_size]
+        .iter_mut()
+        .zip(X86_RUNTIME.CONTAINER_EXEC_ARGUMENTS[slot][0].iter())
+    {
+        *byte = cell.load(Ordering::Acquire);
     }
-    resumed
+    let prepared = sync_live_linux_process_address_space(child.pid)
+        && restore_linux_process_extended_state(child.pid)
+        && prepare_domain_exec_stdio();
+    let loaded = prepared
+        && address_space::with_live_linux_process_root(child.root, || {
+            linux_rootfs_execve_domain(&path[..argument_size], slot)
+        }) == Some(0);
+    if !loaded {
+        serial_write("linox: domain exec load failed\r\n");
+        return false;
+    }
+    X86_RUNTIME.CONTAINER_EXEC_CHILD[slot].store(child.pid, Ordering::Release);
+    true
 }
 
 #[inline(never)]
@@ -876,9 +899,6 @@ pub(super) fn execute_deferred_live_fork() -> bool {
     let domain_exec = X86_RUNTIME
         .LINUX_DOMAIN_EXEC_INJECT
         .swap(false, Ordering::AcqRel);
-    if domain_exec && !linux_process::reset_runtime_scheduler_bindings() {
-        return false;
-    }
     let profile_started = cfg!(feature = "linux-boot-profile").then(timer::timestamp_counter);
     let new_mount_namespace = X86_RUNTIME
         .LINUX_FORK_NEW_MOUNT_NAMESPACE
@@ -917,18 +937,12 @@ pub(super) fn execute_deferred_live_fork() -> bool {
     // maps its parent's pages rather than copies of them even without
     // CLONE_VM: it only runs until exec or exit, and exec frees none of
     // them. Only a CLONE_VM child releases its parent at exec.
-    let _domain_exec_guard = domain_exec.then(LinuxDomainExecGuard::enter);
-    // Linux runs a forked child after its parent by default. A child that
-    // borrows its parent's memory or stack (vfork, CLONE_VM, posix_spawn) or
-    // gets a new mount namespace, and any fork inside a domain exec, still
-    // runs first, inside this transaction.
-    let parent_first = LINUX_PARENT_FIRST_FORK
-        && X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-        && !domain_exec
-        && !share_vm
-        && child_stack == 0
-        && !new_mount_namespace
-        && X86_RUNTIME.LINUX_DOMAIN_EXEC_DEPTH.load(Ordering::SeqCst) == 0;
+    // A runtime's forks run the parent first, as Linux does: the child waits
+    // in the run queue for a scheduler loop, and a vfork parent waits in its
+    // call for the child to execute or exit. Only the boot verification
+    // probe, which has no scheduler loop, runs the child first, inside this
+    // transaction.
+    let parent_first = X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst);
     // vfork shares the parent's memory, and so does posix_spawn's
     // clone(CLONE_VM | CLONE_VFORK, stack) child, which exec's from it; a
     // stack with pages of the child's own (clone(SIGCHLD, stack), clone3
@@ -1181,78 +1195,34 @@ pub(super) fn execute_deferred_live_fork() -> bool {
             ));
     if parent_first {
         return child_tid_ready
-            && resume_linux_fork_parent_first(parent_pid, child.pid, parent_runtime.stack);
+            && finish_linux_fork_parent_first(
+                parent_pid,
+                &child,
+                parent_runtime.stack,
+                vfork,
+                domain_exec,
+            );
     }
     linux_boot_profile_lifecycle_phase(0, profile_started);
     let profile_run_started = cfg!(feature = "linux-boot-profile").then(timer::timestamp_counter);
     let mut child_executed = false;
-    let child_dispatch = if domain_exec {
-        let Some(slot) = active_container_slot() else {
-            return false;
+    let mut child_resumed = child_tid_ready
+        && (!X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
+            || sync_live_linux_process_address_space(child.pid))
+        && restore_linux_process_extended_state(child.pid)
+        && {
+            crate::linux_profile::span_since(
+                crate::linux_profile::Span::ForkPrepare,
+                prepare_started,
+            );
+            run_dispatched_linux_process(&child)
         };
-        let argument_size =
-            usize::from(X86_RUNTIME.CONTAINER_EXEC_ARGUMENT_SIZES[slot][0].load(Ordering::Acquire));
-        let mut path = [0_u8; DOMAIN_EXEC_ARGUMENT_CAPACITY];
-        for (byte, cell) in path[..argument_size]
-            .iter_mut()
-            .zip(X86_RUNTIME.CONTAINER_EXEC_ARGUMENTS[slot][0].iter())
-        {
-            *byte = cell.load(Ordering::Acquire);
-        }
-        let prepared = child_tid_ready
-            && sync_live_linux_process_address_space(child.pid)
-            && restore_linux_process_extended_state(child.pid)
-            && prepare_domain_exec_stdio();
-        let loaded = prepared
-            && address_space::with_live_linux_process_root(child.root, || {
-                linux_rootfs_execve_domain(&path[..argument_size], slot)
-            }) == Some(0);
-        if !loaded {
-            serial_write("linox: domain exec load failed\r\n");
-            return false;
-        }
-        save_current_linux_process_runtime_state(child.pid);
-        if !save_linux_process_extended_state(child.pid) {
-            return false;
-        }
-        child_executed = take_linux_child_exec(child.pid);
-        linux_process::dispatch_live_process(child.pid)
-    } else {
-        Some(child)
-    };
-    let mut child_resumed = child_dispatch.is_some_and(|child_dispatch| {
-        child_tid_ready
-            && (!X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
-                || sync_live_linux_process_address_space(child.pid))
-            && restore_linux_process_extended_state(child.pid)
-            && {
-                crate::linux_profile::span_since(
-                    crate::linux_profile::Span::ForkPrepare,
-                    prepare_started,
-                );
-                run_dispatched_linux_process(&child_dispatch)
-            }
-    });
     let finish_started = crate::linux_profile::span_start();
     while X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && !linux_child_exited(child.pid)
         && X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst)
     {
         child_resumed = execute_deferred_live_fork();
-    }
-    while domain_exec
-        && child_resumed
-        && !linux_child_exited(child.pid)
-        && !X86_RUNTIME.LINUX_RUNTIME_SUSPENDED.load(Ordering::Acquire)
-    {
-        let _ = take_linux_child_yield(child.pid);
-        let Some(runnable_child) = linux_process::dispatch_live_process(child.pid) else {
-            return false;
-        };
-        child_resumed = sync_live_linux_process_address_space(child.pid)
-            && restore_saved_linux_process_runtime_state(child.pid)
-            && restore_linux_process_extended_state(child.pid)
-            && run_dispatched_linux_process(&runnable_child);
     }
     while X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst)
         && !X86_RUNTIME
@@ -1281,11 +1251,6 @@ pub(super) fn execute_deferred_live_fork() -> bool {
     let child_exit = take_linux_child_exit(child.pid);
     let child_exited = child_exit.is_some();
     let child_status = child_exit.unwrap_or(0);
-    if domain_exec && child_exited {
-        if let Some(slot) = active_container_slot() {
-            X86_RUNTIME.CONTAINER_CONSOLE_ATTACHED[slot].store(false, Ordering::Release);
-        }
-    }
     linux_boot_profile_lifecycle_phase(1, profile_run_started);
     let profile_state_started = cfg!(feature = "linux-boot-profile").then(timer::timestamp_counter);
     // The child's threads on other CPUs leave before this CPU leaves its

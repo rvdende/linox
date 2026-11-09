@@ -1519,6 +1519,9 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         X86_RUNTIME
             .LINUX_RUNTIME_SUSPENDED
             .store(false, Ordering::Release);
+        if let Some(slot) = active_container_slot() {
+            X86_RUNTIME.CONTAINER_EXEC_CHILD[slot].store(0, Ordering::Release);
+        }
     }
     if !install_live_linux_process_registry(execution.entry, execution.stack, active_fs_base()) {
         serial_write("linox: Linux process registry setup failed\r\n");
@@ -1559,26 +1562,19 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         PRIVILEGE_ENTRY_NMI_PROBE_MASK.store(PRIVILEGE_ENTRY_NMI_STAGE_MASK, Ordering::SeqCst);
     }
     let user_entered = if execution.runtime {
-        // A domain's init runs on an activation stack of its own, as every
-        // later entry into a process does, so its blocked calls can park.
+        // A domain's init is ready in the run queue with the context its
+        // registry entry holds (this entry point and stack); the runtime
+        // loop enters it as it enters every process, on an activation stack
+        // of its own. Its kernel state is saved first, as a process's is
+        // whenever it leaves the CPU.
         let valid = address_space::current_user_entry_context_is_valid(
             execution.entry as u64,
             execution.stack as u64,
-        );
+        ) && linux_process::start_runtime_scheduler();
         if valid {
-            let general = [0_u64; 15];
-            // SAFETY: the context was validated against the active address
-            // space, as `enter_user` would.
-            unsafe {
-                enter_linux_runtime_process(
-                    execution.entry,
-                    execution.stack,
-                    general.as_ptr(),
-                    0x202,
-                )
-            };
+            save_current_linux_process_runtime_state(1);
         }
-        valid
+        valid && save_linux_process_extended_state(1)
     } else {
         unsafe { enter_user(execution.entry, execution.stack, 0, 0, 0, 0, 0, 0, 0) }
     };
@@ -1620,7 +1616,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
                 ..LinuxElfResult::FAILED
             };
         }
-        return finish_linux_runtime(execution.mmap as u64, saved_msrs);
+        return run_linux_runtime(execution.mmap as u64, saved_msrs, None);
     }
     let live_fork_requested = X86_RUNTIME.LINUX_FORK_REQUESTED.load(Ordering::SeqCst);
     let live_fork_executed = execute_deferred_live_fork();
