@@ -52,10 +52,6 @@ pub(crate) const MAX_DEVICE_REGIONS: usize = 4;
 const GIBIBYTE: u64 = 1 << 30;
 const CPUID_EXTENDED_FEATURES: u32 = 0x8000_0001;
 const CPUID_PAGE_1GB: u32 = 1 << 26;
-const PAT_MSR: u32 = 0x277;
-// WB, WC, UC-, UC repeated. Entry 1 (PWT only) is write-combining instead of
-// the power-on write-through; every other mapping that sets PWT also sets PCD.
-const PAT_WITH_WRITE_COMBINING: u64 = 0x0007_0106_0007_0106;
 const USER_REGION_BASE: u64 = 1_u64 << 39;
 
 #[derive(Clone, Copy)]
@@ -1707,20 +1703,7 @@ pub(crate) fn unmap_kernel_stack_page(address: usize) -> Option<u64> {
 /// process (a GPU's host-visible blobs) takes the caching its device asks
 /// for through these bits.
 pub(crate) fn install_page_attribute_table() {
-    // SAFETY: IA32_PAT only changes what the PAT, PCD and PWT bits of page
-    // table entries mean. Entry 0 (no bits) stays write-back and entries 2
-    // and 3 keep their defaults, so existing mappings keep their types;
-    // entry 1 (PWT alone) becomes write-combining, which is what the
-    // framebuffer window and device pages setting it ask for.
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") PAT_MSR,
-            in("eax") PAT_WITH_WRITE_COMBINING as u32,
-            in("edx") (PAT_WITH_WRITE_COMBINING >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
+    crate::trusted::msr::install_write_combining_pat();
 }
 
 /// Maps a framebuffer write-combining into the direct-map slot reserved for it
@@ -1740,13 +1723,7 @@ unsafe fn map_framebuffer_window(
     if length == 0 || pages > ENTRY_COUNT || end > ADDRESS_MASK as u64 + PAGE_SIZE as u64 {
         return Err(PagingError::MmioMapInvalid);
     }
-    asm!(
-        "wrmsr",
-        in("ecx") PAT_MSR,
-        in("eax") PAT_WITH_WRITE_COMBINING as u32,
-        in("edx") (PAT_WITH_WRITE_COMBINING >> 32) as u32,
-        options(nostack, preserves_flags),
-    );
+    install_page_attribute_table();
     let directory = core::ptr::addr_of_mut!((*PAGING.framebuffer_directory.get()).0).cast::<u64>();
     zero_entries(directory);
     for index in 0..pages {

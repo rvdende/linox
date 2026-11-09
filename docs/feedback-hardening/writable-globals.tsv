@@ -696,3 +696,4 @@ interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_LENGTH	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/bringup/trap.rs	STAGE_TEXT	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/drivers/clock.rs	TICKS_PER_MS	platform-device	allowlist	none	atomic-published-after-calibration
+interior-mutable	kernel/src/trusted/msr.rs	REPORTED_APIC_BASE	platform-device	allowlist	none	atomic-published-at-discovery

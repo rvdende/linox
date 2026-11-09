@@ -898,15 +898,12 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
     serial_write("\r\n");
 
-    // SAFETY: The bootstrap processor owns the still-disabled interrupt
-    // environment. The checked direct map covers the asserted xAPIC MMIO
-    // limit, and no other kernel component uses the PIT or APIC timer.
-    let Some(apic_timer) = (unsafe {
-        arch::x86_64::timer::calibrate_local_apic(
-            &local_apic,
-            arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-        )
-    }) else {
+    // The bootstrap processor owns the still-disabled interrupt environment,
+    // and no other kernel component uses the PIT or APIC timer.
+    let Some(apic_timer) = arch::x86_64::timer::calibrate_local_apic(
+        &local_apic,
+        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
+    ) else {
         kernel_fail("linox: local APIC timer calibration failed\r\n");
     };
     serial_write("linox: local APIC timer calibrated\r\nlinox: APIC timer divider: ");

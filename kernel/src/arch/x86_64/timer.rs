@@ -255,12 +255,9 @@ pub(crate) fn monotonic_frequency() -> Option<u64> {
 }
 
 /// Calibrates the masked local-APIC timer against a one-shot PIT interval.
-///
-/// # Safety
-///
-/// The caller must own the legacy PIT and local APIC, keep interrupts
-/// disabled, and provide the exclusive mapped limit for xAPIC MMIO.
-pub(crate) unsafe fn calibrate_local_apic(
+/// The caller owns the legacy PIT and the local APIC's timer and keeps
+/// interrupts disabled; an xAPIC must lie below `mapped_limit`.
+pub(crate) fn calibrate_local_apic(
     apic: &LocalApic,
     mapped_limit: usize,
 ) -> Option<LocalApicCalibration> {
@@ -370,7 +367,7 @@ pub(crate) unsafe fn verify_local_apic_interrupt(
 
 /// Arms one scheduler interrupt without enabling interrupts in kernel mode.
 /// The next ring-3 IRET restores IF and admits the pending one-shot.
-pub(crate) unsafe fn arm_scheduler_preemption(
+pub(crate) fn arm_scheduler_preemption(
     apic: &LocalApic,
     calibration: &LocalApicCalibration,
 ) -> bool {
@@ -434,14 +431,12 @@ pub(crate) fn rearm_scheduler_preemption() -> bool {
     else {
         return false;
     };
-    unsafe {
-        apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, reload);
-    }
+    apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, reload);
     true
 }
 
-pub(crate) unsafe fn finish_scheduler_preemption(apic: &LocalApic) -> bool {
+pub(crate) fn finish_scheduler_preemption(apic: &LocalApic) -> bool {
     apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
     apic.write(APIC_INITIAL_COUNT, 0);
     let complete = !TIMER.preemption_armed.load(Ordering::SeqCst)
@@ -477,13 +472,9 @@ pub(crate) fn arm_linux_wait_timer() -> bool {
         return false;
     };
     TIMER.linux_wait_reload.store(reload, Ordering::SeqCst);
-    // SAFETY: discovery and the interrupt proof validated this saved APIC,
-    // and Linux execution owns its timer after the scheduler proof finishes.
-    unsafe {
-        apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
-        apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, reload);
-    }
+    apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
+    apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, reload);
     true
 }
 
@@ -498,24 +489,17 @@ pub(crate) fn arm_linux_cpu_tick() -> bool {
     let Some(apic) = linux_tick_apic() else {
         return false;
     };
-    // SAFETY: each CPU reaches its own local APIC at the saved base; this
-    // CPU's timer is unused while it runs a domain runtime's processes.
-    unsafe {
-        apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
-        apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, reload);
-    }
+    apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
+    apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, reload);
     true
 }
 
 /// Stops this application processor's Linux tick.
 pub(crate) fn disarm_linux_cpu_tick() {
     if let Some(apic) = linux_tick_apic() {
-        // SAFETY: as in arm_linux_cpu_tick; masking stops this CPU's timer.
-        unsafe {
-            apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
-            apic.write(APIC_INITIAL_COUNT, 0);
-        }
+        apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
+        apic.write(APIC_INITIAL_COUNT, 0);
     }
 }
 
@@ -558,12 +542,8 @@ pub(crate) fn request_linux_tick_within(nanoseconds: u64) {
         return;
     };
     let count = linux_tick_count_for(nanoseconds);
-    // SAFETY: Linux execution owns the boot APIC's timer while the tick is
-    // armed; shortening its count only makes the next tick come sooner.
-    unsafe {
-        if count < apic.read(APIC_CURRENT_COUNT) {
-            apic.write(APIC_INITIAL_COUNT, count);
-        }
+    if count < apic.read(APIC_CURRENT_COUNT) {
+        apic.write(APIC_INITIAL_COUNT, count);
     }
 }
 
@@ -582,11 +562,8 @@ pub(crate) fn finish_linux_wait_timer() -> bool {
     else {
         return false;
     };
-    // SAFETY: Linux execution still exclusively owns the saved bootstrap APIC.
-    unsafe {
-        apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, 0);
-    }
+    apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, 0);
     TIMER.linux_wait_reload.store(0, Ordering::SeqCst);
     true
 }
@@ -658,13 +635,9 @@ fn arm_wait_timer_for(domain: u64, object: u64, request: u64, initial_count: u32
     TIMER.device_wait_request.store(request, Ordering::SeqCst);
     TIMER.device_wait_object.store(object, Ordering::SeqCst);
     TIMER.device_wait_timed_out.store(false, Ordering::SeqCst);
-    // SAFETY: the earlier timer proof validated this saved local APIC, and no
-    // scheduler or Linux timer owns it during the isolated service proof.
-    unsafe {
-        apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
-        apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, initial_count);
-    }
+    apic.write(APIC_DIVIDE_CONFIGURATION, APIC_DIVIDE_BY_16);
+    apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, initial_count);
     true
 }
 
@@ -726,12 +699,8 @@ fn finish_wait_timer(domain: u64, request: u64) -> Option<bool> {
         Mode::XApic
     };
     let apic = LocalApic::from_saved(0, mode, TIMER.interrupt_apic_base.load(Ordering::SeqCst))?;
-    // SAFETY: the exact device wait owns this one-shot until this call or its
-    // interrupt handler consumes it.
-    unsafe {
-        apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
-        apic.write(APIC_INITIAL_COUNT, 0);
-    }
+    apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
+    apic.write(APIC_INITIAL_COUNT, 0);
     TIMER.device_wait_domain.store(0, Ordering::SeqCst);
     TIMER.device_wait_request.store(0, Ordering::SeqCst);
     TIMER.device_wait_object.store(0, Ordering::SeqCst);
@@ -780,12 +749,9 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
     if cpu::current_cpu_index_checked().is_some_and(|cpu| cpu != 0) {
         if let Some(apic) = linux_tick_apic() {
             let reload = TIMER.linux_wait_reload.load(Ordering::SeqCst);
-            // SAFETY: this CPU's local APIC; its timer is the Linux tick.
-            unsafe {
-                apic.write(APIC_EOI, 0);
-                if reload != 0 {
-                    apic.write(APIC_INITIAL_COUNT, reload);
-                }
+            apic.write(APIC_EOI, 0);
+            if reload != 0 {
+                apic.write(APIC_INITIAL_COUNT, reload);
             }
         }
         if let Some(frame) = unsafe { frame.as_mut() } {
@@ -811,19 +777,13 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
     else {
         return;
     };
-    // SAFETY: The verifier initializes these values before unmasking the timer,
-    // and the handler runs with exclusive bootstrap-processor APIC ownership.
-    unsafe { apic.write(APIC_EOI, 0) };
+    apic.write(APIC_EOI, 0);
     if TIMER.device_wait_armed.swap(false, Ordering::SeqCst) {
         let domain = TIMER.device_wait_domain.load(Ordering::SeqCst);
         let request = TIMER.device_wait_request.load(Ordering::SeqCst);
         let object = TIMER.device_wait_object.load(Ordering::SeqCst);
-        // SAFETY: this one-shot has fired and must be masked before another
-        // owner may program the local timer.
-        unsafe {
-            apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
-            apic.write(APIC_INITIAL_COUNT, 0);
-        }
+        apic.write(APIC_LVT_TIMER, APIC_TIMER_MASKED | u32::from(TIMER_VECTOR));
+        apic.write(APIC_INITIAL_COUNT, 0);
         if domain == DEVICE_WAIT_TEST_DOMAIN {
             TIMER.device_wait_timed_out.store(true, Ordering::SeqCst);
         } else if object == control_abi::PACKET_OBJECT {
@@ -875,8 +835,7 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
             // for, if that is sooner than a full tick.
             let count =
                 cpu::linux_nanoseconds_to_next_wait_deadline().map_or(reload, linux_tick_count_for);
-            // SAFETY: the Linux execution phase owns this one-shot timer.
-            unsafe { apic.write(APIC_INITIAL_COUNT, count) };
+            apic.write(APIC_INITIAL_COUNT, count);
         }
         return;
     }
@@ -886,9 +845,7 @@ extern "sysv64" fn timer_interrupt_handler(frame: *mut UserInterruptFrame) {
     {
         let reload = TIMER.preemption_deferred_reload.load(Ordering::SeqCst);
         if reload != 0 {
-            // SAFETY: This is the saved bootstrap APIC and the proof owns its
-            // one-shot timer until finish_scheduler_preemption masks it.
-            unsafe { apic.write(APIC_INITIAL_COUNT, reload) };
+            apic.write(APIC_INITIAL_COUNT, reload);
         }
         return;
     }

@@ -1138,9 +1138,7 @@ extern "sysv64" fn virtio_interrupt_handler(_frame: *mut UserInterruptFrame) {
     ) else {
         return;
     };
-    // SAFETY: The interrupt proof owns this vector and stored the validated
-    // local APIC before installing the IDT gate.
-    unsafe { apic.write(APIC_EOI, 0) };
+    apic.write(APIC_EOI, 0);
 }
 
 unsafe fn wait_for_one_virtio_interrupt() -> bool {

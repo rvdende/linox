@@ -11,6 +11,8 @@
 //! - any kernel code, from an [`MmioMapping`] (`Mmio::mapped`): the
 //!   uncached mapping `paging.rs` built for a device's register range and
 //!   checked against RAM and the kernel's own mappings;
+//! - the local APIC's owner (`arch/x86_64/apic.rs`), at the base
+//!   IA32_APIC_BASE reports (`Mmio::local_apic`), through the direct map;
 //! - the hardware bring-up drivers, which run on the firmware's page tables
 //!   (`Mmio::firmware`): a PCI BAR or an ACPI-described register block at
 //!   its physical address, which the firmware's identity map must map
@@ -28,7 +30,7 @@
 use core::cell::Cell;
 use core::marker::PhantomData;
 
-use crate::arch::x86_64::paging::MmioMapping;
+use crate::arch::x86_64::paging::{self, MmioMapping};
 
 mod sealed {
     pub trait Sealed {}
@@ -105,6 +107,16 @@ impl Mmio {
         let base = usize::try_from(physical).ok()?;
         (crate::bringup::firmware_maps(physical, true) && crate::bringup::firmware_maps(last, true))
             .then(|| Self::new(base, length))
+    }
+
+    /// The first `length` bytes (at most a page) of the local APIC's xAPIC
+    /// registers, through the direct map, if `physical` is the base
+    /// IA32_APIC_BASE reported.
+    pub(crate) fn local_apic(physical: u64, length: usize) -> Option<Self> {
+        if super::msr::reported_apic_base() != Some(physical) || length > 4096 {
+            return None;
+        }
+        paging::direct_map_range_address(physical, length).map(|base| Self::new(base, length))
     }
 
     /// The `length` bytes at `offset`, if they lie inside this window.

@@ -259,7 +259,7 @@ pub(crate) fn start_application_processors(platform: PlatformInfo, apic: &LocalA
         );
         MAILBOX_CPU.store(cpu as u32, Ordering::Release);
         APIC_IDS[cpu].store(target, Ordering::Release);
-        if unsafe { !apic.start_processor(target, TRAMPOLINE_VECTOR) } {
+        if !apic.start_processor(target, TRAMPOLINE_VECTOR) {
             return false;
         }
         let mut online = false;
@@ -410,9 +410,7 @@ fn dispatch(cpu: usize, command: u8, argument: u64) -> Option<u32> {
     IPI_COMMAND[cpu].store(command, Ordering::Release);
     let target = APIC_IDS[cpu].load(Ordering::Acquire);
     let apic = saved_local_apic()?;
-    // SAFETY: this vector is installed in every online CPU's private IDT and
-    // the discovered APIC ID identifies the selected processor.
-    unsafe { apic.send_fixed(target, IPI_VECTOR) }.then_some(generation)
+    apic.send_fixed(target, IPI_VECTOR).then_some(generation)
 }
 
 fn wait_for_ack(cpu: usize, generation: u32) -> bool {
@@ -539,7 +537,7 @@ pub(crate) fn invalidate_runtime_translation(address: u64) -> bool {
             continue;
         }
         let apic_id = APIC_IDS[target].load(Ordering::Acquire);
-        if !(unsafe { apic.send_nmi(apic_id) }) {
+        if !apic.send_nmi(apic_id) {
             TLB_SHOOTDOWN_ADDRESS.store(0, Ordering::Release);
             return false;
         }
@@ -610,7 +608,7 @@ extern "sysv64" fn interprocessor_interrupt_handler() {
     }
     IPI_ACKNOWLEDGED[cpu].store(generation, Ordering::Release);
     if let Some(apic) = saved_local_apic() {
-        unsafe { apic.end_of_interrupt() };
+        apic.end_of_interrupt();
     }
 }
 
@@ -636,7 +634,7 @@ extern "sysv64" fn application_processor_main(cpu_index: u32) -> ! {
             unsafe { asm!("hlt", options(nomem, nostack)) };
         }
     };
-    unsafe { apic.enable_software() };
+    apic.enable_software();
     ONLINE[cpu].store(true, Ordering::Release);
     ONLINE_COUNT.fetch_add(1, Ordering::AcqRel);
     loop {

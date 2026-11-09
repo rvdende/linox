@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 758 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 758 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 738 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 738 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 367 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 367 to ${undocumented}" >&2
+if (( undocumented > 362 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 362 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 43 )); then
@@ -31,16 +31,16 @@ fi
 # sites; a file may not grow.
 per_file_limits=(
     "address_space.rs 80"
-    "arch/x86_64/apic.rs 12"
-    "arch/x86_64/paging.rs 15"
+    "arch/x86_64/paging.rs 14"
     "arch/x86_64/iommu.rs 2"
-    "arch/x86_64/pci.rs 26"
-    "arch/x86_64/timer.rs 24"
+    "arch/x86_64/pci.rs 25"
+    "arch/x86_64/smp.rs 10"
+    "arch/x86_64/timer.rs 8"
     "image_store.rs 16"
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
-    "lib.rs 32"
+    "lib.rs 30"
     "memory.rs 38"
     "drivers/ahci.rs 4"
     "drivers/amd_iommu.rs 13"
@@ -51,6 +51,7 @@ per_file_limits=(
     "drivers/xhci.rs 19"
     "trusted/frame.rs 9"
     "trusted/mmio.rs 2"
+    "trusted/msr.rs 3"
     "trusted/page_table.rs 2"
     "trusted/port.rs 8"
 )
@@ -68,6 +69,7 @@ done
 # Files moved onto the trusted layer's safe APIs that have no unsafe left
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
 forbidding_files=(
+    "arch/x86_64/apic.rs"
     "drivers/clock.rs"
     "drivers/pci.rs"
 )

@@ -1,11 +1,16 @@
-use core::arch::{asm, x86_64::__cpuid};
+//! The local APIC: discovery, and its registers (MMIO in xAPIC mode,
+//! MSRs in x2APIC mode) behind `trusted::mmio` and `trusted::msr`.
+
+#![forbid(unsafe_code)]
+
+use core::arch::x86_64::__cpuid;
 
 use super::paging;
+use crate::trusted::{mmio::Mmio, msr};
 
 const CPUID_FEATURES: u32 = 1;
 const CPUID_APIC: u32 = 1 << 9;
 const CPUID_X2APIC: u32 = 1 << 21;
-const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_GLOBAL_ENABLE: u64 = 1 << 11;
 const APIC_X2_MODE: u64 = 1 << 10;
 const APIC_BASE_MASK: u64 = 0x000f_ffff_ffff_f000;
@@ -23,7 +28,6 @@ const APIC_TRIGGER_LEVEL: u32 = 1 << 15;
 const APIC_DELIVERY_INIT: u32 = 5 << 8;
 const APIC_DELIVERY_NMI: u32 = 4 << 8;
 const APIC_DELIVERY_STARTUP: u32 = 6 << 8;
-const X2APIC_INTERRUPT_COMMAND_MSR: u32 = 0x830;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Mode {
@@ -35,67 +39,62 @@ pub(crate) struct LocalApic {
     pub(crate) id: u8,
     pub(crate) mode: Mode,
     pub(crate) physical_base: u64,
-    mapped_base: usize,
+    /// The xAPIC registers through the direct map; none in x2APIC mode,
+    /// whose registers are MSRs.
+    registers: Option<Mmio>,
 }
 
 impl LocalApic {
-    /// Reads a local-APIC register.
-    ///
-    /// # Safety
-    ///
-    /// In xAPIC mode, the APIC MMIO page must have a checked higher-half
-    /// mapping with the platform's uncached memory type. The register must be
-    /// aligned and below offset `0x400`.
-    pub(crate) unsafe fn read(&self, register: u32) -> u32 {
+    /// Reads the local-APIC register at xAPIC offset `register` (a multiple
+    /// of 16 below 0x400).
+    pub(crate) fn read(&self, register: u32) -> u32 {
         debug_assert!(register < 0x400 && register.is_multiple_of(16));
-        match self.mode {
-            Mode::XApic => ((self.mapped_base + register as usize) as *const u32).read_volatile(),
-            Mode::X2Apic => read_msr(0x800 + register / 16) as u32,
+        match &self.registers {
+            Some(registers) => registers.read::<u32>(register as usize),
+            None => msr::read_x2apic(register) as u32,
         }
     }
 
-    /// Writes a local-APIC register under the mapping requirements of `read`.
-    pub(crate) unsafe fn write(&self, register: u32, value: u32) {
+    /// Writes a local-APIC register, as `read` reads it.
+    pub(crate) fn write(&self, register: u32, value: u32) {
         debug_assert!(register < 0x400 && register.is_multiple_of(16));
-        match self.mode {
-            Mode::XApic => {
-                ((self.mapped_base + register as usize) as *mut u32).write_volatile(value)
-            }
-            Mode::X2Apic => write_msr(0x800 + register / 16, u64::from(value)),
+        match &self.registers {
+            Some(registers) => registers.write::<u32>(register as usize, value),
+            None => msr::write_x2apic(register, u64::from(value)),
         }
     }
 
+    /// The local APIC at `physical_base` in `mode`, which must be the base
+    /// IA32_APIC_BASE reported at discovery for an xAPIC.
     pub(crate) fn from_saved(id: u8, mode: Mode, physical_base: u64) -> Option<Self> {
-        let mapped_base = match mode {
-            Mode::XApic => paging::direct_map_range_address(physical_base, 0x400)?,
-            Mode::X2Apic => 0,
+        let registers = match mode {
+            Mode::XApic => Some(Mmio::local_apic(physical_base, 0x400)?),
+            Mode::X2Apic => None,
         };
         Some(Self {
             id,
             mode,
             physical_base,
-            mapped_base,
+            registers,
         })
     }
 
     pub(crate) fn mmio_uses_direct_map(&self) -> bool {
         self.mode == Mode::X2Apic
-            || paging::direct_map_range_address(self.physical_base, 0x400) == Some(self.mapped_base)
+            || self.registers.is_some()
+                && paging::direct_map_range_address(self.physical_base, 0x400).is_some()
     }
 
     pub(crate) fn vector_is_idle(&self, vector: u8) -> bool {
         let bank = u32::from(vector / 32) * 0x10;
         let bit = 1_u32 << (vector % 32);
-        // SAFETY: Discovery validated this APIC mapping. These three register
-        // banks are read-only architectural state.
-        unsafe {
-            self.read(APIC_IN_SERVICE_BASE + bank) & bit == 0
-                && self.read(APIC_TRIGGER_MODE_BASE + bank) & bit == 0
-                && self.read(APIC_INTERRUPT_REQUEST_BASE + bank) & bit == 0
-        }
+        // These three register banks are read-only architectural state.
+        self.read(APIC_IN_SERVICE_BASE + bank) & bit == 0
+            && self.read(APIC_TRIGGER_MODE_BASE + bank) & bit == 0
+            && self.read(APIC_INTERRUPT_REQUEST_BASE + bank) & bit == 0
     }
 
-    pub(crate) unsafe fn start_processor(&self, target: u32, vector: u8) -> bool {
+    pub(crate) fn start_processor(&self, target: u32, vector: u8) -> bool {
         if target == u32::from(self.id) || vector == 0 {
             return false;
         }
@@ -115,7 +114,7 @@ impl LocalApic {
         true
     }
 
-    pub(crate) unsafe fn enable_software(&self) {
+    pub(crate) fn enable_software(&self) {
         let value = self.read(APIC_SPURIOUS_VECTOR);
         self.write(
             APIC_SPURIOUS_VECTOR,
@@ -123,19 +122,19 @@ impl LocalApic {
         );
     }
 
-    pub(crate) unsafe fn send_fixed(&self, target: u32, vector: u8) -> bool {
+    pub(crate) fn send_fixed(&self, target: u32, vector: u8) -> bool {
         vector >= 32 && self.send_ipi(target, u32::from(vector))
     }
 
-    pub(crate) unsafe fn send_nmi(&self, target: u32) -> bool {
+    pub(crate) fn send_nmi(&self, target: u32) -> bool {
         self.send_ipi(target, APIC_DELIVERY_NMI)
     }
 
-    pub(crate) unsafe fn end_of_interrupt(&self) {
+    pub(crate) fn end_of_interrupt(&self) {
         self.write(APIC_END_OF_INTERRUPT, 0);
     }
 
-    unsafe fn send_ipi(&self, target: u32, command: u32) -> bool {
+    fn send_ipi(&self, target: u32, command: u32) -> bool {
         match self.mode {
             Mode::XApic => {
                 let Ok(target) = u8::try_from(target) else {
@@ -158,8 +157,8 @@ impl LocalApic {
                 false
             }
             Mode::X2Apic => {
-                write_msr(
-                    X2APIC_INTERRUPT_COMMAND_MSR,
+                msr::write_x2apic(
+                    APIC_INTERRUPT_COMMAND_LOW,
                     (u64::from(target) << 32) | u64::from(command),
                 );
                 true
@@ -185,9 +184,9 @@ pub(crate) fn discover() -> Option<LocalApic> {
         return None;
     }
 
-    // SAFETY: CPUID reports an architectural APIC, for which IA32_APIC_BASE is
-    // defined. The kernel runs at CPL0 with exceptions installed.
-    let base_msr = unsafe { read_msr(IA32_APIC_BASE) };
+    // CPUID reports an architectural APIC, for which IA32_APIC_BASE is
+    // defined.
+    let base_msr = msr::apic_base();
     if base_msr & APIC_GLOBAL_ENABLE == 0 {
         return None;
     }
@@ -203,27 +202,4 @@ pub(crate) fn discover() -> Option<LocalApic> {
     }
 
     LocalApic::from_saved((features.ebx >> 24) as u8, mode, physical_base)
-}
-
-unsafe fn read_msr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    asm!(
-        "rdmsr",
-        in("ecx") msr,
-        out("eax") low,
-        out("edx") high,
-        options(nomem, nostack, preserves_flags)
-    );
-    (u64::from(high) << 32) | u64::from(low)
-}
-
-unsafe fn write_msr(msr: u32, value: u64) {
-    asm!(
-        "wrmsr",
-        in("ecx") msr,
-        in("eax") value as u32,
-        in("edx") (value >> 32) as u32,
-        options(nomem, nostack, preserves_flags)
-    );
 }
