@@ -1,6 +1,7 @@
-//! Images the kernel reads in place as byte slices that live as long as
-//! the kernel uses them: the boot loader's handoff images and the root
-//! filesystem images domains are given.
+//! Images the kernel reads in place as byte slices: the boot loader's
+//! handoff images and the boot archive's private frame copy. (The root
+//! filesystem images domains are given need no `unsafe`: they are
+//! reference-counted heap buffers, `published_rootfs::PublishedImage`.)
 //!
 //! [`BootImage`]: an image the boot loader placed in memory and handed
 //! over (the signed manifest, the control-plane bundle, the controller
@@ -17,15 +18,6 @@
 //!
 //! [`ImageFrames`]: a private run of kernel frames an image is copied
 //! into (the boot archive's published copy), read as one slice.
-//!
-//! [`PublishedImage`]: a root filesystem image on the kernel heap,
-//! published for domains to read in place. Its bytes are handed out as
-//! `&'static [u8]` (the published root filesystem's entries borrow them,
-//! `published_rootfs`), so it is freed only through
-//! [`PublishedImage::retire`], whose caller vouches that no domain that
-//! could hold such a borrow still runs.
-
-use alloc::vec::Vec;
 
 use crate::arch::x86_64::paging;
 use crate::memory::{self, FrameLease, FrameOwner};
@@ -128,56 +120,5 @@ impl BootImage {
         Some(Self {
             bytes: unsafe { core::slice::from_raw_parts(address as *const u8, self.bytes.len()) },
         })
-    }
-}
-
-/// A root filesystem image on the kernel heap, read in place by the
-/// domains it is installed for. It owns the allocation, which it keeps as
-/// a raw pointer (a vector it took apart) so the shared views it hands
-/// out never alias a unique reference.
-pub(crate) struct PublishedImage {
-    pointer: core::ptr::NonNull<u8>,
-    length: usize,
-    capacity: usize,
-}
-
-// SAFETY: a PublishedImage owns its heap allocation like the vector it
-// was made from, and only ever reads it through shared views.
-unsafe impl Send for PublishedImage {}
-
-impl PublishedImage {
-    /// Publishes `image`: its bytes are never written again and stay
-    /// allocated until [`retire`](Self::retire).
-    pub(crate) fn publish(image: Vec<u8>) -> Self {
-        let mut image = core::mem::ManuallyDrop::new(image);
-        Self {
-            pointer: core::ptr::NonNull::new(image.as_mut_ptr())
-                .unwrap_or(core::ptr::NonNull::dangling()),
-            length: image.len(),
-            capacity: image.capacity(),
-        }
-    }
-
-    pub(crate) fn bytes(&self) -> &'static [u8] {
-        // SAFETY: the allocation holds `length` initialized bytes, nothing
-        // writes them after `publish`, and it stays allocated until
-        // `retire`, whose caller vouches that no view is still in use.
-        unsafe { core::slice::from_raw_parts(self.pointer.as_ptr(), self.length) }
-    }
-
-    /// Frees the image (the heap scrubs large allocations as it frees
-    /// them).
-    ///
-    /// # Safety
-    ///
-    /// No view from [`bytes`](Self::bytes) may be in use or used again:
-    /// every domain the image was installed for has been torn down (its
-    /// processes, which hold the root filesystem's entries, are gone) and
-    /// the root filesystem was uninstalled from each.
-    pub(crate) unsafe fn retire(self) {
-        // SAFETY: `publish` took apart a vector of this pointer, length and
-        // capacity, which this value alone owns, and the caller vouches
-        // that no view of it remains.
-        drop(unsafe { Vec::from_raw_parts(self.pointer.as_ptr(), self.length, self.capacity) });
     }
 }

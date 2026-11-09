@@ -90,13 +90,13 @@ pub(super) fn linux_descriptor_read(descriptor: u64, address: u64, count: u64) -
         let Ok(start) = usize::try_from(offset) else {
             return 0;
         };
-        if start >= entry.data.len() || count == 0 {
+        if start >= entry.data().len() || count == 0 {
             return 0;
         }
         let end = start
             .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
-            .min(entry.data.len());
-        if !copy_to_linux_user(address, &entry.data[start..end]) {
+            .min(entry.data().len());
+        if !copy_to_linux_user(address, &entry.data()[start..end]) {
             return LINUX_EFAULT;
         }
         linux_descriptor_offset(descriptor).store(end as u64, Ordering::SeqCst);
@@ -695,13 +695,13 @@ pub(super) fn linux_regular_file_read_at(
         let Ok(start) = usize::try_from(offset) else {
             return 0;
         };
-        if start >= entry.data.len() || count == 0 {
+        if start >= entry.data().len() || count == 0 {
             return 0;
         }
         let end = start
             .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
-            .min(entry.data.len());
-        if !copy_to_linux_user(address, &entry.data[start..end]) {
+            .min(entry.data().len());
+        if !copy_to_linux_user(address, &entry.data()[start..end]) {
             return LINUX_EFAULT;
         }
         return (end - start) as u64;
@@ -822,11 +822,11 @@ pub(super) fn linux_regular_file_read_kernel(
         if entry.kind == crate::published_rootfs::EntryKind::Directory {
             return Err(LINUX_EISDIR);
         }
-        if offset >= entry.data.len() {
+        if offset >= entry.data().len() {
             return Ok(0);
         }
-        let length = output.len().min(entry.data.len() - offset);
-        output[..length].copy_from_slice(&entry.data[offset..offset + length]);
+        let length = output.len().min(entry.data().len() - offset);
+        output[..length].copy_from_slice(&entry.data()[offset..offset + length]);
         return Ok(length);
     }
     if linux_tmp_file(state) {
@@ -984,13 +984,14 @@ fn linux_copy_end(descriptor: u64, state: u16) -> LinuxCopyEnd {
         };
     }
     let entry = linux_rootfs_entry(descriptor);
-    let directory =
-        entry.is_some_and(|entry| entry.kind == crate::published_rootfs::EntryKind::Directory);
+    let directory = entry
+        .as_ref()
+        .is_some_and(|entry| entry.kind == crate::published_rootfs::EntryKind::Directory);
     LinuxCopyEnd {
         handle: None,
         directory,
         regular: entry.is_some() && !directory,
-        size: entry.map_or(0, |entry| entry.data.len() as u64),
+        size: entry.map_or(0, |entry| entry.data().len() as u64),
     }
 }
 

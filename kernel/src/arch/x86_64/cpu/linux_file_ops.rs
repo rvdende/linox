@@ -353,12 +353,12 @@ pub(super) fn linux_linkat(
         crate::published_rootfs::EntryKind::File | crate::published_rootfs::EntryKind::Hardlink => {
             crate::linux_overlay::create_file(
                 destination,
-                linux_rootfs_mode(entry) & 0o7777,
-                entry.data,
+                linux_rootfs_mode(&entry) & 0o7777,
+                entry.data(),
             )
         }
         crate::published_rootfs::EntryKind::Symlink => {
-            crate::linux_overlay::create_symlink(destination, entry.link)
+            crate::linux_overlay::create_symlink(destination, entry.link())
         }
         crate::published_rootfs::EntryKind::Directory => return LINUX_EPERM,
     }
@@ -818,12 +818,12 @@ fn linux_copy_up_path(path: &[u8]) -> Result<crate::linux_overlay::Handle, u64> 
 /// its mode and owner.
 pub(super) fn linux_copy_up_entry(
     path: &[u8],
-    entry: crate::published_rootfs::Entry<'_>,
+    entry: crate::published_rootfs::Entry,
 ) -> Result<crate::linux_overlay::Handle, u64> {
-    let mode = linux_rootfs_mode(entry) & 0o7777;
+    let mode = linux_rootfs_mode(&entry) & 0o7777;
     let handle = match entry.kind {
         crate::published_rootfs::EntryKind::File | crate::published_rootfs::EntryKind::Hardlink => {
-            crate::linux_overlay::create_file(path, mode, entry.data)
+            crate::linux_overlay::create_file(path, mode, entry.data())
         }
         crate::published_rootfs::EntryKind::Directory => {
             crate::linux_overlay::create_directory(path, mode)
@@ -1514,17 +1514,17 @@ fn linux_timestamp_handle(
                 else {
                     return Err(LINUX_ENOENT);
                 };
-                let mode = linux_rootfs_mode(entry) & 0o7777;
+                let mode = linux_rootfs_mode(&entry) & 0o7777;
                 let created = match entry.kind {
                     crate::published_rootfs::EntryKind::File
                     | crate::published_rootfs::EntryKind::Hardlink => {
-                        crate::linux_overlay::create_file(&canonical[..length], mode, entry.data)
+                        crate::linux_overlay::create_file(&canonical[..length], mode, entry.data())
                     }
                     crate::published_rootfs::EntryKind::Directory => {
                         crate::linux_overlay::create_directory(&canonical[..length], mode)
                     }
                     crate::published_rootfs::EntryKind::Symlink => {
-                        crate::linux_overlay::create_symlink(&canonical[..length], entry.link)
+                        crate::linux_overlay::create_symlink(&canonical[..length], entry.link())
                     }
                 };
                 let Some(handle) = created else {
@@ -2191,8 +2191,9 @@ pub(super) fn linux_statx(
             linux_rootfs_path_at(directory, path)
         };
         if let Some((handle, entry)) = oci {
+            let entry = entry.as_ref();
             let mode = entry.map_or(LINUX_STAT_DIRECTORY_MODE, linux_rootfs_mode);
-            let size = entry.map_or(0, |entry| entry.data.len() as u64);
+            let size = entry.map_or(0, |entry| entry.data().len() as u64);
             let mut stat = [0_u8; 256];
             linux_statx_set_mount(&mut stat, LinuxFilesystemKind::Root);
             stat[4..8].copy_from_slice(&(PAGE_SIZE as u32).to_ne_bytes());

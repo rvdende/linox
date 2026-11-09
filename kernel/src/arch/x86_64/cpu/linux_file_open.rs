@@ -288,10 +288,12 @@ pub(super) fn linux_open_file_at(
         canonical[..resolved_length].copy_from_slice(&resolved[..resolved_length]);
         canonical_length = Some(resolved_length);
     }
-    if rootfs_at_path.is_some_and(|(_, entry)| {
-        entry.is_some_and(|entry| entry.kind == crate::published_rootfs::EntryKind::Symlink)
+    if rootfs_at_path.as_ref().is_some_and(|(_, entry)| {
+        entry
+            .as_ref()
+            .is_some_and(|entry| entry.kind == crate::published_rootfs::EntryKind::Symlink)
     }) {
-        let (_, Some(entry)) = rootfs_at_path.unwrap() else {
+        let Some((_, Some(entry))) = rootfs_at_path.clone() else {
             unreachable!()
         };
         if flags & LINUX_O_NOFOLLOW != 0 {
@@ -304,12 +306,12 @@ pub(super) fn linux_open_file_at(
             return error;
         }
         let mut target = [0_u8; crate::linux_overlay::PATH_CAPACITY];
-        let target_length = if entry.link.starts_with(b"/") {
-            if entry.link.len() >= target.len() {
+        let target_length = if entry.link().starts_with(b"/") {
+            if entry.link().len() >= target.len() {
                 return LINUX_ENAMETOOLONG;
             }
-            target[..entry.link.len()].copy_from_slice(entry.link);
-            entry.link.len()
+            target[..entry.link().len()].copy_from_slice(entry.link());
+            entry.link().len()
         } else {
             let parent_length = canonical[..link_path_length]
                 .iter()
@@ -317,7 +319,7 @@ pub(super) fn linux_open_file_at(
                 .unwrap_or(0);
             let Some(end) = parent_length
                 .checked_add(2)
-                .and_then(|value| value.checked_add(entry.link.len()))
+                .and_then(|value| value.checked_add(entry.link().len()))
                 .filter(|end| *end < target.len())
             else {
                 return LINUX_ENAMETOOLONG;
@@ -325,7 +327,7 @@ pub(super) fn linux_open_file_at(
             target[0] = b'/';
             target[1..1 + parent_length].copy_from_slice(&canonical[..parent_length]);
             target[1 + parent_length] = b'/';
-            target[2 + parent_length..end].copy_from_slice(entry.link);
+            target[2 + parent_length..end].copy_from_slice(entry.link());
             end
         };
         let mut resolved = [0_u8; crate::linux_overlay::PATH_CAPACITY];
@@ -428,18 +430,23 @@ pub(super) fn linux_open_file_at(
         && !writable_proc_path
     {
         let length = canonical_length.unwrap_or(0);
-        let initial = rootfs_at_path
-            .and_then(|(_, entry)| entry)
+        // A file the image has is copied up with its mode and owner, as a
+        // write to it on Linux keeps them (useradd rewrites /etc/passwd from
+        // what fstat says); only a new file takes the creation mode.
+        let image_file = rootfs_at_path
+            .as_ref()
+            .and_then(|(_, entry)| entry.as_ref())
             .filter(|entry| {
                 matches!(
                     entry.kind,
                     crate::published_rootfs::EntryKind::File
                         | crate::published_rootfs::EntryKind::Hardlink
                 )
-            })
-            .map_or(&[][..], |entry| entry.data);
+            });
+        let initial = image_file.map_or(&[][..], |entry| entry.data());
         if rootfs_at_path
-            .and_then(|(_, entry)| entry)
+            .as_ref()
+            .and_then(|(_, entry)| entry.as_ref())
             .is_some_and(|entry| entry.kind == crate::published_rootfs::EntryKind::Directory)
         {
             return LINUX_EISDIR;
@@ -450,16 +457,6 @@ pub(super) fn linux_open_file_at(
         if !linux_overlay_parent_exists(&canonical[..length]) {
             return linux_missing_path_error(&canonical[..length]);
         }
-        // A file the image has is copied up with its mode and owner, as a
-        // write to it on Linux keeps them (useradd rewrites /etc/passwd from
-        // what fstat says); only a new file takes the creation mode.
-        let image_file = rootfs_at_path.and_then(|(_, entry)| entry).filter(|entry| {
-            matches!(
-                entry.kind,
-                crate::published_rootfs::EntryKind::File
-                    | crate::published_rootfs::EntryKind::Hardlink
-            )
-        });
         let permissions = image_file.map_or_else(
             || linux_file_creation_mode(&canonical[..length], mode as u32),
             |entry| linux_rootfs_mode(entry) & 0o7777,
@@ -887,8 +884,8 @@ pub(super) fn linux_exact_symlink(
     let image = crate::linux_overlay::image_path(path)?;
     let entry = crate::published_rootfs::exact_entry(&image)
         .filter(|entry| entry.kind == crate::published_rootfs::EntryKind::Symlink)?;
-    let length = entry.link.len();
-    target.get_mut(..length)?.copy_from_slice(entry.link);
+    let length = entry.link().len();
+    target.get_mut(..length)?.copy_from_slice(entry.link());
     Some(length)
 }
 

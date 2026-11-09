@@ -421,6 +421,9 @@ pub(super) fn linux_descriptor_tmp_generation(descriptor: u64) -> Option<u32> {
 pub(super) enum RegularFile {
     Fixed(&'static [u8]),
     Generated(Vec<u8>),
+    /// A file of the published root filesystem, whose image the entry
+    /// keeps.
+    Rootfs(crate::published_rootfs::Entry),
 }
 
 impl RegularFile {
@@ -440,6 +443,7 @@ impl core::ops::Deref for RegularFile {
         match self {
             Self::Fixed(bytes) => bytes,
             Self::Generated(bytes) => bytes,
+            Self::Rootfs(entry) => entry.data(),
         }
     }
 }
@@ -672,7 +676,7 @@ pub(super) fn linux_regular_file_seek(
             .map_or_else(
                 || {
                     linux_rootfs_entry(descriptor)
-                        .map_or_else(|| linux_file_size(state), |entry| entry.data.len() as u64)
+                        .map_or_else(|| linux_file_size(state), |entry| entry.data().len() as u64)
                 },
                 |metadata| metadata.size as u64,
             )

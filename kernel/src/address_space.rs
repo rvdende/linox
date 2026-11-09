@@ -304,7 +304,13 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
     if LINUX_RUNTIME.active[slot].load(Ordering::Acquire) {
         return resume_linux_init(slot, MMAP_ADDRESS);
     }
-    let Some(plan) = crate::published_rootfs::process_plan(init) else {
+    // The program holds the root filesystem image the plan and the launch
+    // arguments borrow.
+    let program = crate::published_rootfs::program(init);
+    let plan = program
+        .as_ref()
+        .and_then(|program| program.plan(crate::published_rootfs::LOW_LOAD_BASE));
+    let Some(plan) = plan else {
         use crate::published_rootfs::ProcessPlanFailure;
         crate::serial_write_bytes(b"linox: cannot launch Linux init ");
         crate::serial_write_bytes(init);
@@ -324,22 +330,22 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
             }
             ProcessPlanFailure::ScriptInterpreterNotFound(path) => {
                 crate::serial_write_bytes(b"script interpreter not found: ");
-                crate::serial_write_bytes(path);
+                crate::serial_write_bytes(path.bytes());
             }
             ProcessPlanFailure::ScriptInterpreterNotExecutable(path) => {
                 crate::serial_write_bytes(b"script interpreter is not executable: ");
-                crate::serial_write_bytes(path);
+                crate::serial_write_bytes(path.bytes());
             }
             ProcessPlanFailure::UnsupportedExecutable => {
                 crate::serial_write_bytes(b"unsupported ELF or executable format")
             }
             ProcessPlanFailure::DynamicLoaderNotFound(path) => {
                 crate::serial_write_bytes(b"dynamic loader not found: ");
-                crate::serial_write_bytes(path);
+                crate::serial_write_bytes(path.bytes());
             }
             ProcessPlanFailure::DynamicLoaderNotExecutable(path) => {
                 crate::serial_write_bytes(b"dynamic loader is not executable: ");
-                crate::serial_write_bytes(path);
+                crate::serial_write_bytes(path.bytes());
             }
             ProcessPlanFailure::UnsupportedLoadLayout => {
                 crate::serial_write_bytes(b"unsupported ELF load layout")
@@ -557,7 +563,7 @@ pub(crate) fn run_linux_init(init: &[u8]) -> LinuxProcessOutcome {
         let stack_page = Frame::leased(stack_frame)?;
         let mut stack = [0; PAGE_SIZE];
         stack_page.read_bytes(0, &mut stack);
-        let arguments = crate::published_rootfs::launch_arguments(init)?;
+        let arguments = program.as_ref()?.launch_arguments(init);
         let random = cpu::linux_startup_random()?;
         let stack_offset = linox_initial_stack::build(
             &mut stack,

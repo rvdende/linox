@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -5,8 +7,9 @@ use linox_image_store::{Digest, ImageStore, ObjectBackend, StagingHandle, StoreE
 
 use crate::{
     owned_state::OwnedState,
+    published_rootfs::PublishedImage,
     sync::{LockRank, SpinLock},
-    trusted::image::{BootImage, PublishedImage},
+    trusted::image::BootImage,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -31,8 +34,9 @@ struct ImageStoreOwner {
     /// system-call level.
     store: SpinLock<Option<Store>>,
     /// The unpacked root filesystem images domains have installed, and
-    /// which image each domain slot uses. A leaf: images are freed after it
-    /// is released.
+    /// which image each domain slot uses. A leaf: no image reference is
+    /// dropped under it (the last one frees the image), only after it is
+    /// released.
     rootfs_images: SpinLock<RootfsImages>,
     /// The all-Rust root filesystem carried in the boot image (a gzip'd
     /// POSIX tar) for `image=builtin://rust`.
@@ -40,6 +44,8 @@ struct ImageStoreOwner {
 }
 
 /// A published root filesystem image and how many domain slots use it.
+/// The backing holds one reference to the image; each slot's publication
+/// and whatever entries and programs were read from it hold others.
 struct Backing {
     image: PublishedImage,
     references: usize,
@@ -62,17 +68,6 @@ static IMAGE_STORE: ImageStoreOwner = ImageStoreOwner {
     ),
     builtin_rootfs: OwnedState::empty(),
 };
-
-/// Frees a root filesystem image no domain uses.
-fn retire(image: PublishedImage) {
-    // SAFETY: every caller hands over an image that no published root
-    // filesystem refers to: either its publication failed before any view
-    // of it was handed out, or it was uninstalled from the last domain
-    // slot that used it, which happens when that domain is torn down,
-    // after its processes (the holders of entries borrowed from it) are
-    // gone.
-    unsafe { image.retire() }
-}
 
 /// The image reference that selects the boot image's Rust root filesystem.
 pub(crate) const BUILTIN_RUST_IMAGE: &[u8] = b"builtin://rust";
@@ -366,22 +361,21 @@ pub(crate) fn install_published_layers(slot: usize, unpack_limit_bytes: usize) -
         }
         output[rootfs_length..rootfs_end].fill(0);
         output.truncate(rootfs_end);
+        // On failure the image is dropped (freed) here, under the store lock
+        // only, which allows allocation.
         let image = PublishedImage::publish(output);
-        if !crate::published_rootfs::install_published_rootfs(slot, image.bytes()) {
+        if !crate::published_rootfs::install_published_rootfs(slot, image.clone()) {
             crate::serial_write_bytes(b"linox: OCI rootfs publication failed\r\n");
-            retire(image);
             return false;
         }
         for digest in &digests[..layer_count] {
             if store.objects.remove(*digest).is_err() {
                 let _ = crate::published_rootfs::uninstall_published_rootfs(slot);
-                retire(image);
                 return false;
             }
         }
-        if let Err(image) = register_rootfs_backing(slot, image) {
+        if register_rootfs_backing(slot, image).is_err() {
             let _ = crate::published_rootfs::uninstall_published_rootfs(slot);
-            retire(image);
             return false;
         }
         store.published_layers[..layer_count].fill(Digest([0; 32]));
@@ -446,22 +440,19 @@ pub(crate) fn install_cached_rootfs(slot: usize, image: Vec<u8>) -> bool {
         return false;
     }
     let image = PublishedImage::publish(image);
-    if !crate::published_rootfs::install_published_rootfs(slot, image.bytes()) {
-        retire(image);
+    if !crate::published_rootfs::install_published_rootfs(slot, image.clone()) {
         return false;
     }
-    match register_rootfs_backing(slot, image) {
-        Ok(()) => true,
-        Err(image) => {
-            let _ = crate::published_rootfs::uninstall_published_rootfs(slot);
-            retire(image);
-            false
-        }
+    if register_rootfs_backing(slot, image).is_err() {
+        let _ = crate::published_rootfs::uninstall_published_rootfs(slot);
+        return false;
     }
+    true
 }
 
 /// Records `image` as the backing of slot `slot`'s root filesystem, or
-/// hands it back if there is no free backing.
+/// hands it back if there is no free backing (so it is not dropped under
+/// the lock).
 fn register_rootfs_backing(slot: usize, image: PublishedImage) -> Result<(), PublishedImage> {
     let mut images = IMAGE_STORE.rootfs_images.lock();
     let Some(backing) = images.backings.iter().position(Option::is_none) else {
@@ -486,16 +477,18 @@ pub(crate) fn share_installed_rootfs(source: usize, target: usize) -> bool {
     {
         return false;
     }
-    let Some((backing, bytes)) = ({
+    // Cloning the reference under the lock only counts it; it is dropped
+    // (if installing fails) after the lock is released.
+    let Some((backing, image)) = ({
         let images = IMAGE_STORE.rootfs_images.lock();
         images.owners[source].and_then(|backing| {
             let image = images.backings[backing].as_ref()?;
-            Some((backing, image.image.bytes()))
+            Some((backing, image.image.clone()))
         })
     }) else {
         return false;
     };
-    if !crate::published_rootfs::install_published_rootfs(target, bytes) {
+    if !crate::published_rootfs::install_published_rootfs(target, image) {
         return false;
     }
     let shared = {
@@ -517,10 +510,12 @@ pub(crate) fn share_installed_rootfs(source: usize, target: usize) -> bool {
     shared
 }
 
-pub(crate) fn installed_rootfs(slot: usize) -> Option<&'static [u8]> {
+/// Slot `slot`'s root filesystem image. The caller drops the reference
+/// outside the image store's locks.
+pub(crate) fn installed_rootfs(slot: usize) -> Option<PublishedImage> {
     let images = IMAGE_STORE.rootfs_images.lock();
     let backing = (*images.owners.get(slot)?)?;
-    Some(images.backings[backing].as_ref()?.image.bytes())
+    Some(images.backings[backing].as_ref()?.image.clone())
 }
 
 pub(crate) fn uninstall_rootfs(slot: usize) -> bool {
@@ -543,9 +538,10 @@ pub(crate) fn uninstall_rootfs(slot: usize) -> bool {
         }
         images.backings[backing].take()
     };
-    if let Some(released) = released {
-        retire(released.image);
-    }
+    // The backing's reference goes after the lock is released; the image
+    // is freed with it unless an entry or a program read from it is still
+    // held, and then with the last of those.
+    drop(released);
     true
 }
 

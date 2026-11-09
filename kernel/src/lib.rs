@@ -27,7 +27,6 @@ mod drivers;
 mod executable;
 mod framebuffer;
 mod heap;
-#[allow(unsafe_code)]
 mod image_store;
 mod initramfs;
 mod ipc;
@@ -4824,8 +4823,9 @@ fn restore_cached_oci_layers(
             };
             if let Some(source) = (0..control_abi::DOMAIN_LIMIT).find(|source| {
                 *source != slot
-                    && image_store::installed_rootfs(*source).is_some_and(|bytes| {
-                        bytes.len() == length && crypto::sha256(bytes) == rootfs.digest
+                    && image_store::installed_rootfs(*source).is_some_and(|image| {
+                        image.bytes().len() == length
+                            && crypto::sha256(image.bytes()) == rootfs.digest
                     })
             }) {
                 return Some(if image_store::share_installed_rootfs(source, slot) {
@@ -4991,7 +4991,8 @@ fn persist_oci_rootfs(
     encoded: &mut [u8; linox_oci_cache::ENCODED_SIZE],
     slot: usize,
 ) -> Option<(u64, bool)> {
-    let rootfs = image_store::installed_rootfs(slot)?;
+    let image = image_store::installed_rootfs(slot)?;
+    let rootfs = image.bytes();
     let length = u64::try_from(rootfs.len()).ok()?;
     with_runtime_volume(device, mapping, iommu_profile, |backend| {
         let mut catalog = match volume::recover_oci_catalog(backend, encoded) {

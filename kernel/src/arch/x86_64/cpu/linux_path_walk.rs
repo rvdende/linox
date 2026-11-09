@@ -133,8 +133,8 @@ pub(super) fn linux_readlink_at(
             }
             let output_length = usize::try_from(output_size)
                 .unwrap_or(usize::MAX)
-                .min(entry.link.len());
-            return if copy_to_linux_user(output_address, &entry.link[..output_length]) {
+                .min(entry.link().len());
+            return if copy_to_linux_user(output_address, &entry.link()[..output_length]) {
                 output_length as u64
             } else {
                 LINUX_EFAULT
@@ -593,7 +593,7 @@ pub(super) fn linux_relative_path_kind(directory: u64, path: &[u8]) -> Result<Op
 pub(super) fn linux_rootfs_path_at(
     directory: u64,
     path: &[u8],
-) -> Option<(u16, Option<crate::published_rootfs::Entry<'static>>)> {
+) -> Option<(u16, Option<crate::published_rootfs::Entry>)> {
     if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return None;
     }
@@ -624,7 +624,7 @@ fn linux_rootfs_bound_lookup(
     directory: u64,
     path: &[u8],
     metadata: bool,
-) -> Option<(u16, Option<crate::published_rootfs::Entry<'static>>)> {
+) -> Option<(u16, Option<crate::published_rootfs::Entry>)> {
     if !crate::linux_mount_paths::root_bound() || path.is_empty() {
         return None;
     }
@@ -1471,7 +1471,7 @@ pub(super) fn linux_overlay_parent_exists(path: &[u8]) -> bool {
 pub(super) fn linux_rootfs_metadata_path_at(
     directory: u64,
     path: &[u8],
-) -> Option<(u16, Option<crate::published_rootfs::Entry<'static>>)> {
+) -> Option<(u16, Option<crate::published_rootfs::Entry>)> {
     if !X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         return None;
     }
@@ -1509,9 +1509,7 @@ pub(super) fn linux_rootfs_descriptor(descriptor: u64) -> u16 {
         .unwrap_or(0)
 }
 
-pub(super) fn linux_rootfs_entry(
-    descriptor: u64,
-) -> Option<crate::published_rootfs::Entry<'static>> {
+pub(super) fn linux_rootfs_entry(descriptor: u64) -> Option<crate::published_rootfs::Entry> {
     crate::published_rootfs::entry(linux_rootfs_descriptor(descriptor))
 }
 
@@ -1519,7 +1517,7 @@ pub(super) fn linux_rootfs_inode(handle: u16) -> u64 {
     1024 + u64::from(handle)
 }
 
-pub(super) fn linux_rootfs_mode(entry: crate::published_rootfs::Entry<'_>) -> u32 {
+pub(super) fn linux_rootfs_mode(entry: &crate::published_rootfs::Entry) -> u32 {
     let kind = match entry.kind {
         crate::published_rootfs::EntryKind::File => 0o100000,
         crate::published_rootfs::EntryKind::Hardlink => 0o100000,
@@ -1537,15 +1535,16 @@ pub(super) const LINUX_ROOT_FILESYSTEM_DEVICE: u32 = crate::linux_mount_paths::R
 
 pub(super) fn linux_rootfs_stat(
     handle: u16,
-    entry: Option<crate::published_rootfs::Entry<'_>>,
+    entry: Option<crate::published_rootfs::Entry>,
 ) -> [u8; LINUX_STAT_SIZE] {
+    let entry = entry.as_ref();
     let mode = entry.map_or(LINUX_STAT_DIRECTORY_MODE, linux_rootfs_mode);
     let mut stat = linux_stat(mode, linux_rootfs_inode(handle));
     stat[0..8].copy_from_slice(&u64::from(LINUX_ROOT_FILESYSTEM_DEVICE).to_ne_bytes());
     let (owner, group) = entry.map_or((0, 0), |entry| (entry.owner, entry.group));
     stat[28..32].copy_from_slice(&owner.to_ne_bytes());
     stat[32..36].copy_from_slice(&group.to_ne_bytes());
-    let size = entry.map_or(0, |entry| entry.data.len() as u64);
+    let size = entry.map_or(0, |entry| entry.data().len() as u64);
     stat[48..56].copy_from_slice(&size.to_ne_bytes());
     stat[64..72].copy_from_slice(&size.div_ceil(512).to_ne_bytes());
     stat

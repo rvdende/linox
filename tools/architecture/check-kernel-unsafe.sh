@@ -9,16 +9,16 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 133 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 133 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 130 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 130 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > -30 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -30 to ${undocumented}" >&2
+if (( undocumented > -29 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -29 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -31,7 +31,6 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "image_store.rs 1"
     "lib.rs 0"
     "trusted/ap_start.rs 1"
     "trusted/boot.rs 9"
@@ -45,7 +44,7 @@ per_file_limits=(
     "trusted/frame.rs 9"
     "trusted/frame_tables.rs 2"
     "trusted/heap.rs 7"
-    "trusted/image.rs 9"
+    "trusted/image.rs 5"
     "trusted/interrupts.rs 8"
     "trusted/lock.rs 3"
     "trusted/mmio.rs 2"
@@ -125,6 +124,7 @@ forbidding_files=(
     "drivers/usb_input.rs"
     "drivers/virtio_gpu.rs"
     "drivers/xhci.rs"
+    "image_store.rs"
     "framebuffer.rs"
     "heap.rs"
     "initramfs.rs"
@@ -163,8 +163,8 @@ if ! rg -q '^#!\[deny\(unsafe_code\)\]$' "${kernel_source}/lib.rs"; then
     exit 1
 fi
 allowed_modules="$(rg -c -U '#\[allow\(unsafe_code\)\]\n(pub(\([^)]*\))? )?mod ' "${kernel_source}/lib.rs" || true)"
-if (( ${allowed_modules:-0} > 2 )); then
-    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 2" >&2
+if (( ${allowed_modules:-0} > 1 )); then
+    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 1" >&2
     exit 1
 fi
 if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${allowed_modules:-0} )); then

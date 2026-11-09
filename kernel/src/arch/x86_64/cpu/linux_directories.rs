@@ -478,7 +478,7 @@ pub(super) fn linux_merged_directory_empty(path: &[u8]) -> bool {
     let mut cursor = 0;
     while let Some(Some(child)) = crate::published_rootfs::next_child(lower, cursor) {
         let mut child_path = [0_u8; crate::linux_overlay::PATH_CAPACITY];
-        if linux_child_path(path, child.name, &mut child_path).is_some_and(|child_path| {
+        if linux_child_path(path, child.name(), &mut child_path).is_some_and(|child_path| {
             crate::linux_overlay::lookup(child_path).is_none()
                 && crate::linux_overlay::image_path(child_path).is_some()
         }) {
@@ -616,7 +616,7 @@ fn linux_getdents_entries(descriptor: u64, address: u64, count: u64, legacy: boo
                         break;
                     };
                     let mut child_path = [0_u8; crate::linux_overlay::PATH_CAPACITY];
-                    let shown = linux_child_path(directory_path, child.name, &mut child_path)
+                    let shown = linux_child_path(directory_path, child.name(), &mut child_path)
                         .is_some_and(|child_path| {
                             crate::linux_overlay::lookup(child_path).is_none()
                                 && crate::linux_overlay::image_path(child_path).is_some()
@@ -638,7 +638,7 @@ fn linux_getdents_entries(descriptor: u64, address: u64, count: u64, legacy: boo
                             linux_rootfs_inode(child.handle),
                             next,
                             kind,
-                            child.name,
+                            child.name(),
                         )
                     {
                         full = true;

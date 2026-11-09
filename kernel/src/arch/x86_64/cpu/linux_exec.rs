@@ -961,10 +961,13 @@ fn linux_rootfs_execve_source(
             }
             _ => path,
         };
-    let plan_at = |base| match overlay_bytes {
-        Some(image) => crate::published_rootfs::process_plan_for_image(image, base),
-        None => crate::published_rootfs::process_plan_at(image_path, base),
+    // The program holds the root filesystem image its plan and launch
+    // arguments borrow, until this exec is done with them.
+    let program = match overlay_bytes {
+        Some(image) => crate::published_rootfs::program_for_image(image),
+        None => crate::published_rootfs::program(image_path),
     };
+    let plan_at = |base| program.as_ref().and_then(|program| program.plan(base));
     // A program loads low, below the heap, when it fits there. Larger
     // position-independent programs such as cargo load high instead; a
     // fixed-address one that does not fit is refused before anything about
@@ -1042,13 +1045,15 @@ fn linux_rootfs_execve_source(
             | ProcessPlanFailure::UnsupportedLoadLayout => LINUX_ENOEXEC,
         };
     };
-    let launch_arguments = match overlay_bytes {
-        Some(image) => Some(crate::published_rootfs::launch_arguments_for_image(
-            path, image,
-        )),
-        None => crate::published_rootfs::launch_arguments(image_path),
+    let init = if overlay_bytes.is_some() {
+        path
+    } else {
+        image_path
     };
-    let Some(launch_arguments) = launch_arguments else {
+    let Some(launch_arguments) = program
+        .as_ref()
+        .map(|program| program.launch_arguments(init))
+    else {
         return LINUX_ENOEXEC;
     };
     let startup = plan.startup();

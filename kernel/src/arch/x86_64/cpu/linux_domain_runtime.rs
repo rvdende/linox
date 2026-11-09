@@ -670,7 +670,7 @@ fn prepare_linux_system_domain(init: &[u8]) -> bool {
                 .and_then(|(_, entry)| entry)
                 .is_some_and(|entry| {
                     entry.kind == crate::published_rootfs::EntryKind::Symlink
-                        && entry.link == b"/dev/null"
+                        && entry.link() == b"/dev/null"
                 });
         if masked && !crate::linux_overlay::whiteout(path) {
             return false;

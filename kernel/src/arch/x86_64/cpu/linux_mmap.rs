@@ -949,9 +949,12 @@ pub(super) fn linux_runtime_mmap(
             None
         } else {
             let rootfs_entry = linux_rootfs_entry(fd);
+            // An image file's address keys its pages in the file cache.
+            let rootfs_file = rootfs_entry
+                .as_ref()
+                .map(|entry| entry.data().as_ptr() as u64);
             let Some(file) = rootfs_entry
-                .map(|entry| entry.data)
-                .map(RegularFile::Fixed)
+                .map(RegularFile::Rootfs)
                 .or_else(|| linux_regular_file_contents(state))
             else {
                 return if linux_descriptor_open(fd) {
@@ -982,7 +985,7 @@ pub(super) fn linux_runtime_mmap(
                 }
                 return LINUX_EINVAL;
             }
-            immutable_rootfs_file = rootfs_entry.map(|entry| entry.data);
+            immutable_rootfs_file = rootfs_file;
             file_size = Some(file.len());
             Some((file, start))
         }
@@ -1048,7 +1051,7 @@ pub(super) fn linux_runtime_mmap(
                 .filter(|_| sharing == LINUX_MAP_PRIVATE && protection & LINUX_PROT_WRITE == 0)
                 .and_then(|file| {
                     let page_offset = page.checked_mul(PAGE_SIZE)? as u64;
-                    Some((file.as_ptr() as u64, offset.checked_add(page_offset)?))
+                    Some((file, offset.checked_add(page_offset)?))
                 });
             let cached = cache_source.and_then(|(source_base, source_offset)| {
                 crate::linux_file_cache::lookup(source_base, source_offset)
@@ -2347,7 +2350,7 @@ pub(super) fn linux_cachestat(
     {
         metadata.size as u64
     } else if let Some(entry) = linux_rootfs_entry(descriptor) {
-        entry.data.len() as u64
+        entry.data().len() as u64
     } else {
         return LINUX_EBADF;
     };
@@ -2469,8 +2472,7 @@ pub(super) fn linux_mmap(
             }
             let state = linux_device_descriptor(fd);
             let Some(file) = linux_rootfs_entry(fd)
-                .map(|entry| entry.data)
-                .map(RegularFile::Fixed)
+                .map(RegularFile::Rootfs)
                 .or_else(|| linux_regular_file_contents(state))
             else {
                 return if linux_descriptor_open(fd) {
