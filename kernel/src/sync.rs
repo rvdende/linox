@@ -173,6 +173,15 @@ impl LockRank {
     /// whatever lock a system call holds, so it ranks above every such
     /// lock (all below the heap), below the frame allocator.
     pub(crate) const FILE_CACHE: Self = Self(196);
+    /// Each domain slot's published root filesystem (`published_rootfs`):
+    /// a leaf held only to clone, take or put a reference. Path walks ask
+    /// it under the mount, overlay and volume tables, so it ranks above
+    /// them, below the frame allocator.
+    pub(crate) const PUBLISHED_ROOTFS: Self = Self(197);
+    /// The unpacked root filesystem images and the slots that use them
+    /// (`image_store`): a leaf, taken after the image store and the
+    /// published root filesystems; images are freed after it is released.
+    pub(crate) const ROOTFS_IMAGES: Self = Self(198);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);

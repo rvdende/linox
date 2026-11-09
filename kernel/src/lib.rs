@@ -94,7 +94,9 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
-use trusted::{firmware, frame::Frame, mmio::Mmio, pixels::PixelBuffer, port::Port8};
+use trusted::{
+    firmware, frame::Frame, image::BootImage, mmio::Mmio, pixels::PixelBuffer, port::Port8,
+};
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
@@ -369,7 +371,20 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     if boot_info.image_base.is_null() || image_end >= arch::x86_64::paging::INITIAL_IDENTITY_LIMIT {
         kernel_fail("linox: loaded EFI image is outside the identity map\r\n");
     }
-    let Some(image) = pe::inspect(boot_info.image_base, boot_info.image_size) else {
+    // The loader's handoff images, as byte slices for the kernel's
+    // lifetime (trusted::image::BootImage); each is checked further below.
+    let loaded_image = BootImage::from_loader(boot_info.image_base, boot_info.image_size);
+    let manifest_image = BootImage::from_loader(boot_info.manifest, boot_info.manifest_size);
+    let bundle_image = BootImage::from_loader(
+        boot_info.control_plane_bundle,
+        boot_info.control_plane_bundle_size,
+    );
+    let controller_image = BootImage::from_loader(
+        boot_info.controller_runtime,
+        boot_info.controller_runtime_size,
+    );
+    let root_image_bytes = BootImage::from_loader(boot_info.root_image, boot_info.root_image_size);
+    let Some(image) = loaded_image.and_then(|loaded| pe::inspect(loaded.bytes())) else {
         kernel_fail("linox: invalid loaded EFI PE image\r\n");
     };
     serial_write("linox: versioned boot handoff accepted\r\n");
@@ -381,13 +396,13 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write_usize(image.writable_sections);
     serial_write("\r\n");
     serial_write("linox: ACPI root pointer validated\r\n");
-    let Some(boot_manifest) = manifest::Manifest::parse_and_verify(
-        boot_info.manifest,
-        boot_info.manifest_size,
-        &boot_info.manifest_sha256,
-        &boot_info.manifest_signature,
-        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-    ) else {
+    let Some(boot_manifest) = manifest_image.and_then(|image| {
+        manifest::Manifest::parse_and_verify(
+            image.bytes(),
+            &boot_info.manifest_sha256,
+            &boot_info.manifest_signature,
+        )
+    }) else {
         kernel_fail("linox: invalid measured boot manifest\r\n");
     };
     serial_write("linox: signed boot manifest accepted\r\nlinox: manifest sequence: ");
@@ -395,47 +410,29 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     serial_write("\r\nlinox: manifest authority grants: ");
     serial_write_usize(boot_manifest.grant_count());
     serial_write("\r\n");
-    if !manifest::verify_signature_rejection(
-        boot_info.manifest,
-        boot_info.manifest_size,
-        &boot_info.manifest_signature,
-    ) {
+    if !manifest_image.is_some_and(|image| {
+        manifest::verify_signature_rejection(image.bytes(), &boot_info.manifest_signature)
+    }) {
         kernel_fail("linox: invalid manifest signature was accepted\r\n");
     }
     serial_write("linox: manifest signature rejection verified\r\n");
-    if !manifest::verify_parser_rejections(boot_info.manifest, boot_info.manifest_size) {
+    if !manifest_image.is_some_and(|image| manifest::verify_parser_rejections(image.bytes())) {
         kernel_fail("linox: malformed manifest parser test failed\r\n");
     }
     serial_write("linox: malformed boot manifests rejected\r\n");
-    if !boot_manifest.bundle_matches(
-        boot_info.control_plane_bundle,
-        boot_info.control_plane_bundle_size,
-        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-    ) {
+    if !bundle_image.is_some_and(|image| boot_manifest.bundle_matches(image.bytes())) {
         kernel_fail("linox: control-plane bundle measurement failed\r\n");
     }
     serial_write("linox: control-plane bundle measurement accepted\r\n");
-    if !boot_manifest.controller_matches(
-        boot_info.controller_runtime,
-        boot_info.controller_runtime_size,
-        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-    ) {
+    if !controller_image.is_some_and(|image| boot_manifest.controller_matches(image.bytes())) {
         kernel_fail("linox: controller runtime measurement failed\r\n");
     }
     serial_write("linox: embedded controller runtime measurement accepted\r\n");
-    if !boot_manifest.root_matches(
-        boot_info.root_image,
-        boot_info.root_image_size,
-        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-    ) {
+    if !root_image_bytes.is_some_and(|image| boot_manifest.root_matches(image.bytes())) {
         kernel_fail("linox: root-image measurement failed\r\n");
     }
     serial_write("linox: root-image measurement accepted\r\n");
-    if !boot_manifest.verify_root_rejection(
-        boot_info.root_image,
-        boot_info.root_image_size,
-        arch::x86_64::paging::INITIAL_IDENTITY_LIMIT,
-    ) {
+    if !root_image_bytes.is_some_and(|image| boot_manifest.verify_root_rejection(image.bytes())) {
         kernel_fail("linox: modified root-image measurement accepted\r\n");
     }
     serial_write("linox: root-image measurement rejection verified\r\n");
@@ -449,10 +446,11 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             && start
                 .checked_add(boot_info.oci_rootfs_size)
                 .is_some_and(|end| end <= image_start + boot_info.image_size);
-        if !inside_image {
+        let builtin = BootImage::from_loader(boot_info.oci_rootfs, boot_info.oci_rootfs_size);
+        let Some(builtin) = builtin.filter(|_| inside_image) else {
             kernel_fail("linox: boot-embedded root filesystem lies outside the boot image\r\n");
-        }
-        image_store::set_builtin_rootfs(start as u64, boot_info.oci_rootfs_size);
+        };
+        image_store::set_builtin_rootfs(builtin);
         serial_write("linox: builtin Rust root filesystem available (");
         serial_write_usize(boot_info.oci_rootfs_size);
         serial_write(" bytes)\r\n");
@@ -4942,30 +4940,11 @@ fn restore_cached_oci_layers(
                     OciCacheRestore::Invalid
                 });
             }
-            let page_count = length.div_ceil(4096);
-            let Some((first_frame, allocated)) =
-                memory::allocate_contiguous_extent(memory::FrameOwner::KERNEL, page_count)
-            else {
+            // Whole pages, so the last sector read stays inside the buffer.
+            let Some(mut output) = image_store::zeroed_image(length.div_ceil(4096) * 4096) else {
                 return Some(OciCacheRestore::Invalid);
             };
-            let Some(address) = first_frame.direct_map_address() else {
-                let _ = memory::scrub_and_release_contiguous_extent(
-                    memory::FrameOwner::KERNEL,
-                    first_frame,
-                    allocated,
-                );
-                return Some(OciCacheRestore::Invalid);
-            };
-            let output = unsafe {
-                core::slice::from_raw_parts_mut(address as *mut u8, allocated.saturating_mul(4096))
-            };
-            output.fill(0);
             let Ok(start_sector) = usize::try_from(rootfs.start_sector) else {
-                let _ = memory::scrub_and_release_contiguous_extent(
-                    memory::FrameOwner::KERNEL,
-                    first_frame,
-                    allocated,
-                );
                 return Some(OciCacheRestore::Invalid);
             };
             let mut offset = 0_usize;
@@ -4984,14 +4963,10 @@ fn restore_cached_oci_layers(
                 offset += copied;
             }
             valid &= crate::crypto::sha256(&output[..length]) == rootfs.digest;
-            if valid && image_store::install_cached_rootfs(slot, first_frame, allocated, length) {
+            output.truncate(length);
+            if valid && image_store::install_cached_rootfs(slot, output) {
                 return Some(OciCacheRestore::RootfsHit);
             }
-            let _ = memory::scrub_and_release_contiguous_extent(
-                memory::FrameOwner::KERNEL,
-                first_frame,
-                allocated,
-            );
             return Some(OciCacheRestore::Invalid);
         }
         let mut layers = [linox_oci_cache::Layer::EMPTY; linox_oci_cache::LAYER_LIMIT];

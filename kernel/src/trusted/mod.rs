@@ -21,6 +21,8 @@
 //! - [`mmio`]: a window of one device's memory-mapped registers.
 //! - [`msr`]: the model-specific registers the kernel uses outside the CPU
 //!   core.
+//! - [`image`]: the boot loader's handoff images and published root
+//!   filesystem images, read in place as `'static` byte slices.
 //!
 //! Each module says who may construct its types; the constructors from a
 //! bare physical address are confined to the memory layer by
@@ -32,6 +34,7 @@ pub(crate) mod dma;
 pub(crate) mod firmware;
 pub(crate) mod frame;
 pub(crate) mod frame_tables;
+pub(crate) mod image;
 pub(crate) mod mmio;
 pub(crate) mod msr;
 pub(crate) mod page_table;

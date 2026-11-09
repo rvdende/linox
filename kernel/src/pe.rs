@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 const DOS_MAGIC: u16 = 0x5a4d;
 const PE_SIGNATURE: u32 = 0x0000_4550;
 const AMD64_MACHINE: u16 = 0x8664;
@@ -37,29 +39,32 @@ impl ImageSummary {
     }
 }
 
-pub(crate) fn inspect(base: *const u8, mapped_size: usize) -> Option<ImageSummary> {
-    if base.is_null() || mapped_size < 64 || read_u16(base, mapped_size, 0)? != DOS_MAGIC {
+/// Summarizes the loaded PE32+ image `image` (its mapped bytes, starting
+/// at its load address).
+pub(crate) fn inspect(image: &[u8]) -> Option<ImageSummary> {
+    let (base, mapped_size) = (image.as_ptr(), image.len());
+    if mapped_size < 64 || read_u16(image, 0)? != DOS_MAGIC {
         return None;
     }
-    let pe_offset = read_u32(base, mapped_size, 0x3c)? as usize;
-    if read_u32(base, mapped_size, pe_offset)? != PE_SIGNATURE {
+    let pe_offset = read_u32(image, 0x3c)? as usize;
+    if read_u32(image, pe_offset)? != PE_SIGNATURE {
         return None;
     }
     let coff = pe_offset.checked_add(4)?;
-    if read_u16(base, mapped_size, coff)? != AMD64_MACHINE {
+    if read_u16(image, coff)? != AMD64_MACHINE {
         return None;
     }
-    let sections = read_u16(base, mapped_size, coff + 2)? as usize;
-    let optional_size = read_u16(base, mapped_size, coff + 16)? as usize;
+    let sections = read_u16(image, coff + 2)? as usize;
+    let optional_size = read_u16(image, coff + 16)? as usize;
     if sections == 0 || sections > MAX_SECTIONS || optional_size < 64 {
         return None;
     }
     let optional = coff.checked_add(COFF_HEADER_SIZE)?;
-    if read_u16(base, mapped_size, optional)? != PE32_PLUS_MAGIC {
+    if read_u16(image, optional)? != PE32_PLUS_MAGIC {
         return None;
     }
-    let section_alignment = read_u32(base, mapped_size, optional + 32)? as usize;
-    let image_size = read_u32(base, mapped_size, optional + 56)? as usize;
+    let section_alignment = read_u32(image, optional + 32)? as usize;
+    let image_size = read_u32(image, optional + 56)? as usize;
     if section_alignment < 4096
         || !section_alignment.is_power_of_two()
         || !(base as usize).is_multiple_of(PAGE_SIZE)
@@ -84,9 +89,9 @@ pub(crate) fn inspect(base: *const u8, mapped_size: usize) -> Option<ImageSummar
     let mut section_ranges = [(0_usize, 0_usize); MAX_SECTIONS];
     for index in 0..sections {
         let section = section_table.checked_add(index.checked_mul(SECTION_HEADER_SIZE)?)?;
-        let virtual_size = read_u32(base, mapped_size, section + 8)? as usize;
-        let virtual_address = read_u32(base, mapped_size, section + 12)? as usize;
-        let characteristics = read_u32(base, mapped_size, section + 36)?;
+        let virtual_size = read_u32(image, section + 8)? as usize;
+        let virtual_address = read_u32(image, section + 12)? as usize;
+        let characteristics = read_u32(image, section + 36)?;
         if virtual_size != 0
             && (!virtual_address.is_multiple_of(section_alignment)
                 || virtual_address
@@ -153,8 +158,8 @@ pub fn rebase_loaded_image(image: &mut [u8], delta: u64) -> Option<()> {
     for apply in [false, true] {
         let mut block = relocations;
         while block < relocations + relocations_size {
-            let page = read_u32(image.as_ptr(), image_size, block)? as usize;
-            let block_size = read_u32(image.as_ptr(), image_size, block + 4)? as usize;
+            let page = read_u32(&image[..image_size], block)? as usize;
+            let block_size = read_u32(&image[..image_size], block + 4)? as usize;
             let block_end = block.checked_add(block_size)?;
             if block_size < 8
                 || !block_size.is_multiple_of(2)
@@ -163,7 +168,7 @@ pub fn rebase_loaded_image(image: &mut [u8], delta: u64) -> Option<()> {
                 return None;
             }
             for entry in (block + 8..block_end).step_by(2) {
-                let entry = read_u16(image.as_ptr(), image_size, entry)?;
+                let entry = read_u16(&image[..image_size], entry)?;
                 let target = page.checked_add(usize::from(entry & 0x0fff))?;
                 match entry >> 12 {
                     IMAGE_REL_BASED_ABSOLUTE => {}
@@ -189,28 +194,28 @@ pub fn rebase_loaded_image(image: &mut [u8], delta: u64) -> Option<()> {
 }
 
 fn relocation_directory(image: &[u8]) -> Option<(usize, usize, usize, usize)> {
-    let (base, size) = (image.as_ptr(), image.len());
-    if size < 64 || read_u16(base, size, 0)? != DOS_MAGIC {
+    let size = image.len();
+    if size < 64 || read_u16(image, 0)? != DOS_MAGIC {
         return None;
     }
-    let pe_offset = read_u32(base, size, 0x3c)? as usize;
-    if read_u32(base, size, pe_offset)? != PE_SIGNATURE {
+    let pe_offset = read_u32(image, 0x3c)? as usize;
+    if read_u32(image, pe_offset)? != PE_SIGNATURE {
         return None;
     }
     let coff = pe_offset.checked_add(4)?;
-    let optional_size = read_u16(base, size, coff.checked_add(16)?)? as usize;
+    let optional_size = read_u16(image, coff.checked_add(16)?)? as usize;
     let optional = coff.checked_add(COFF_HEADER_SIZE)?;
     let directory = optional.checked_add(112 + BASE_RELOCATION_DIRECTORY * 8)?;
-    if read_u16(base, size, coff)? != AMD64_MACHINE
-        || read_u16(base, size, optional)? != PE32_PLUS_MAGIC
+    if read_u16(image, coff)? != AMD64_MACHINE
+        || read_u16(image, optional)? != PE32_PLUS_MAGIC
         || optional_size < 112 + (BASE_RELOCATION_DIRECTORY + 1) * 8
-        || read_u32(base, size, optional + 108)? as usize <= BASE_RELOCATION_DIRECTORY
+        || read_u32(image, optional + 108)? as usize <= BASE_RELOCATION_DIRECTORY
     {
         return None;
     }
-    let image_size = read_u32(base, size, optional + 56)? as usize;
-    let relocations = read_u32(base, size, directory)? as usize;
-    let relocations_size = read_u32(base, size, directory + 4)? as usize;
+    let image_size = read_u32(image, optional + 56)? as usize;
+    let relocations = read_u32(image, directory)? as usize;
+    let relocations_size = read_u32(image, directory + 4)? as usize;
     // An image without relocations cannot run anywhere but its link address.
     (image_size <= size
         && relocations_size != 0
@@ -220,14 +225,14 @@ fn relocation_directory(image: &[u8]) -> Option<(usize, usize, usize, usize)> {
     .then_some((optional, image_size, relocations, relocations_size))
 }
 
-fn read_u16(base: *const u8, size: usize, offset: usize) -> Option<u16> {
-    let end = offset.checked_add(2)?;
-    (end <= size).then(|| unsafe { base.add(offset).cast::<u16>().read_unaligned() })
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let field = bytes.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes(field.try_into().ok()?))
 }
 
-fn read_u32(base: *const u8, size: usize, offset: usize) -> Option<u32> {
-    let end = offset.checked_add(4)?;
-    (end <= size).then(|| unsafe { base.add(offset).cast::<u32>().read_unaligned() })
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let field = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes(field.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -267,7 +272,7 @@ mod tests {
     fn adjacent_sections_preserve_summary_and_permissions() {
         let image = image(&[(4096, 4096, SECTION_EXECUTE), (8192, 4096, SECTION_WRITE)]);
         let base = image.0.as_ptr() as usize;
-        let summary = inspect(image.0.as_ptr(), image.0.len()).expect("disjoint sections");
+        let summary = inspect(&image.0).expect("disjoint sections");
         assert_eq!(summary.sections, 2);
         assert_eq!(summary.executable_sections, 1);
         assert_eq!(summary.writable_sections, 1);
@@ -286,7 +291,7 @@ mod tests {
         ] {
             for sections in [[first, second], [second, first]] {
                 let image = image(&sections);
-                assert!(inspect(image.0.as_ptr(), image.0.len()).is_none());
+                assert!(inspect(&image.0).is_none());
             }
         }
     }
@@ -294,13 +299,13 @@ mod tests {
     #[test]
     fn rejects_overlaps_between_read_only_sections() {
         let image = image(&[(4096, 4096, SECTION_EXECUTE), (8192, 4096, 0), (8192, 1, 0)]);
-        assert!(inspect(image.0.as_ptr(), image.0.len()).is_none());
+        assert!(inspect(&image.0).is_none());
     }
 
     #[test]
     fn rejects_overlaps_with_nonadjacent_sections() {
         let image = image(&[(4096, 4096, SECTION_EXECUTE), (8192, 4096, 0), (4096, 1, 0)]);
-        assert!(inspect(image.0.as_ptr(), image.0.len()).is_none());
+        assert!(inspect(&image.0).is_none());
     }
 
     #[test]
@@ -310,7 +315,7 @@ mod tests {
             (4096, 4096, SECTION_EXECUTE),
             (4096, 0, 0),
         ]);
-        assert!(inspect(image.0.as_ptr(), image.0.len()).is_some());
+        assert!(inspect(&image.0).is_some());
     }
 
     #[test]
@@ -321,7 +326,7 @@ mod tests {
             (4096, 4096, SECTION_EXECUTE | SECTION_WRITE),
         ] {
             let image = image(&[section]);
-            assert!(inspect(image.0.as_ptr(), image.0.len()).is_none());
+            assert!(inspect(&image.0).is_none());
         }
     }
 

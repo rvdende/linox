@@ -1,5 +1,8 @@
+#![forbid(unsafe_code)]
+
 use crate::memory;
 use crate::owned_state::OwnedState;
+use crate::trusted::image::ImageFrames;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 const MAGIC: &[u8; 6] = b"070701";
@@ -407,8 +410,10 @@ fn name_offset(bytes: &[u8], wanted: &[u8]) -> Option<usize> {
     header_offset(bytes, wanted)?.checked_add(HEADER_SIZE)
 }
 
+/// The kernel's private copy of the boot archive: `ROOT_FRAME_COUNT`
+/// contiguous kernel frames, the archive at the start and zeros after it.
 struct OwnedRoot {
-    frames: [memory::FrameLease; ROOT_FRAME_COUNT],
+    image: ImageFrames<ROOT_FRAME_COUNT>,
     size: usize,
 }
 
@@ -417,75 +422,36 @@ impl OwnedRoot {
         if bytes.is_empty() || bytes.len() > ROOT_CAPACITY || parse(bytes).is_none() {
             return None;
         }
-        let frames =
-            memory::allocate_contiguous_frames::<ROOT_FRAME_COUNT>(memory::FrameOwner::KERNEL)?;
-        let Some(address) = frames[0].direct_map_address() else {
-            let _ = memory::release_frames(memory::FrameOwner::KERNEL, frames);
-            return None;
-        };
-        if frames.iter().enumerate().any(|(index, frame)| {
-            frame.address() != frames[0].address() + index as u64 * PAGE_SIZE as u64
-                || frame.direct_map_address() != Some(address + index * PAGE_SIZE)
-        }) {
-            let _ = memory::release_frames(memory::FrameOwner::KERNEL, frames);
-            return None;
-        }
-        // SAFETY: the allocator returned a private zeroed frame owned by the
-        // kernel. The source was measured and is disjoint from this new lease.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
-        }
+        let mut image = ImageFrames::allocate()?;
+        // The frames come zeroed; the measured source is a separate image.
+        image.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
         Some(Self {
-            frames,
+            image,
             size: bytes.len(),
         })
     }
 
+    fn frames(&self) -> &[memory::FrameLease; ROOT_FRAME_COUNT] {
+        self.image.frames()
+    }
+
     fn bytes(&self) -> Option<&[u8]> {
-        let address = self.frames[0].direct_map_address()?;
-        // SAFETY: these contiguous leases remain live and kernel-owned for
-        // `self`'s lifetime, and materialization validated their direct map.
-        Some(unsafe { core::slice::from_raw_parts(address as *const u8, self.size) })
+        self.image.bytes().get(..self.size)
     }
 
     fn bytes_mut(&mut self) -> Option<&mut [u8]> {
-        let address = self.frames[0].direct_map_address()?;
-        // SAFETY: `&mut self` uniquely borrows every live frame in the owned
-        // contiguous allocation.
-        Some(unsafe { core::slice::from_raw_parts_mut(address as *mut u8, self.size) })
+        self.image.bytes_mut().get_mut(..self.size)
     }
 
     fn tail_is_zero(&self) -> bool {
-        let Some(address) = self.frames[0].direct_map_address() else {
-            return false;
-        };
-        // SAFETY: the complete contiguous allocation is reachable through its
-        // validated direct-map aliases.
-        unsafe {
-            core::slice::from_raw_parts(
-                (address + self.size) as *const u8,
-                ROOT_CAPACITY - self.size,
-            )
-            .iter()
-            .all(|byte| *byte == 0)
-        }
+        self.image
+            .bytes()
+            .get(self.size..)
+            .is_some_and(|tail| tail.iter().all(|byte| *byte == 0))
     }
 
     fn release(self) -> bool {
-        let Some(address) = self.frames[0].direct_map_address() else {
-            return false;
-        };
-        // SAFETY: the leases are still live, contiguous, and exclusively
-        // kernel-owned.
-        unsafe {
-            core::ptr::write_bytes(address as *mut u8, 0, ROOT_CAPACITY);
-        }
-        let scrubbed = unsafe {
-            core::slice::from_raw_parts(address as *const u8, ROOT_CAPACITY)
-                .iter()
-                .all(|byte| *byte == 0)
-        };
-        scrubbed && memory::release_frames(memory::FrameOwner::KERNEL, self.frames)
+        self.image.release()
     }
 }
 
@@ -493,31 +459,28 @@ pub(crate) fn verify_owned_materialization(source: &[u8]) -> bool {
     let Some(before) = memory::owner_live_frame_count(memory::FrameOwner::KERNEL) else {
         return false;
     };
-    let Some(root) = OwnedRoot::materialize(source) else {
+    let Some(mut root) = OwnedRoot::materialize(source) else {
         return false;
     };
-    let Some(address) = root.frames[0].direct_map_address() else {
-        let _ = root.release();
-        return false;
-    };
+    let address = root.image.bytes().as_ptr() as usize;
     let source_start = source.as_ptr() as usize;
     let source_end = source_start.checked_add(source.len());
     let destination_end = address.checked_add(root.size);
     let disjoint = source_end.is_some_and(|end| end <= address)
         || destination_end.is_some_and(|end| end <= source_start);
     let exact = root.bytes() == Some(source);
-    let owned = memory::frames_owned_by(memory::FrameOwner::KERNEL, &root.frames);
+    let owned = memory::frames_owned_by(memory::FrameOwner::KERNEL, root.frames());
     let tail_zero = root.tail_is_zero();
     let source_first = source[0];
-    // SAFETY: this is a deliberate private-copy mutation before publication.
-    unsafe {
-        (address as *mut u8).write(source_first ^ 1);
+    // A deliberate private-copy mutation before publication.
+    if let Some(bytes) = root.bytes_mut() {
+        bytes[0] = source_first ^ 1;
     }
     let independent =
         source[0] == source_first && root.bytes().is_some_and(|bytes| bytes != source);
-    // SAFETY: restore the measured byte before validating and releasing the copy.
-    unsafe {
-        (address as *mut u8).write(source_first);
+    // Restore the measured byte before validating and releasing the copy.
+    if let Some(bytes) = root.bytes_mut() {
+        bytes[0] = source_first;
     }
     let restored = root.bytes() == Some(source);
     let released = root.release();
@@ -665,7 +628,7 @@ pub(crate) fn published_root_is_live() -> bool {
     published_root().is_some_and(|root| {
         root.node_count != 0
             && root.image.tail_is_zero()
-            && memory::frames_owned_by(memory::FrameOwner::KERNEL, &root.image.frames)
+            && memory::frames_owned_by(memory::FrameOwner::KERNEL, root.image.frames())
     })
 }
 
@@ -805,7 +768,7 @@ pub(crate) fn verify_read_only_index(source: &[u8]) -> bool {
     let Some(root) = ReadOnlyRoot::build(image) else {
         return false;
     };
-    let base = root.image.frames[0].direct_map_address();
+    let base = Some(root.image.image.bytes().as_ptr() as usize);
     let init = root.lookup(b"init");
     let valid = root.node_count == 27
         && init.is_some_and(|entry| {

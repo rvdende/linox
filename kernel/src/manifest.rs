@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::crypto;
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -36,25 +38,16 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
+    /// Parses the boot manifest `bytes` (the loader's handoff image) after
+    /// checking its digest and development signature.
     pub(crate) fn parse_and_verify(
-        pointer: *const u8,
-        size: usize,
+        bytes: &[u8],
         expected_digest: &[u8; 32],
         signature: &[u8; 64],
-        mapped_limit: usize,
     ) -> Option<Self> {
-        if pointer.is_null()
-            || !(HEADER_SIZE..=HEADER_SIZE + MAX_GRANTS * GRANT_SIZE).contains(&size)
-        {
+        if !(HEADER_SIZE..=HEADER_SIZE + MAX_GRANTS * GRANT_SIZE).contains(&bytes.len()) {
             return None;
         }
-        let address = pointer as usize;
-        if address >= mapped_limit || address.checked_add(size - 1)? >= mapped_limit {
-            return None;
-        }
-        // SAFETY: BootInfo provides an immutable buffer with `size` bytes. Its
-        // complete mapped range is validated before page-table activation.
-        let bytes = unsafe { core::slice::from_raw_parts(pointer, size) };
         if crypto::sha256(bytes) != *expected_digest
             || !verify_development_signature(bytes, signature)
         {
@@ -75,81 +68,24 @@ impl Manifest {
         &self.grants[..self.grant_count]
     }
 
-    pub(crate) fn bundle_matches(
-        &self,
-        pointer: *const u8,
-        size: usize,
-        mapped_limit: usize,
-    ) -> bool {
-        if pointer.is_null() || size != self.bundle_size {
-            return false;
-        }
-        let address = pointer as usize;
-        if address >= mapped_limit
-            || address
-                .checked_add(size.saturating_sub(1))
-                .is_none_or(|end| end >= mapped_limit)
-        {
-            return false;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(pointer, size) };
-        crypto::sha256(bytes) == self.bundle_sha256
+    pub(crate) fn bundle_matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.bundle_size && crypto::sha256(bytes) == self.bundle_sha256
     }
 
-    pub(crate) fn root_matches(
-        &self,
-        pointer: *const u8,
-        size: usize,
-        mapped_limit: usize,
-    ) -> bool {
-        if pointer.is_null() || size != self.root_size {
-            return false;
-        }
-        let address = pointer as usize;
-        if address >= mapped_limit
-            || address
-                .checked_add(size.saturating_sub(1))
-                .is_none_or(|end| end >= mapped_limit)
-        {
-            return false;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(pointer, size) };
-        crypto::sha256(bytes) == self.root_sha256
+    pub(crate) fn root_matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.root_size && crypto::sha256(bytes) == self.root_sha256
     }
 
-    pub(crate) fn controller_matches(
-        &self,
-        pointer: *const u8,
-        size: usize,
-        mapped_limit: usize,
-    ) -> bool {
-        if pointer.is_null() || size != self.controller_size {
-            return false;
-        }
-        let address = pointer as usize;
-        if address >= mapped_limit
-            || address
-                .checked_add(size.saturating_sub(1))
-                .is_none_or(|end| end >= mapped_limit)
-        {
-            return false;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(pointer, size) };
-        crypto::sha256(bytes) == self.controller_sha256
+    pub(crate) fn controller_matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.controller_size && crypto::sha256(bytes) == self.controller_sha256
     }
 
-    pub(crate) fn verify_root_rejection(
-        &self,
-        pointer: *const u8,
-        size: usize,
-        mapped_limit: usize,
-    ) -> bool {
-        if !self.root_matches(pointer, size, mapped_limit) || size == 0 {
+    pub(crate) fn verify_root_rejection(&self, bytes: &[u8]) -> bool {
+        if !self.root_matches(bytes) || bytes.is_empty() {
             return false;
         }
-        let source = unsafe { core::slice::from_raw_parts(pointer, size) };
-        crypto::sha256_with_byte_xor(source, 0, 1).is_some_and(|digest| digest != self.root_sha256)
-            && !self.root_matches(pointer, size - 1, mapped_limit)
+        crypto::sha256_with_byte_xor(bytes, 0, 1).is_some_and(|digest| digest != self.root_sha256)
+            && !self.root_matches(&bytes[..bytes.len() - 1])
     }
 }
 
@@ -219,12 +155,12 @@ fn parse_canonical(bytes: &[u8]) -> Option<Manifest> {
     })
 }
 
-pub(crate) fn verify_parser_rejections(pointer: *const u8, size: usize) -> bool {
+pub(crate) fn verify_parser_rejections(original: &[u8]) -> bool {
     const MAX_SIZE: usize = HEADER_SIZE + MAX_GRANTS * GRANT_SIZE;
-    if pointer.is_null() || !(HEADER_SIZE + 2 * GRANT_SIZE..=MAX_SIZE).contains(&size) {
+    let size = original.len();
+    if !(HEADER_SIZE + 2 * GRANT_SIZE..=MAX_SIZE).contains(&size) {
         return false;
     }
-    let original = unsafe { core::slice::from_raw_parts(pointer, size) };
     if parse_canonical(original).is_none() || parse_canonical(&original[..size - 1]).is_some() {
         return false;
     }
@@ -258,15 +194,10 @@ pub(crate) fn verify_parser_rejections(pointer: *const u8, size: usize) -> bool 
     parse_canonical(&candidate[..size]).is_none()
 }
 
-pub(crate) fn verify_signature_rejection(
-    pointer: *const u8,
-    size: usize,
-    signature: &[u8; 64],
-) -> bool {
-    if pointer.is_null() || size == 0 {
+pub(crate) fn verify_signature_rejection(bytes: &[u8], signature: &[u8; 64]) -> bool {
+    if bytes.is_empty() {
         return false;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(pointer, size) };
     let mut invalid = *signature;
     invalid[0] ^= 1;
     !verify_development_signature(bytes, &invalid)
