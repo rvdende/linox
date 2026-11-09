@@ -3906,7 +3906,8 @@ pub(crate) fn activate_user_root(root: u64) -> bool {
     {
         return false;
     }
-    crate::trusted::root::load_user_root(&frames) & ADDRESS_MASK == root
+    crate::trusted::root::activate(crate::trusted::root::Root::from(&frames));
+    crate::trusted::root::current() & ADDRESS_MASK == root
 }
 
 /// Set while a fatal kernel exception is being reported, so a fault in the

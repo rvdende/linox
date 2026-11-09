@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 kernel_source="${repo_root}/kernel/src"
@@ -8,8 +9,8 @@ kernel_source="${repo_root}/kernel/src"
 unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 130 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 130 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 128 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 128 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Every unsafe site says why it is sound where it stands: each `unsafe`
@@ -106,9 +107,8 @@ per_file_limits=(
     "trusted/port.rs 8"
     "trusted/programs.rs 1"
     "trusted/random.rs 1"
-    "trusted/root.rs 5"
+    "trusted/root.rs 4"
     "trusted/switch.rs 12"
-    "trusted/take_once.rs 2"
     "trusted/tsc.rs 3"
     "trusted/user_copy.rs 8"
     "trusted/xstate.rs 4"
@@ -123,6 +123,20 @@ for limit in "${per_file_limits[@]}"; do
         exit 1
     fi
 done
+# Each file has one limit, and every file of the trusted core but mod.rs
+# has one: a new trusted module comes with its count.
+limited_files="$(printf '%s\n' "${per_file_limits[@]}" | sed 's/ [0-9]*$//' | sort)"
+if [[ "$limited_files" != "$(sort -u <<<"$limited_files")" ]]; then
+    echo "kernel unsafe check: a file has more than one per-file limit" >&2
+    exit 1
+fi
+unlimited="$(cd "$kernel_source" && find trusted -name '*.rs' ! -name mod.rs | sort \
+    | comm -23 - <(printf '%s\n' "$limited_files"))"
+if [[ -n "$unlimited" ]]; then
+    echo "kernel unsafe check: trusted files without a per-file limit:" >&2
+    echo "$unlimited" >&2
+    exit 1
+fi
 
 # Files moved onto the trusted layer's safe APIs that have no unsafe left
 # keep `#![forbid(unsafe_code)]`, so none can grow an unsafe block again.
@@ -193,12 +207,18 @@ forbidding_files=(
     "memory.rs"
     "owned_state.rs"
     "packet.rs"
+    "pci_config.rs"
     "pe.rs"
     "published_rootfs.rs"
     "scheduler.rs"
     "sync.rs"
     "volume.rs"
 )
+overlap="$(comm -12 <(printf '%s\n' "$limited_files") <(printf '%s\n' "${forbidding_files[@]}" | sort))"
+if [[ -n "$overlap" ]]; then
+    echo "kernel unsafe check: files both forbidding unsafe and given a limit: ${overlap}" >&2
+    exit 1
+fi
 for file in "${forbidding_files[@]}"; do
     if ! rg -q '^#!\[forbid\(unsafe_code\)\]$' "${kernel_source}/${file}"; then
         echo "kernel unsafe check: ${file} must keep #![forbid(unsafe_code)]" >&2
@@ -284,6 +304,31 @@ fi
 # shared (trusted::scratch) is gone and must not come back.
 if [[ -e "${kernel_source}/trusted/scratch.rs" ]] || rg -q -g '*.rs' 'ScratchBuffer' "$kernel_source"; then
     echo "kernel unsafe check: trusted::scratch is gone; generated files own their bytes" >&2
+    exit 1
+fi
+
+# The PCI configuration port pair (trusted::port::pci) is driven only by
+# pci_config.rs, which pairs each register select with its access.
+pci_ports="$(rg -g '*.rs' -l 'port::pci\b' "$kernel_source" \
+    | sed "s|^${kernel_source}/||" \
+    | rg -v '^(pci_config\.rs|trusted/.*)$' || true)"
+if [[ -n "$pci_ports" ]]; then
+    echo "kernel unsafe check: the PCI configuration ports outside pci_config.rs:" >&2
+    echo "$pci_ports" >&2
+    exit 1
+fi
+
+# Statics handed out as &'static mut (trusted::take_once) are gone; large
+# buffers live on the heap.
+if [[ -e "${kernel_source}/trusted/take_once.rs" ]] || rg -q -g '*.rs' 'TakeOnce' "$kernel_source"; then
+    echo "kernel unsafe check: trusted::take_once is gone; large buffers live on the heap" >&2
+    exit 1
+fi
+
+# Process roots are loaded as a trusted::root::Root (root::activate); the
+# separate user-root load is gone.
+if rg -q -g '*.rs' 'load_user_root' "$kernel_source"; then
+    echo "kernel unsafe check: root::load_user_root is gone; load a Root with root::activate" >&2
     exit 1
 fi
 

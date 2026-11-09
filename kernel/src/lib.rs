@@ -87,6 +87,7 @@ mod native_elf;
 mod network;
 mod owned_state;
 mod packet;
+mod pci_config;
 mod pe;
 mod published_rootfs;
 mod scheduler;
@@ -100,7 +101,6 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
 use trusted::boot::{Handoff, HandoffError};
 use trusted::dma::DmaView;
-use trusted::take_once::TakeOnce;
 use trusted::{
     firmware, frame::Frame, image::BootImage, mmio::Mmio, pixels::PixelBuffer, port::Port8,
 };
@@ -115,7 +115,6 @@ struct HostControlOwner {
     linux_realtime_epoch_seconds: AtomicU64,
     linux_realtime_epoch_tsc: AtomicU64,
     oci_pull_started: AtomicU64,
-    persisted_oci_catalog: TakeOnce<[u8; linox_oci_cache::ENCODED_SIZE]>,
     /// Where the loaded kernel image lies, so crash reports can name code
     /// addresses relative to it.
     kernel_image_base: AtomicU64,
@@ -128,7 +127,6 @@ static HOST_CONTROL: HostControlOwner = HostControlOwner {
     linux_realtime_epoch_seconds: AtomicU64::new(0),
     linux_realtime_epoch_tsc: AtomicU64::new(0),
     oci_pull_started: AtomicU64::new(0),
-    persisted_oci_catalog: TakeOnce::new([0; linox_oci_cache::ENCODED_SIZE]),
     kernel_image_base: AtomicU64::new(0),
     kernel_image_size: AtomicU64::new(0),
 };
@@ -1427,9 +1425,14 @@ fn kernel_main(handoff: Result<Handoff, HandoffError>) -> ! {
     let mut persisted_local_configuration = [0_u8; PERSISTENT_LOCAL_CONFIG_SIZE];
     let mut persisted_local_record = None;
     let mut persisted_local_configuration_valid = true;
-    let Some(persisted_oci_catalog) = HOST_CONTROL.persisted_oci_catalog.take() else {
-        kernel_fail("\r\nlinox: persisted OCI catalog buffer already taken\r\n");
+    // The catalog is too large for the kernel stack: it lives on the heap
+    // for the rest of kernel_main, which never returns.
+    let Some(mut persisted_oci_catalog_buffer) =
+        heap::try_boxed_array::<u8, { linox_oci_cache::ENCODED_SIZE }>(0)
+    else {
+        kernel_fail("\r\nlinox: no memory for the persisted OCI catalog\r\n");
     };
+    let persisted_oci_catalog = &mut *persisted_oci_catalog_buffer;
     let mut persisted_oci_catalog_valid = false;
     let mut persisted_oci_catalog_corrupt = false;
     let disk_volume = (|| {

@@ -1,9 +1,9 @@
-//! PCI configuration access (through `trusted::pci_config`) and a device
+//! PCI configuration access (through `crate::pci_config`) and a device
 //! inventory with human-readable class names.
 
 #![forbid(unsafe_code)]
 
-use crate::trusted::pci_config;
+use crate::pci_config;
 
 const COMMAND: u8 = 0x04;
 const COMMAND_MEMORY: u16 = 1 << 1;

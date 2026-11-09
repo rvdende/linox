@@ -12,13 +12,16 @@
 //! reach by DMA; that is the same power a device register write has
 //! (`trusted::mmio`), and what DMA may reach is the I/O MMU's policy, not a
 //! property of the access. Every write in the kernel is to a function its
-//! caller drives.
+//! caller drives. The port pair itself is `trusted::port::pci`, which only
+//! this module uses (`tools/architecture/check-kernel-unsafe.sh`).
 //!
 //! The address and data ports are one shared pair: as before this module
 //! existed, callers do not run configuration accesses concurrently (boot,
 //! bring-up and device start-up run on one CPU at a time).
 
-use super::port::pci;
+#![forbid(unsafe_code)]
+
+use crate::trusted::port::pci;
 
 const CONFIG_ENABLE: u32 = 1 << 31;
 

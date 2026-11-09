@@ -13,8 +13,8 @@ use crate::trusted::{dma::DmaView, entry, mmio::Mmio};
 use crate::{
     control_abi,
     memory::FrameLease,
+    pci_config,
     scheduler::{self, UserInterruptFrame},
-    trusted::pci_config,
     volume,
 };
 

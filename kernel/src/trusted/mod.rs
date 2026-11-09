@@ -23,7 +23,6 @@
 //!   image, as byte slices.
 //! - [`claim`]: a value one context at a time may claim, the others
 //!   skipping it while it is busy.
-//! - [`pci_config`]: PCI configuration space.
 //! - [`mmio`]: a window of one device's memory-mapped registers.
 //! - [`msr`]: the model-specific registers the kernel uses outside the CPU
 //!   core.
@@ -46,7 +45,6 @@
 //!   stacks.
 //! - [`crash`]: the bring-up exception table, the live page-table walk and
 //!   the reads crash reports make.
-//! - [`take_once`]: a static handed out as `&'static mut` once.
 //! - [`pod`]: plain-old-data types viewed as bytes, for user copies.
 //! - [`xstate`]: the x87, SSE and AVX user state, saved and restored.
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
@@ -78,7 +76,6 @@ pub(crate) mod mmio;
 pub(crate) mod msr;
 pub(crate) mod owned_state;
 pub(crate) mod page_table;
-pub(crate) mod pci_config;
 pub(crate) mod pixels;
 pub(crate) mod pod;
 pub(crate) mod port;
@@ -86,7 +83,6 @@ pub(crate) mod programs;
 pub(crate) mod random;
 pub(crate) mod root;
 pub(crate) mod switch;
-pub(crate) mod take_once;
 pub(crate) mod tsc;
 pub(crate) mod user_copy;
 pub(crate) mod xstate;

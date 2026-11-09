@@ -16,7 +16,11 @@
 //! ([`Root::kernel`]) may be named by anyone. `paging.rs`'s boot install
 //! loads it ([`install_kernel_root`]) before the direct map exists, and
 //! the shutdown path loads it again before it calls the firmware
-//! ([`activate_kernel_root`]).
+//! ([`activate_kernel_root`]). A process root that
+//! `paging::validated_user_root_frames` checked (it maps the kernel's
+//! shared entries exactly as the kernel's root does) is a `Root` too
+//! (`Root::from(&ValidatedUserRootFrames)`), so every load after boot goes
+//! through [`activate`].
 
 use core::arch::asm;
 
@@ -71,6 +75,17 @@ impl Root {
     }
 }
 
+impl From<&crate::arch::x86_64::paging::ValidatedUserRootFrames> for Root {
+    /// A process root the memory layer validated: only that check makes a
+    /// `ValidatedUserRootFrames`, which stands for the kernel mappings a
+    /// `Root` promises.
+    fn from(frames: &crate::arch::x86_64::paging::ValidatedUserRootFrames) -> Self {
+        Self {
+            physical: frames.root(),
+        }
+    }
+}
+
 /// The physical address of the root loaded on this CPU (CR3 without its
 /// PCD/PWT bits).
 pub(crate) fn current_address() -> u64 {
@@ -112,25 +127,6 @@ pub(crate) fn install_kernel_root() {
 /// Loads the kernel's own root on this CPU as [`activate`] loads any root.
 pub(crate) fn activate_kernel_root() {
     activate(Root::kernel());
-}
-
-/// Loads a process's root, which `paging::validated_user_root_frames`
-/// checked maps the kernel's shared entries exactly as the kernel's own
-/// root does (so the code and data in use stay mapped), on this CPU:
-/// recorded for TLB shootdowns before the load and counted after it.
-/// Returns the root CR3 then holds.
-pub(crate) fn load_user_root(frames: &crate::arch::x86_64::paging::ValidatedUserRootFrames) -> u64 {
-    use crate::arch::x86_64::smp;
-    let root = frames.root();
-    smp::note_active_root(root);
-    // SAFETY: the root maps the kernel half as the kernel's root does (the
-    // validation `ValidatedUserRootFrames` stands for), and the rest of it
-    // is user mappings no Rust reference covers.
-    unsafe {
-        asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
-    }
-    smp::note_root_loaded();
-    current()
 }
 
 /// Loads CR3 with the value it holds: the mappings stay as they are, and

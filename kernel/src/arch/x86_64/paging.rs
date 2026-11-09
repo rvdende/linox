@@ -144,8 +144,8 @@ pub(crate) fn verify_user_context_layout_invariants() -> bool {
 
 /// A process root the memory layer checked (`validated_user_root_frames`):
 /// it maps the kernel's shared entries exactly as the kernel's root does.
-/// Only that check makes one, so `trusted::root::load_user_root` loads only
-/// such roots.
+/// Only that check makes one, so a `trusted::root::Root` made from one
+/// (and loaded by `root::activate`) is always such a root.
 pub(crate) struct ValidatedUserRootFrames {
     root: u64,
     base: [u64; 15],
