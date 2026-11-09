@@ -1806,10 +1806,7 @@ pub(crate) fn kernel_address_is_mapped(address: u64) -> bool {
     if (address as i64) << 16 >> 16 != address as i64 {
         return false;
     }
-    let root: u64;
-    // SAFETY: reading CR3 has no side effects.
-    unsafe { asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags)) };
-    let mut table = root & ADDRESS_MASK as u64;
+    let mut table = crate::trusted::root::current() & ADDRESS_MASK as u64;
     for level in 0..4 {
         let index = ((address >> (39 - 9 * level)) & 0x1ff) as usize;
         let Some(entries) = TableView::from_physical(table) else {

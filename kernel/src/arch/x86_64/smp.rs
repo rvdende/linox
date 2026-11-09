@@ -6,6 +6,7 @@ use super::{acpi::PlatformInfo, apic::LocalApic, cpu, paging};
 use crate::{
     memory::FrameLease,
     sync::{LockRank, SpinLock},
+    trusted::root,
 };
 
 pub(crate) const CPU_LIMIT: usize = 4;
@@ -452,16 +453,7 @@ pub(crate) fn note_root_loaded() {
 /// Reloads CR3 with the root it holds, dropping this CPU's translations
 /// of the kernel stack window, and counts it.
 fn reload_root() {
-    // SAFETY: loading CR3 with the value it holds changes no mapping; it
-    // only drops the non-global translations.
-    unsafe {
-        asm!(
-            "mov {root}, cr3",
-            "mov cr3, {root}",
-            root = out(reg) _,
-            options(nostack, preserves_flags)
-        );
-    }
+    root::reload();
     note_root_loaded();
 }
 
@@ -507,10 +499,7 @@ pub(crate) fn invalidate_runtime_translation(address: u64) -> bool {
         TLB_SHOOTDOWN_ADDRESS.store(0, Ordering::Release);
         return false;
     };
-    let root: u64;
-    // SAFETY: reading CR3 has no side effects.
-    unsafe { asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags)) };
-    let root = root & 0x000f_ffff_ffff_f000;
+    let root = root::current() & 0x000f_ffff_ffff_f000;
     // The table write happens before the roots are read, so a CPU that
     // records this root after the read loads the new entry.
     core::sync::atomic::fence(Ordering::SeqCst);

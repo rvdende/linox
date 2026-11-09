@@ -537,6 +537,29 @@ cells (step 6), `FrameLease` ownership (finding 6: `Frame::leased` is only as
 sound as the lease), and the `Cursor` that would make writing entries a
 checked operation (step 11).
 
+**Done so far (2026-11-09, continued): hardware primitives (§4.3 E, F, H).**
+`trusted/` gained the device side: `port` (the I/O ports used outside
+`cpu/`: COM1, PIT channel 2 and its gate, the PM timer, each a typed
+handle) and `pci_config` (configuration space by bus/device/function,
+behind the private 0xcf8/0xcfc pair); `msr` (IA32_APIC_BASE, the x2APIC
+registers, the kernel's one PAT layout); `mmio::Mmio` (today's IoMem: a
+bounds-checked, volatile register window made only from an `MmioMapping`,
+from a firmware-mapped BAR in bring-up, or for the local APIC at the base
+IA32_APIC_BASE reports); `dma::StaticDma`/`DmaPages` (the bring-up
+drivers' static DMA pages, claimed by one driver instance at a time, so
+the drivers' `open` is safe); `firmware` (ACPI tables viewed as a slice
+for one call; `crates/acpi-tables` parses them, host-tested); and `root`
+(reading and reloading CR3). Every driver's registers, `pci.rs`'s virtio
+and MSI-X registers, `iommu.rs`, the local APIC and the HPET go through
+`Mmio`; e1000e, realtek, nvme, ahci and hda keep their DMA in `DmaPages`;
+`acpi.rs`, `apic.rs`, `drivers/{pci,clock,e1000e,realtek,nvme,ahci,hda}.rs`
+have no unsafe left and carry `#![forbid(unsafe_code)]`, which
+`check-kernel-unsafe.sh` keeps. Not yet done: loading another root
+(`activate`, in `address_space.rs` and `cpu.rs`, whose owners are
+changing them), xHCI's sub-allocated DMA pool and AMD-Vi's tables
+(both still `static mut` pages), and the virtio DMA pages `pci.rs` and
+`address_space.rs` share as raw direct-map addresses.
+
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
 operations of eight `unsafe fn`s in `cpu.rs` and step 4 adds one line at the

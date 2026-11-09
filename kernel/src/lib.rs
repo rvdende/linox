@@ -93,7 +93,7 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
-use trusted::{firmware, mmio::Mmio, port::Port8};
+use trusted::{firmware, frame::Frame, mmio::Mmio, port::Port8};
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
@@ -1403,15 +1403,13 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let Some(virtio_dma_virtual) = virtio_dma_frame.direct_map_address() else {
         kernel_fail("\r\nlinox: virtio DMA frame is outside direct map\r\n");
     };
-    let Some(iommu_guard_virtual) = iommu_guard_frame.direct_map_address() else {
+    let Some(iommu_guard) = Frame::leased(iommu_guard_frame) else {
         kernel_fail("\r\nlinox: IOMMU guard frame is outside direct map\r\n");
     };
     if cfg!(feature = "verification-boot") {
         // The guard remains owned but deliberately absent from the translation
         // hierarchy. A blocked device write must leave every sentinel byte intact.
-        unsafe {
-            core::ptr::write_bytes(iommu_guard_virtual as *mut u8, 0xa5, 4096);
-        }
+        iommu_guard.fill(0xa5);
         // SAFETY: This deliberately invalid DMA request is restricted to the
         // verification image. Normal boots never provoke a hardware fault.
         let Some(mut fault_probe) = (unsafe {
@@ -1431,8 +1429,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         };
         let faulting_transport_bounded = unmapped_attempt.transport_outcome_is_bounded(0);
         let faulting_device_quiesced = fault_probe.finish();
-        let guard_unchanged = (0..4096)
-            .all(|offset| unsafe { (iommu_guard_virtual as *const u8).add(offset).read() == 0xa5 });
+        let guard_unchanged = (0..4096).all(|offset| iommu_guard.read_u8(offset) == 0xa5);
         if !faulting_transport_bounded {
             kernel_fail("\r\nlinox: unauthorized virtio DMA request state invalid\r\n");
         }
@@ -1571,8 +1568,8 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     if !memory::frames_owned_by(
         memory::FrameOwner::KERNEL,
         &[virtio_network_dma_frame, virtio_network_guard_frame],
-    ) || unsafe { !frame_is_zero(virtio_network_dma_frame) }
-        || unsafe { !frame_is_zero(virtio_network_guard_frame) }
+    ) || !frame_is_zero(virtio_network_dma_frame)
+        || !frame_is_zero(virtio_network_guard_frame)
     {
         kernel_fail("\r\nlinox: virtio-net DMA or guard frame ownership invalid\r\n");
     }
@@ -1612,7 +1609,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     let Some(virtio_network_dma_virtual) = virtio_network_dma_frame.direct_map_address() else {
         kernel_fail("\r\nlinox: virtio-net DMA page is outside direct map\r\n");
     };
-    let Some(virtio_network_guard_virtual) = virtio_network_guard_frame.direct_map_address() else {
+    let Some(virtio_network_guard) = Frame::leased(virtio_network_guard_frame) else {
         kernel_fail("\r\nlinox: virtio-net guard page is outside direct map\r\n");
     };
     let arch::x86_64::iommu::TranslationActivation::Active(virtio_network_active) =
@@ -1656,9 +1653,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         // The guard is owned but absent from the NIC's exact translation. This
         // deliberately faulting receive is verification-only; normal boots do
         // not submit invalid DMA.
-        unsafe {
-            core::ptr::write_bytes(virtio_network_guard_virtual as *mut u8, 0xa5, PAGE_SIZE);
-        }
+        virtio_network_guard.fill(0xa5);
         let network_dma_fault = network_transmit
             .is_some()
             .then(|| unsafe {
@@ -1676,12 +1671,8 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
             .flatten();
         let network_fault_completion_published =
             network_dma_fault.map(|fault| fault.completion_published);
-        let network_guard_unchanged = (0..PAGE_SIZE).all(|offset| unsafe {
-            (virtio_network_guard_virtual as *const u8)
-                .add(offset)
-                .read()
-                == 0xa5
-        });
+        let network_guard_unchanged =
+            (0..PAGE_SIZE).all(|offset| virtio_network_guard.read_u8(offset) == 0xa5);
         if network_fault_completion_published.is_none() || !network_guard_unchanged {
             kernel_fail("\r\nlinox: unauthorized virtio-net RX DMA was not contained\r\n");
         }
@@ -4598,48 +4589,41 @@ fn verify_initial_frame_allocation(boot_info: &BootInfo) -> bool {
         return false;
     }
 
-    let (Some(first_mapped), Some(second_mapped)) =
-        (first.direct_map_address(), second.direct_map_address())
+    let (Some(first_frame), Some(second_frame)) = (Frame::leased(first), Frame::leased(second))
     else {
         return false;
     };
 
-    // SAFETY: Both frames are conventional UEFI memory, distinct, aligned,
-    // and covered by the checked direct map. Volatile accesses prove both
-    // fresh and dirty recycled frames are scrubbed by the allocation boundary.
-    unsafe {
-        let first_word = first_mapped as *mut u64;
-        let second_word = second_mapped as *mut u64;
-        if !frame_is_zero(first) || !frame_is_zero(second) {
-            return false;
-        }
-        first_word.write_volatile(0x4749_4e55_5800_0001);
-        second_word.write_volatile(0x4749_4e55_5800_0002);
-        first_word
-            .add(PAGE_SIZE / size_of::<u64>() - 1)
-            .write_volatile(0x4749_4e55_5800_0011);
-        second_word
-            .add(PAGE_SIZE / size_of::<u64>() - 1)
-            .write_volatile(0x4749_4e55_5800_0012);
-        if !memory::release_frames(memory::FrameOwner::KERNEL, [first, second]) {
-            return false;
-        }
-        let Some(reused) = memory::allocate_frames::<2>(memory::FrameOwner::KERNEL) else {
-            return false;
-        };
-        let scrubbed = reused.iter().all(|frame| frame_is_zero(*frame));
-        scrubbed
-            && memory::release_frames(memory::FrameOwner::KERNEL, reused)
-            && !memory::initialize(boot_info, arch::x86_64::paging::direct_map_limit() as u64)
+    // Both frames are conventional UEFI memory, distinct and aligned.
+    // Volatile accesses prove both fresh and dirty recycled frames are
+    // scrubbed by the allocation boundary.
+    if !frame_is_zero(first) || !frame_is_zero(second) {
+        return false;
     }
-}
-
-unsafe fn frame_is_zero(frame: memory::FrameLease) -> bool {
-    let Some(address) = frame.direct_map_address() else {
+    let last_word = PAGE_SIZE - size_of::<u64>();
+    first_frame.write_volatile_u64(0, 0x4749_4e55_5800_0001);
+    second_frame.write_volatile_u64(0, 0x4749_4e55_5800_0002);
+    first_frame.write_volatile_u64(last_word, 0x4749_4e55_5800_0011);
+    second_frame.write_volatile_u64(last_word, 0x4749_4e55_5800_0012);
+    if !memory::release_frames(memory::FrameOwner::KERNEL, [first, second]) {
+        return false;
+    }
+    let Some(reused) = memory::allocate_frames::<2>(memory::FrameOwner::KERNEL) else {
         return false;
     };
-    let words = address as *const u64;
-    (0..PAGE_SIZE / size_of::<u64>()).all(|offset| words.add(offset).read_volatile() == 0)
+    let scrubbed = reused.iter().all(|frame| frame_is_zero(*frame));
+    scrubbed
+        && memory::release_frames(memory::FrameOwner::KERNEL, reused)
+        && !memory::initialize(boot_info, arch::x86_64::paging::direct_map_limit() as u64)
+}
+
+fn frame_is_zero(frame: memory::FrameLease) -> bool {
+    let Some(frame) = Frame::leased(frame) else {
+        return false;
+    };
+    (0..PAGE_SIZE)
+        .step_by(size_of::<u64>())
+        .all(|offset| frame.read_volatile_u64(offset) == 0)
 }
 
 fn kernel_stack_is_active() -> bool {

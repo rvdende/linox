@@ -8,16 +8,16 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 660 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 660 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 652 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 652 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 319 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 319 to ${undocumented}" >&2
+if (( undocumented > 313 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 313 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 22 )); then
@@ -32,16 +32,16 @@ fi
 per_file_limits=(
     "address_space.rs 80"
     "bringup/mod.rs 8"
-    "arch/x86_64/paging.rs 14"
+    "arch/x86_64/paging.rs 13"
     "arch/x86_64/iommu.rs 2"
     "arch/x86_64/pci.rs 25"
-    "arch/x86_64/smp.rs 10"
+    "arch/x86_64/smp.rs 8"
     "arch/x86_64/timer.rs 8"
     "image_store.rs 16"
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
-    "lib.rs 28"
+    "lib.rs 20"
     "memory.rs 38"
     "drivers/amd_iommu.rs 13"
     "drivers/xhci.rs 19"
@@ -51,6 +51,7 @@ per_file_limits=(
     "trusted/mmio.rs 2"
     "trusted/msr.rs 3"
     "trusted/page_table.rs 2"
+    "trusted/root.rs 2"
     "trusted/port.rs 8"
 )
 for limit in "${per_file_limits[@]}"; do

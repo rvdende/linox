@@ -6,6 +6,7 @@
 //!   through the direct map.
 //! - [`page_table`]: a page-table frame viewed as its 512 entries.
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
+//! - [`root`]: reading and reloading the page-table root register.
 //! - [`firmware`]: firmware (ACPI) tables viewed in place for parsing.
 //! - [`dma`]: static DMA pages the hardware drivers claim, one instance
 //!   at a time.
@@ -26,3 +27,4 @@ pub(crate) mod msr;
 pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod port;
+pub(crate) mod root;
