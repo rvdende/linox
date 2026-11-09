@@ -220,7 +220,9 @@ extern "sysv64" fn exception_handler(frame: *const Frame) -> ! {
         halt();
     }
     // The fault may have struck while the console was drawing.
-    crate::framebuffer::recover();
+    // SAFETY: this handler reports and halts, on the only CPU bring-up
+    // runs, so the code it interrupted never resumes.
+    unsafe { crate::framebuffer::recover() };
     let vector = frame.vector as usize;
     let mut out = Console;
     let _ = write!(
@@ -316,7 +318,9 @@ pub fn report_panic(info: &core::panic::PanicInfo<'_>) -> ! {
         );
         halt();
     }
-    crate::framebuffer::recover();
+    // SAFETY: this report halts, on the only CPU bring-up runs, so the
+    // code that panicked never resumes.
+    unsafe { crate::framebuffer::recover() };
     // Tests look for the marker at the start of a line.
     crate::serial_write_raw(b"\r\nLINOX_BOOT_PANIC\r\n");
     let mut out = Console;

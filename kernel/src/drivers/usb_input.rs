@@ -210,9 +210,8 @@ pub(crate) fn start(
             function.disable_bus_master();
             continue;
         };
-        // SAFETY: nothing else drives the controller, and the DMA pool is
-        // identity mapped and admitted through the I/O MMU above.
-        let mut controller = match unsafe { xhci::Controller::open(function, base, false) } {
+        // The controller's DMA pool was admitted through the I/O MMU above.
+        let mut controller = match xhci::Controller::open(function, base, false) {
             Ok(controller) => controller,
             Err(error) => {
                 say!(

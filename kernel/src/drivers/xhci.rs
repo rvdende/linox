@@ -6,15 +6,16 @@
 //! mouse and QEMU USB tablet interface, keeping several report transfers
 //! queued per interface, and configures the playback outputs of USB Audio
 //! Class 1 and 2 devices. Each controller draws its DMA memory from a static
-//! pool, so several controllers can run at once; a controller without
-//! devices returns its pages.
+//! pool (`trusted::dma::DmaPool`) while it opens, so several controllers can
+//! run at once; a controller without devices returns its pages.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
 use linox_usb_audio as usb_audio;
 
 use super::pci::Function;
-use super::{delay_ms, say, wait_until_ms, DmaPage, DmaRegion};
+use super::{delay_ms, say, wait_until_ms, DmaRegion};
+use crate::trusted::dma::{DmaArena, DmaPool, DmaSpan};
 use crate::trusted::mmio::Mmio;
 
 const CAP_LENGTH: usize = 0x00;
@@ -175,35 +176,18 @@ const VENDOR_CORSAIR: u16 = 0x1b1c;
 const CORSAIR_DELAY_MS: u64 = 200;
 const POOL_PAGES: usize = 1536;
 
-static mut POOL: [DmaPage; POOL_PAGES] = [DmaPage::ZERO; POOL_PAGES];
-static mut POOL_NEXT: usize = 0;
+/// The DMA memory of every controller: each takes what it needs while it
+/// opens and keeps it.
+static POOL: DmaPool<POOL_PAGES> = DmaPool::new();
 
 /// The memory xHCI controllers may reach by DMA.
 pub(crate) fn dma_regions() -> [DmaRegion; 1] {
-    [DmaRegion::of(addr_of!(POOL))]
+    [DmaRegion::from(POOL.region())]
 }
 
-/// Takes `count` zeroed, contiguous pages from the DMA pool.
-fn pool_pages(count: usize) -> Option<*mut DmaPage> {
-    // SAFETY: bring-up is single-threaded; pages are handed out once.
-    unsafe {
-        let next = POOL_NEXT;
-        let end = next.checked_add(count).filter(|end| *end <= POOL_PAGES)?;
-        POOL_NEXT = end;
-        let pages = addr_of_mut!(POOL).cast::<DmaPage>().add(next);
-        pages.cast::<u8>().write_bytes(0, count * 4096);
-        Some(pages)
-    }
-}
-
-fn pool_mark() -> usize {
-    // SAFETY: as for pool_pages.
-    unsafe { POOL_NEXT }
-}
-
-fn pool_release_to(mark: usize) {
-    // SAFETY: callers release only pages they took after `mark` and no longer use.
-    unsafe { POOL_NEXT = mark.min(POOL_NEXT) }
+/// Takes one zeroed page from the controller's DMA pages.
+fn pool_page(arena: &mut DmaArena) -> Result<DmaSpan, Error> {
+    arena.take(1).ok_or(Error::OutOfDmaMemory)
 }
 
 // The fields are reported through Debug, which dead-code analysis ignores.
@@ -230,39 +214,37 @@ pub(crate) enum Error {
     NoRoom,
 }
 
+/// A transfer or command ring of TRBs (16 bytes each, four dwords) in one
+/// DMA page, whose last TRB links back to the first.
 struct Ring {
-    trbs: *mut u32,
+    trbs: DmaSpan,
     index: usize,
     cycle: bool,
 }
 
 impl Ring {
     /// Builds a ring in the zeroed page `page`.
-    fn new(page: *mut DmaPage) -> Self {
-        let trbs = page.cast::<u32>();
-        // SAFETY: the page is a zeroed pool page owned by this ring.
-        unsafe {
-            // The last TRB links back to the start and toggles the cycle state.
-            let link = trbs.add((RING_TRBS - 1) * 4);
-            let base = trbs as u64;
-            link.write_volatile(base as u32);
-            link.add(1).write_volatile((base >> 32) as u32);
-        }
+    fn new(page: DmaSpan) -> Self {
+        // The last TRB links back to the start and toggles the cycle state.
+        let link = (RING_TRBS - 1) * 16;
+        let base = page.device_address(0);
+        page.write::<u32>(link, base as u32);
+        page.write::<u32>(link + 4, (base >> 32) as u32);
         Self {
-            trbs,
+            trbs: page,
             index: 0,
             cycle: true,
         }
     }
 
     fn address(&self) -> u64 {
-        self.trbs as u64
+        self.trbs.device_address(0)
     }
 
     /// Where the next TRB goes, with the cycle state in bit 0, as a Set TR
     /// Dequeue Pointer command takes it.
     fn enqueue_pointer(&self) -> u64 {
-        self.trbs.wrapping_add(self.index * 4) as u64 | u64::from(self.cycle)
+        (self.address() + (self.index * 16) as u64) | u64::from(self.cycle)
     }
 
     /// The parameter of the TRB at `address`, if it lies in this ring.
@@ -271,35 +253,32 @@ impl Ring {
         if offset >= (RING_TRBS * 16) as u64 || offset % 16 != 0 {
             return None;
         }
-        // SAFETY: the offset selects a whole TRB inside the ring page.
-        unsafe {
-            let trb = self.trbs.add(offset as usize / 4);
-            Some(u64::from(trb.read_volatile()) | u64::from(trb.add(1).read_volatile()) << 32)
-        }
+        let trb = offset as usize;
+        Some(
+            u64::from(self.trbs.read::<u32>(trb)) | u64::from(self.trbs.read::<u32>(trb + 4)) << 32,
+        )
     }
 
     /// Writes one TRB and returns its physical address.
     fn push(&mut self, parameter: u64, status: u32, control: u32) -> u64 {
-        // SAFETY: index stays below the link TRB; the ring is a pool page.
-        unsafe {
-            let trb = self.trbs.add(self.index * 4);
-            trb.write_volatile(parameter as u32);
-            trb.add(1).write_volatile((parameter >> 32) as u32);
-            trb.add(2).write_volatile(status);
-            trb.add(3)
-                .write_volatile(control | (u32::from(self.cycle) * TRB_CYCLE));
-            let address = trb as u64;
-            self.index += 1;
-            if self.index == RING_TRBS - 1 {
-                let link = self.trbs.add(self.index * 4);
-                link.add(3).write_volatile(
-                    TRB_LINK << 10 | TRB_TOGGLE_CYCLE | (u32::from(self.cycle) * TRB_CYCLE),
-                );
-                self.index = 0;
-                self.cycle = !self.cycle;
-            }
-            address
+        let trb = self.index * 16;
+        self.trbs.write::<u32>(trb, parameter as u32);
+        self.trbs.write::<u32>(trb + 4, (parameter >> 32) as u32);
+        self.trbs.write::<u32>(trb + 8, status);
+        self.trbs
+            .write::<u32>(trb + 12, control | (u32::from(self.cycle) * TRB_CYCLE));
+        let address = self.trbs.device_address(trb);
+        self.index += 1;
+        if self.index == RING_TRBS - 1 {
+            let link = self.index * 16;
+            self.trbs.write::<u32>(
+                link + 12,
+                TRB_LINK << 10 | TRB_TOGGLE_CYCLE | (u32::from(self.cycle) * TRB_CYCLE),
+            );
+            self.index = 0;
+            self.cycle = !self.cycle;
         }
+        address
     }
 }
 
@@ -390,7 +369,7 @@ pub(crate) struct Input {
     endpoint: u32,
     interrupt: Ring,
     /// The page whose slots receive reports, one slot per queued transfer.
-    report: *mut DmaPage,
+    report: DmaSpan,
     /// Bytes each report transfer asks for: the endpoint's packet size.
     report_length: u32,
     /// Times the endpoint halted and was restarted; an input that keeps
@@ -409,7 +388,7 @@ impl Input {
     fn report_slots(&self) -> impl Iterator<Item = u64> {
         let stride = self.slot_stride();
         let slots = (4096 / stride).clamp(1, REPORT_SLOTS);
-        let page = self.report as u64;
+        let page = self.report.device_address(0);
         (0..slots).map(move |slot| page + slot * stride)
     }
 
@@ -417,7 +396,7 @@ impl Input {
     /// is on this input's ring and points into its report page.
     fn completed_buffer(&self, trb: u64) -> Option<u64> {
         let buffer = self.interrupt.parameter_at(trb)?;
-        let page = self.report as u64;
+        let page = self.report.device_address(0);
         (buffer >= page && buffer + self.slot_stride() <= page + 4096).then_some(buffer)
     }
 }
@@ -449,11 +428,11 @@ struct InputInterface {
 
 /// Per-device DMA pages used while addressing and configuring a device.
 struct DevicePages {
-    output: *mut DmaPage,
-    input: *mut DmaPage,
-    control: *mut DmaPage,
-    interrupt: *mut DmaPage,
-    buffer: *mut DmaPage,
+    output: DmaSpan,
+    input: DmaSpan,
+    control: DmaSpan,
+    interrupt: DmaSpan,
+    buffer: DmaSpan,
 }
 
 /// A configured USB audio output: an isochronous OUT endpoint on an audio
@@ -473,7 +452,7 @@ pub(crate) struct Speaker {
     period_us: u32,
     packet_bytes: usize,
     /// One period of the test tone, which whole packets tile.
-    tone: *mut DmaPage,
+    tone: DmaSpan,
     tone_bytes: usize,
 }
 
@@ -483,9 +462,11 @@ pub(crate) struct Controller {
     runtime: Mmio,
     doorbells: Mmio,
     context_size: usize,
-    device_contexts: *mut u64,
+    /// The device context base address array: entry 0 points at the
+    /// scratchpad array, entry n at slot n's output device context.
+    device_contexts: DmaSpan,
     commands: Ring,
-    events: *mut u32,
+    events: DmaSpan,
     event_index: usize,
     event_cycle: bool,
     inputs: [Option<Input>; MAX_INPUTS],
@@ -504,19 +485,16 @@ impl Controller {
     /// `registers`, resets it, and configures every input interface and
     /// audio output on its ports, reporting each device when `verbose`. On
     /// failure the controller is halted and its DMA pages are returned to
-    /// the pool.
-    ///
-    /// # Safety
-    ///
-    /// `function` must be an xHCI controller that no other code drives, and
-    /// the DMA pool must be identity mapped.
-    pub(crate) unsafe fn open(
-        function: Function,
-        registers: Mmio,
-        verbose: bool,
-    ) -> Result<Self, Error> {
-        let mark = pool_mark();
-        let result = Self::open_inner(function, &registers, verbose);
+    /// the pool. The controller's DMA memory is the pool's (which the
+    /// kernel image's identity map covers); what else it reaches is the
+    /// I/O MMU's policy.
+    pub(crate) fn open(function: Function, registers: Mmio, verbose: bool) -> Result<Self, Error> {
+        // Controllers open one at a time; another open in progress leaves
+        // the pool nothing to give.
+        let Some(mut arena) = POOL.arena() else {
+            return Err(Error::OutOfDmaMemory);
+        };
+        let result = Self::open_inner(function, &registers, verbose, &mut arena);
         if result.is_err() {
             // The controller may still point at pool pages (contexts, rings,
             // scratchpads): reset it and cut its bus mastering before the
@@ -525,12 +503,20 @@ impl Controller {
                 halt_and_reset(&operational);
             }
             function.disable_bus_master();
-            pool_release_to(mark);
+            // Dropping the arena returns every page it took.
+            drop(arena);
+        } else {
+            arena.keep();
         }
         result
     }
 
-    unsafe fn open_inner(function: Function, base: &Mmio, verbose: bool) -> Result<Self, Error> {
+    fn open_inner(
+        function: Function,
+        base: &Mmio,
+        verbose: bool,
+        arena: &mut DmaArena,
+    ) -> Result<Self, Error> {
         // Bound the capability walk by the register window, which is BAR
         // 0 as config space sizes it.
         let window = base.len().min(0x10_0000);
@@ -583,27 +569,32 @@ impl Controller {
         if scratchpads > MAX_SCRATCHPADS {
             return Err(Error::TooManyScratchpads(scratchpads));
         }
-        let device_contexts = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u64>();
+        let device_contexts = pool_page(arena)?;
         if scratchpads != 0 {
-            let array = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u64>();
-            let pages = pool_pages(scratchpads).ok_or(Error::OutOfDmaMemory)?;
+            let array = pool_page(arena)?;
+            let pages = arena.take(scratchpads).ok_or(Error::OutOfDmaMemory)?;
             for index in 0..scratchpads {
-                array.add(index).write(pages.add(index) as u64);
+                array.write::<u64>(index * 8, pages.device_address(index * 4096));
             }
-            device_contexts.write(array as u64);
+            device_contexts.write::<u64>(0, array.device_address(0));
         }
         let slots = (structural_1 & 0xff).min(MAX_SLOTS);
         operational.write::<u32>(OP_CONFIGURE, slots);
-        write64(&operational, OP_DEVICE_CONTEXTS, device_contexts as u64);
+        write64(
+            &operational,
+            OP_DEVICE_CONTEXTS,
+            device_contexts.device_address(0),
+        );
 
-        let commands = Ring::new(pool_pages(1).ok_or(Error::OutOfDmaMemory)?);
+        let commands = Ring::new(pool_page(arena)?);
         write64(&operational, OP_COMMAND_RING, commands.address() | 1);
 
-        let events = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u32>();
-        let segments = pool_pages(1).ok_or(Error::OutOfDmaMemory)?.cast::<u32>();
-        segments.write(events as u32);
-        segments.add(1).write((events as u64 >> 32) as u32);
-        segments.add(2).write(RING_TRBS as u32);
+        let events = pool_page(arena)?;
+        let segments = pool_page(arena)?;
+        let events_address = events.device_address(0);
+        segments.write::<u32>(0, events_address as u32);
+        segments.write::<u32>(4, (events_address >> 32) as u32);
+        segments.write::<u32>(8, RING_TRBS as u32);
         let runtime = offset_registers(
             base,
             (base.read::<u32>(CAP_RUNTIME_OFFSET) & !0x1f) as usize,
@@ -611,8 +602,8 @@ impl Controller {
         .ok_or(Error::NoMemoryBar)?;
         let interrupter = 0x20;
         runtime.write::<u32>(interrupter + 0x08, 1);
-        write64(&runtime, interrupter + 0x18, events as u64);
-        write64(&runtime, interrupter + 0x10, segments as u64);
+        write64(&runtime, interrupter + 0x18, events_address);
+        write64(&runtime, interrupter + 0x10, segments.device_address(0));
 
         operational.write::<u32>(OP_COMMAND, COMMAND_RUN);
         if !wait_until_ms(100, || {
@@ -652,7 +643,7 @@ impl Controller {
             // Section 4.19.4: software waits 20 ms after setting Port Power.
             delay_ms(20);
         }
-        controller.scan_root_ports(ports);
+        controller.scan_root_ports(ports, arena);
         if controller.inputs().next().is_none() && controller.speakers().next().is_none() {
             controller.stop();
             return Err(Error::NoDevices);
@@ -702,7 +693,7 @@ impl Controller {
                         0
                     };
                     last = speaker.ring.push(
-                        speaker.tone as u64 + offset as u64,
+                        speaker.tone.device_address(0) + offset as u64,
                         speaker.packet_bytes as u32,
                         TRB_ISOCH << 10 | TRB_START_ISOCH_ASAP | interrupt,
                     );
@@ -787,11 +778,10 @@ impl Controller {
                 (input.report_length.saturating_sub(event.residue()) as usize).min(REPORT_BYTES);
             let mut bytes = [0; REPORT_BYTES];
             if completed {
-                // SAFETY: the controller completed the transfer into this
-                // slot of the report page, which is queued again only below.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(buffer as *const u8, bytes.as_mut_ptr(), length)
-                };
+                // The controller completed the transfer into this slot of
+                // the report page, which is queued again only below.
+                let slot = (buffer - input.report.device_address(0)) as usize;
+                input.report.read_bytes(slot, &mut bytes[..length]);
             }
             let kind = input.kind;
             if !completed && event.completion() != COMPLETION_STOPPED {
@@ -904,7 +894,7 @@ impl Controller {
     /// once its connection has been stable for [`DEBOUNCE_MS`]: devices
     /// reconnect at their own pace after the controller reset, and a slow
     /// one must not be missed because another came up first.
-    fn scan_root_ports(&mut self, ports: u32) {
+    fn scan_root_ports(&mut self, ports: u32, arena: &mut DmaArena) {
         const UNSEEN: u64 = u64::MAX;
         let ports = ports.min(255);
         let start = crate::arch::x86_64::timer::timestamp_counter();
@@ -933,7 +923,7 @@ impl Controller {
                 done[index] = true;
                 // A device that fails after its slot is enabled keeps its
                 // pages unless the slot could be disabled again.
-                match self.try_root_port(port) {
+                match self.try_root_port(port, arena) {
                     Ok(()) | Err(Error::NotConnected) => {}
                     Err(error) => say!("linox:     port {}: {:?}\n", port, error),
                 }
@@ -951,15 +941,15 @@ impl Controller {
     /// Resets the root port (a warm reset for a USB 3 link stuck inactive
     /// or in compliance mode) and attaches its device, retrying a device
     /// that fails to address.
-    fn try_root_port(&mut self, port: u32) -> Result<(), Error> {
+    fn try_root_port(&mut self, port: u32, arena: &mut DmaArena) -> Result<(), Error> {
         let register = self.port_register(port);
         let mut last = Error::NotConnected;
         for attempt in 0..ATTACH_ATTEMPTS {
             let status = self.reset_root_port(port, attempt > 0)?;
             let (inputs, speakers) = (self.inputs().count(), self.speakers().count());
-            let mark = pool_mark();
+            let mark = arena.mark();
             self.last_slot = 0;
-            match self.attach(Location::root(port), (status >> 10) & 0xf) {
+            match self.attach(Location::root(port), (status >> 10) & 0xf, arena) {
                 Ok(()) => return Ok(()),
                 Err(error @ (Error::NotInputDevice(..) | Error::OutOfDmaMemory)) => {
                     return Err(error)
@@ -971,7 +961,7 @@ impl Controller {
                 return Err(last);
             }
             if self.disable_last_slot() {
-                pool_release_to(mark);
+                arena.release_to(mark);
             } else {
                 return Err(last);
             }
@@ -1047,8 +1037,8 @@ impl Controller {
         }
         let disabled = self.command(0, TRB_DISABLE_SLOT << 10 | slot << 24).is_ok();
         if disabled {
-            // SAFETY: the device-context array holds MAX_SLOTS + 1 entries.
-            unsafe { self.device_contexts.add(slot as usize).write_volatile(0) };
+            // The device-context array holds MAX_SLOTS + 1 entries.
+            self.device_contexts.write::<u64>(slot as usize * 8, 0);
         }
         disabled
     }
@@ -1056,16 +1046,21 @@ impl Controller {
     /// Addresses the device at `location`, then configures its input
     /// interfaces or audio outputs or, for a hub, enumerates the devices
     /// behind it.
-    fn attach(&mut self, location: Location, speed: u32) -> Result<(), Error> {
+    fn attach(
+        &mut self,
+        location: Location,
+        speed: u32,
+        arena: &mut DmaArena,
+    ) -> Result<(), Error> {
         let pages = DevicePages {
-            output: pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-            input: pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-            control: pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-            interrupt: pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-            buffer: pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
+            output: pool_page(arena)?,
+            input: pool_page(arena)?,
+            control: pool_page(arena)?,
+            interrupt: pool_page(arena)?,
+            buffer: pool_page(arena)?,
         };
         let mut device = Device {
-            control: Ring::new(pages.control),
+            control: Ring::new(pages.control.clone()),
             pages,
             slot: 0,
             location,
@@ -1083,13 +1078,13 @@ impl Controller {
             );
         }
         if identity.class == CLASS_HUB {
-            return self.enumerate_hub(device, identity.protocol);
+            return self.enumerate_hub(device, identity.protocol, arena);
         }
-        if device.configure_inputs(self, &identity)? != 0 {
+        if device.configure_inputs(self, &identity, arena)? != 0 {
             return Ok(());
         }
         if self.speakers.iter().any(Option::is_none)
-            && device.configure_speakers(self, &identity)? != 0
+            && device.configure_speakers(self, &identity, arena)? != 0
         {
             return Ok(());
         }
@@ -1099,7 +1094,12 @@ impl Controller {
     /// Configures `hub`, powers and resets each downstream port, and attaches
     /// what is connected there. `protocol` is the hub's device protocol: 1 or
     /// 2 for a high-speed hub with one or per-port transaction translators.
-    fn enumerate_hub(&mut self, mut hub: Device, protocol: u8) -> Result<(), Error> {
+    fn enumerate_hub(
+        &mut self,
+        mut hub: Device,
+        protocol: u8,
+        arena: &mut DmaArena,
+    ) -> Result<(), Error> {
         if hub.location.depth >= MAX_HUB_DEPTH {
             return Err(Error::HubTooDeep);
         }
@@ -1112,7 +1112,7 @@ impl Controller {
             );
         }
         for port in 1..=ports {
-            match self.try_hub_port(&mut hub, port, protocol) {
+            match self.try_hub_port(&mut hub, port, protocol, arena) {
                 Ok(()) | Err(Error::NotConnected) => {}
                 Err(error) => say!("linox:     port {}.{}: {:?}\n", hub.location, port, error),
             }
@@ -1120,7 +1120,13 @@ impl Controller {
         Ok(())
     }
 
-    fn try_hub_port(&mut self, hub: &mut Device, port: u16, protocol: u8) -> Result<(), Error> {
+    fn try_hub_port(
+        &mut self,
+        hub: &mut Device,
+        port: u16,
+        protocol: u8,
+        arena: &mut DmaArena,
+    ) -> Result<(), Error> {
         let status = hub.port_status(self, port)?;
         if status & HUB_PORT_CONNECTION == 0 {
             return Err(Error::NotConnected);
@@ -1168,7 +1174,7 @@ impl Controller {
             depth: parent.depth + 1,
             translator,
         };
-        self.attach(location, speed)
+        self.attach(location, speed, arena)
     }
 
     /// Queues a report transfer for input `index` into `buffer`, one of its
@@ -1232,26 +1238,25 @@ impl Controller {
     }
 
     fn next_event(&mut self) -> Option<Event> {
-        // SAFETY: event_index stays within the event ring page.
-        let trb = unsafe { self.events.add(self.event_index * 4) };
-        let control = unsafe { trb.add(3).read_volatile() };
+        // event_index stays within the event ring page.
+        let trb = self.event_index * 16;
+        let control = self.events.read::<u32>(trb + 12);
         if (control & TRB_CYCLE != 0) != self.event_cycle {
             return None;
         }
-        let event = unsafe {
-            Event {
-                parameter: u64::from(trb.read_volatile())
-                    | u64::from(trb.add(1).read_volatile()) << 32,
-                status: trb.add(2).read_volatile(),
-                control,
-            }
+        let parameter = u64::from(self.events.read::<u32>(trb))
+            | u64::from(self.events.read::<u32>(trb + 4)) << 32;
+        let event = Event {
+            parameter,
+            status: self.events.read::<u32>(trb + 8),
+            control,
         };
         self.event_index += 1;
         if self.event_index == RING_TRBS {
             self.event_index = 0;
             self.event_cycle = !self.event_cycle;
         }
-        let dequeue = self.events as u64 + (self.event_index * 16) as u64;
+        let dequeue = self.events.device_address(0) + (self.event_index * 16) as u64;
         // Bit 3 (EHB) is write-one-to-clear and acknowledges the event.
         write64(&self.runtime, 0x20 + 0x18, dequeue | 1 << 3);
         Some(event)
@@ -1287,13 +1292,10 @@ impl Device {
             return Err(Error::NoRoom);
         }
         controller.last_slot = self.slot;
-        // SAFETY: the device-context array holds MAX_SLOTS + 1 entries.
-        unsafe {
-            controller
-                .device_contexts
-                .add(self.slot as usize)
-                .write(self.pages.output as u64);
-        }
+        // The device-context array holds MAX_SLOTS + 1 entries.
+        controller
+            .device_contexts
+            .write::<u64>(self.slot as usize * 8, self.pages.output.device_address(0));
         let packet = match self.speed {
             SPEED_LOW => 8,
             SPEED_FULL | SPEED_HIGH => 64,
@@ -1304,7 +1306,7 @@ impl Device {
         self.slot_context(controller, 1, None);
         self.write_endpoint0(controller, packet);
         controller.command(
-            self.pages.input as u64,
+            self.pages.input.device_address(0),
             TRB_ADDRESS_DEVICE << 10 | self.slot << 24,
         )?;
         // USB 2.0 section 9.2.6.3: two ms of SET_ADDRESS recovery; Linux
@@ -1320,7 +1322,7 @@ impl Device {
             0,
             8,
         )?;
-        let reported = u32::from(self.buffer()[7]);
+        let reported = u32::from(self.buffer::<8>()[7]);
         // USB 3 devices report the default-pipe packet size as a power of two.
         let actual = if self.speed > SPEED_HIGH {
             1_u32.checked_shl(reported).unwrap_or(0)
@@ -1332,7 +1334,7 @@ impl Device {
             self.input(controller, 0, 1, 0b10);
             self.write_endpoint0(controller, actual);
             controller.command(
-                self.pages.input as u64,
+                self.pages.input.device_address(0),
                 TRB_EVALUATE_CONTEXT << 10 | self.slot << 24,
             )?;
         }
@@ -1344,7 +1346,7 @@ impl Device {
             0,
             18,
         )?;
-        let device = self.buffer();
+        let device = self.buffer::<18>();
         let identity = Identity {
             vendor: u16::from_le_bytes([device[8], device[9]]),
             product: u16::from_le_bytes([device[10], device[11]]),
@@ -1369,7 +1371,8 @@ impl Device {
             0,
             9,
         )?;
-        let total = u16::from_le_bytes([self.buffer()[2], self.buffer()[3]]).min(4096);
+        let [_, _, low, high] = self.buffer::<4>();
+        let total = u16::from_le_bytes([low, high]).min(4096);
         self.control_in(
             controller,
             0x80,
@@ -1389,6 +1392,7 @@ impl Device {
         &mut self,
         controller: &mut Controller,
         identity: &Identity,
+        arena: &mut DmaArena,
     ) -> Result<usize, Error> {
         let free = controller
             .inputs
@@ -1399,7 +1403,7 @@ impl Device {
             return Ok(0);
         }
         let total = usize::from(self.read_configuration(controller)?);
-        let descriptors = self.buffer();
+        let descriptors = self.buffer::<4096>();
         let configuration = descriptors[5];
         let mut found = [None; MAX_INPUTS];
         let mut count = 0;
@@ -1477,18 +1481,15 @@ impl Device {
             // The first interface uses the device's own pages; the transfer
             // buffer is free once configuration is done.
             let (ring, report) = if added == 0 {
-                (self.pages.interrupt, self.pages.buffer)
+                (self.pages.interrupt.clone(), self.pages.buffer.clone())
             } else {
-                (
-                    pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-                    pool_pages(1).ok_or(Error::OutOfDmaMemory)?,
-                )
+                (pool_page(arena)?, pool_page(arena)?)
             };
             let (number, packet, interval) = found.endpoint;
             let endpoint = self.configure_interrupt_in(
                 controller,
                 (number, packet, interval),
-                ring,
+                &ring,
                 &mut entries,
                 None,
             )?;
@@ -1518,9 +1519,11 @@ impl Device {
         &mut self,
         controller: &mut Controller,
         identity: &Identity,
+        arena: &mut DmaArena,
     ) -> Result<usize, Error> {
         let total = self.read_configuration(controller)?;
-        let descriptors = &self.buffer()[..usize::from(total)];
+        let buffer = self.buffer::<4096>();
+        let descriptors = &buffer[..usize::from(total)];
         let configuration = descriptors[5];
         let outputs = usb_audio::outputs(descriptors);
         if outputs.iter().next().is_none() {
@@ -1539,7 +1542,7 @@ impl Device {
             let Some(free) = controller.speakers.iter().position(Option::is_none) else {
                 break;
             };
-            match self.configure_output(controller, identity, output, &mut entries) {
+            match self.configure_output(controller, identity, output, &mut entries, arena) {
                 Ok(Some(speaker)) => {
                     controller.speakers[free] = Some(speaker);
                     added += 1;
@@ -1572,6 +1575,7 @@ impl Device {
         identity: &Identity,
         output: &usb_audio::Output,
         entries: &mut u32,
+        arena: &mut DmaArena,
     ) -> Result<Option<Speaker>, Error> {
         let high_speed = self.speed >= SPEED_HIGH;
         let (Some(packet_bytes), Some(exponent)) = (
@@ -1580,18 +1584,18 @@ impl Device {
         ) else {
             return Ok(None);
         };
-        let tone = pool_pages(1).ok_or(Error::OutOfDmaMemory)?;
-        let ring_page = pool_pages(1).ok_or(Error::OutOfDmaMemory)?;
-        // SAFETY: the tone page is a fresh pool page that only this output
+        let tone = pool_page(arena)?;
+        let ring_page = pool_page(arena)?;
+        // The tone page is a fresh, zeroed pool page that only this output
         // uses, and no transfer reads it yet.
-        let tone_bytes = unsafe {
-            usb_audio::square_wave(
-                &mut (*tone).0,
-                output.channels,
-                output.subslot,
-                AUDIO_AMPLITUDE,
-            )
-        };
+        let mut period = [0; 4096];
+        let tone_bytes = usb_audio::square_wave(
+            &mut period,
+            output.channels,
+            output.subslot,
+            AUDIO_AMPLITUDE,
+        );
+        tone.write_bytes(0, &period);
         let Some(tone_bytes) = tone_bytes else {
             return Ok(None);
         };
@@ -1604,7 +1608,7 @@ impl Device {
         )?;
         let endpoint = u32::from(output.endpoint) * 2;
         *entries = (*entries).max(endpoint);
-        let ring = ring_page as u64 | 1;
+        let ring = ring_page.device_address(0) | 1;
         let max_packet = u32::from(output.max_packet & 0x7ff);
         // High-speed endpoints may move up to three packets per microframe.
         let burst = if high_speed {
@@ -1632,7 +1636,7 @@ impl Device {
             packet_bytes as u32 | (max_packet * (burst + 1)) << 16,
         );
         controller.command(
-            self.pages.input as u64,
+            self.pages.input.device_address(0),
             TRB_CONFIGURE_ENDPOINT << 10 | self.slot << 24,
         )?;
         if !self.set_rate(controller, output) {
@@ -1704,7 +1708,7 @@ impl Device {
             entity(clock.source),
             4,
         ) {
-            Ok(()) => self.buffer()[..4] == rate,
+            Ok(()) => self.buffer::<4>() == rate,
             Err(_) => true,
         }
     }
@@ -1726,7 +1730,7 @@ impl Device {
     /// number of downstream ports.
     fn configure_hub(&mut self, controller: &mut Controller, protocol: u8) -> Result<u16, Error> {
         let total = self.read_configuration(controller)?;
-        let descriptors = self.buffer();
+        let descriptors = self.buffer::<4096>();
         let configuration = descriptors[5];
         let mut status_endpoint = None;
         let mut offset = 0;
@@ -1760,7 +1764,7 @@ impl Device {
             0,
             9,
         )?;
-        let hub = self.buffer();
+        let hub = self.buffer::<9>();
         let ports = u16::from(hub[2]).min(HUB_PORT_LIMIT);
         let characteristics = u16::from_le_bytes([hub[3], hub[4]]);
         let power_good_ms = u64::from(hub[5]) * 2;
@@ -1777,8 +1781,8 @@ impl Device {
             think_time,
         };
         let status_endpoint = status_endpoint.unwrap_or((1, 2, 12));
-        let ring = self.pages.interrupt;
-        self.configure_interrupt_in(controller, status_endpoint, ring, &mut 1, Some(hub_fields))?;
+        let ring = self.pages.interrupt.clone();
+        self.configure_interrupt_in(controller, status_endpoint, &ring, &mut 1, Some(hub_fields))?;
         for port in 1..=ports {
             self.control_out(
                 controller,
@@ -1796,10 +1800,7 @@ impl Device {
     /// the high half.
     fn port_status(&mut self, controller: &mut Controller, port: u16) -> Result<u32, Error> {
         self.control_in(controller, HUB_PORT_IN, REQUEST_GET_STATUS, 0, port, 4)?;
-        let status = self.buffer();
-        Ok(u32::from_le_bytes([
-            status[0], status[1], status[2], status[3],
-        ]))
+        Ok(u32::from_le_bytes(self.buffer::<4>()))
     }
 
     /// Adds the interrupt-IN endpoint `(number, packet, interval)` with its
@@ -1810,7 +1811,7 @@ impl Device {
         &mut self,
         controller: &mut Controller,
         (number, packet, interval): (u8, u16, u8),
-        ring: *mut DmaPage,
+        ring: &DmaSpan,
         entries: &mut u32,
         hub: Option<HubFields>,
     ) -> Result<u32, Error> {
@@ -1824,7 +1825,7 @@ impl Device {
             }
             _ => u32::from(interval.clamp(1, 16)) - 1,
         };
-        let ring = ring as u64 | 1;
+        let ring = ring.device_address(0) | 1;
         self.clear_input();
         self.input(controller, 0, 1, 1 | 1 << endpoint);
         self.slot_context(controller, *entries, hub);
@@ -1840,7 +1841,7 @@ impl Device {
         self.input(controller, context, 3, (ring >> 32) as u32);
         self.input(controller, context, 4, 8 | u32::from(packet) << 16);
         controller.command(
-            self.pages.input as u64,
+            self.pages.input.device_address(0),
             TRB_CONFIGURE_ENDPOINT << 10 | self.slot << 24,
         )?;
         Ok(endpoint)
@@ -1889,31 +1890,24 @@ impl Device {
     }
 
     fn clear_input(&mut self) {
-        // SAFETY: the input context page belongs to this device.
-        unsafe { (*self.pages.input).0.fill(0) };
+        self.pages.input.zero();
     }
 
     /// Writes dword `word` of input context entry `index` (0 is the input
     /// control context, 1 the slot, 2 endpoint 0, and so on).
     fn input(&mut self, controller: &Controller, index: usize, word: usize, value: u32) {
-        let offset = index * controller.context_size + word * 4;
-        // SAFETY: offset stays within the 4 KiB input context page for the
+        // The offset stays within the 4 KiB input context page for the
         // entries this driver writes (at most 32 contexts of 64 bytes).
-        unsafe {
-            self.pages
-                .input
-                .cast::<u8>()
-                .add(offset)
-                .cast::<u32>()
-                .write_volatile(value);
-        }
+        let offset = index * controller.context_size + word * 4;
+        self.pages.input.write::<u32>(offset, value);
     }
 
-    /// The device's transfer buffer, read after its transfer completed.
-    fn buffer(&self) -> &'static [u8; 4096] {
-        // SAFETY: the buffer page belongs to this device and the transfer
-        // that filled it has completed.
-        unsafe { &(*self.pages.buffer).0 }
+    /// The first `N` bytes of the device's transfer buffer (`N` at most a
+    /// page), read after the transfer that filled it completed.
+    fn buffer<const N: usize>(&self) -> [u8; N] {
+        let mut bytes = [0; N];
+        self.pages.buffer.read_bytes(0, &mut bytes);
+        bytes
     }
 
     fn control_in(
@@ -1933,7 +1927,7 @@ impl Device {
         self.control
             .push(setup, 8, TRB_SETUP << 10 | TRB_IMMEDIATE_DATA | 3 << 16);
         self.control.push(
-            self.pages.buffer as u64,
+            self.pages.buffer.device_address(0),
             u32::from(length),
             TRB_DATA << 10 | TRB_DIRECTION_IN | TRB_INTERRUPT_ON_SHORT_PACKET,
         );
@@ -1977,12 +1971,11 @@ impl Device {
         data: &[u8],
     ) -> Result<(), Error> {
         let length = data.len().min(64) as u16;
-        // SAFETY: the buffer page belongs to this device and no transfer
-        // is using it.
-        unsafe {
-            let buffer = &mut (*self.pages.buffer).0;
-            buffer[..usize::from(length)].copy_from_slice(&data[..usize::from(length)]);
-        }
+        // The buffer page belongs to this device and no transfer is using
+        // it.
+        self.pages
+            .buffer
+            .write_bytes(0, &data[..usize::from(length)]);
         let setup = u64::from(request_type)
             | u64::from(request) << 8
             | u64::from(value) << 16
@@ -1990,8 +1983,11 @@ impl Device {
             | u64::from(length) << 48;
         self.control
             .push(setup, 8, TRB_SETUP << 10 | TRB_IMMEDIATE_DATA | 2 << 16);
-        self.control
-            .push(self.pages.buffer as u64, u32::from(length), TRB_DATA << 10);
+        self.control.push(
+            self.pages.buffer.device_address(0),
+            u32::from(length),
+            TRB_DATA << 10,
+        );
         let status = self.control.push(
             0,
             0,

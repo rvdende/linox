@@ -15,9 +15,9 @@
 //! `arch/x86_64/pci.rs`, which hands those devices to ring-3 services; the
 //! drivers here keep their device in the kernel.
 
-use super::device_memory::DmaBuffer;
 use super::pci::Function;
 use super::wait_until_ms;
+use crate::trusted::dma::DmaBuffer;
 use crate::trusted::mmio::Mmio;
 
 pub(crate) const VENDOR: u16 = 0x1af4;

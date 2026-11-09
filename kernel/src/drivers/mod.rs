@@ -8,12 +8,11 @@
 //!
 //! The virtio drivers (`virtio`, `virtio_gpu`) run only in the main kernel:
 //! they reach registers through the kernel's device window and take DMA
-//! memory from the frame allocator, behind the handles in `device_memory`.
+//! memory from the frame allocator as `trusted::dma::DmaBuffer`s.
 
 pub(crate) mod ahci;
 pub(crate) mod amd_iommu;
 pub(crate) mod clock;
-pub(crate) mod device_memory;
 pub(crate) mod e1000e;
 pub(crate) mod gpt;
 pub(crate) mod hda;
@@ -86,29 +85,11 @@ pub(crate) struct DmaRegion {
     pub(crate) length: u64,
 }
 
-impl DmaRegion {
-    fn of<T>(object: *const T) -> Self {
-        Self {
-            start: object as u64,
-            length: core::mem::size_of::<T>() as u64,
-        }
-    }
-}
-
 impl From<(u64, u64)> for DmaRegion {
     /// A `trusted::dma::StaticDma` region, (start, length).
     fn from((start, length): (u64, u64)) -> Self {
         Self { start, length }
     }
-}
-
-/// A 4 KiB page usable as a DMA buffer: the kernel image is identity mapped,
-/// so its address is also its physical address.
-#[repr(C, align(4096))]
-pub(crate) struct DmaPage(pub(crate) [u8; 4096]);
-
-impl DmaPage {
-    pub(crate) const ZERO: Self = Self([0; 4096]);
 }
 
 /// Writes back and invalidates the cache lines covering `length` bytes at

@@ -1,6 +1,9 @@
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{fence, Ordering};
 
 use crate::memory::{self, FrameLease, FrameOwner};
+use crate::owned_state::OwnedState;
 use crate::trusted::{frame::Frame, mmio::Mmio};
 
 use super::paging::MmioMapping;
@@ -77,7 +80,7 @@ struct StandingDevices {
 }
 
 /// Set once, while translation is off, and read by every later translation.
-static mut STANDING: Option<StandingDevices> = None;
+static STANDING: OwnedState<StandingDevices> = OwnedState::empty();
 
 /// Table words that a translation adds for the standing devices.
 #[derive(Clone, Copy)]
@@ -678,11 +681,13 @@ pub(crate) fn admit_standing_devices(
     functions: &[(u8, u8, u8)],
     regions: &[(u64, u64)],
 ) -> bool {
-    // SAFETY: bootstrap is single-processor and translation is checked to
-    // be off below, so no translation reads STANDING while it changes.
-    let standing = unsafe { &mut *core::ptr::addr_of_mut!(STANDING) };
-    if standing.is_some()
-        || functions.is_empty()
+    // Admission happens once: the claim fails once STANDING is published
+    // (or while another admission is in progress), and a failed admission
+    // gives it back.
+    let Some(standing) = STANDING.try_claim() else {
+        return false;
+    };
+    if functions.is_empty()
         || functions.len() > STANDING_DEVICE_LIMIT
         || functions
             .iter()
@@ -716,7 +721,7 @@ pub(crate) fn admit_standing_devices(
         }
         return false;
     }
-    *standing = Some(devices);
+    standing.publish(devices);
     true
 }
 
@@ -824,8 +829,8 @@ fn map_standing_page(devices: &mut StandingDevices, root: FrameLease, page: u64)
 /// the standing functions on the translation's own bus.
 fn standing_words(bus: u8, devfn: usize) -> (StandingWords, StandingWords) {
     let (mut root, mut context) = (StandingWords::EMPTY, StandingWords::EMPTY);
-    // SAFETY: STANDING changes only once, while no translation exists.
-    let Some(standing) = (unsafe { (*core::ptr::addr_of!(STANDING)).as_ref() }) else {
+    // STANDING is published once, while no translation exists.
+    let Some(standing) = STANDING.get() else {
         return (root, context);
     };
     for (other, table) in standing.contexts.iter().flatten() {

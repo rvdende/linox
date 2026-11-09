@@ -40,18 +40,20 @@
 //! included: a caller that finds it held leaves its damage for the holder
 //! or the next tick.
 
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use linox_drm::{Blob, Cache, Errno, Features, Mapping};
 
 use linox_virtio_gpu::{self as protocol, Command, Damage, DisplayInfo, Mode, Rect};
 
-use super::device_memory::DmaBuffer;
 use super::virtio::{self, Probe, Segment, SplitQueue, Transport};
 use super::{pci, say, wait_until_ms};
 use crate::framebuffer::{self, Display, Scanout};
+use crate::trusted::claim::{self, ClaimCell};
+use crate::trusted::dma::DmaBuffer;
 use crate::trusted::mmio::Mmio;
 
 /// The one resource the driver creates: the display surface.
@@ -993,38 +995,28 @@ fn add_damage(damage: &AtomicU64, more: Damage) {
 /// The GPU that scans out the console and /dev/fb0, once [`activate`] has
 /// installed it, with the damage waiting to be flushed.
 struct ScanoutOwner {
-    /// Held by whoever is using `gpu`. Only ever tried, never waited on.
-    held: AtomicBool,
-    /// Pending damage as [`Damage::bits`]; updated without holding `held`.
+    /// Pending damage as [`Damage::bits`]; updated without claiming `gpu`.
     damage: AtomicU64,
     /// Set once a flush has failed and been reported.
     failure_reported: AtomicBool,
-    gpu: UnsafeCell<Option<Gpu>>,
+    /// Claimed by whoever is using the GPU. Only ever tried, never waited
+    /// on.
+    gpu: ClaimCell<Option<Gpu>>,
 }
 
-// SAFETY: `gpu` is reached only through a Claim, and `held` admits one
-// Claim at a time on any CPU (acquire on taking it, release on dropping
-// it). The other fields are atomics.
-unsafe impl Sync for ScanoutOwner {}
-
 static SCANOUT: ScanoutOwner = ScanoutOwner {
-    held: AtomicBool::new(false),
     damage: AtomicU64::new(0),
     failure_reported: AtomicBool::new(false),
-    gpu: UnsafeCell::new(None),
+    gpu: ClaimCell::new(None),
 };
 
 /// Exclusive use of the scanout GPU until dropped.
-struct Claim<'a> {
-    owner: &'a ScanoutOwner,
-}
+struct Claim<'a>(claim::Claim<'a, Option<Gpu>>);
 
 impl ScanoutOwner {
     /// The GPU, or `None` while another context is using it.
     fn claim(&self) -> Option<Claim<'_>> {
-        // Lazily: a Claim made for a latch someone else holds would release
-        // it when dropped.
-        (!self.held.swap(true, Ordering::Acquire)).then(|| Claim { owner: self })
+        self.gpu.try_claim().map(Claim)
     }
 
     /// Flushes pending damage. With `wait_ms`, waits that long for a flush
@@ -1061,20 +1053,11 @@ impl ScanoutOwner {
 
 impl Claim<'_> {
     fn gpu(&mut self) -> Option<&mut Gpu> {
-        // SAFETY: this claim holds `held`, so no other reference to `gpu`
-        // exists until it drops.
-        unsafe { (*self.owner.gpu.get()).as_mut() }
+        self.0.as_mut()
     }
 
     fn install(&mut self, gpu: Gpu) {
-        // SAFETY: as for gpu.
-        unsafe { *self.owner.gpu.get() = Some(gpu) };
-    }
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        self.owner.held.store(false, Ordering::Release);
+        *self.0 = Some(gpu);
     }
 }
 
@@ -1210,14 +1193,13 @@ pub(crate) fn activate(prepared: Prepared) {
         return;
     }
     let display = gpu.display();
-    let base = gpu.surface.kernel_address();
     let (mode, scanout) = (gpu.mode, gpu.scanout);
     let capsets = gpu
         .three_d
         .as_ref()
         .map_or(0, |three_d| three_d.features().capsets);
     let host_visible = gpu.three_d.as_ref().map(|three_d| three_d.host_visible);
-    {
+    let pixels = {
         let Some(mut claim) = SCANOUT.claim() else {
             return;
         };
@@ -1225,11 +1207,14 @@ pub(crate) fn activate(prepared: Prepared) {
             return;
         }
         claim.install(gpu);
-    }
-    // SAFETY: the surface now belongs to SCANOUT, which never drops or
-    // replaces its GPU, so `base` maps `display.length` bytes of it, at
-    // `display.physical`, for the rest of the kernel's life.
-    if !unsafe { framebuffer::adopt(display, base) } {
+        // The surface now belongs to SCANOUT, which never drops or
+        // replaces its GPU; its frames are the display's for good.
+        let Some(gpu) = claim.gpu() else {
+            return;
+        };
+        gpu.surface.keep_for_display()
+    };
+    if !framebuffer::adopt(display, pixels) {
         say!("linox: virtio-gpu: the console did not move to the GPU surface\n");
         return;
     }

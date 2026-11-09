@@ -73,9 +73,29 @@ pub(crate) struct InitialMmioMappings {
     pub(crate) network_notification: MmioMapping,
     pub(crate) network_msix: MmioMapping,
     /// Write-combining alias of the firmware framebuffer, when one was requested.
-    pub(crate) framebuffer: Option<usize>,
+    pub(crate) framebuffer: Option<FramebufferWindow>,
     /// Uncached mappings of the requested device register ranges, in order.
     pub(crate) devices: [Option<MmioMapping>; MAX_DEVICE_REGIONS],
+}
+
+/// The kernel's write-combining mapping of the firmware framebuffer: the
+/// virtual address of its first byte and the bytes mapped from there. Only
+/// this module makes one (`trusted::pixels::PixelBuffer::window` relies on
+/// it).
+#[derive(Clone, Copy)]
+pub(crate) struct FramebufferWindow {
+    address: usize,
+    length: usize,
+}
+
+impl FramebufferWindow {
+    pub(crate) fn address(self) -> usize {
+        self.address
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.length
+    }
 }
 
 impl MmioMapping {
@@ -1707,12 +1727,13 @@ pub(crate) fn install_page_attribute_table() {
 }
 
 /// Maps a framebuffer write-combining into the direct-map slot reserved for it
-/// and returns the virtual address of `physical`. The window holds 1 GiB.
+/// and returns the window from `physical`, `length` bytes. The window holds
+/// 1 GiB.
 unsafe fn map_framebuffer_window(
     direct_pdpt: *mut u64,
     physical: u64,
     length: usize,
-) -> Result<usize, PagingError> {
+) -> Result<FramebufferWindow, PagingError> {
     let start = physical & !(LARGE_PAGE_SIZE - 1);
     let end = physical
         .checked_add(length as u64)
@@ -1735,7 +1756,10 @@ unsafe fn map_framebuffer_window(
     direct_pdpt
         .add(FRAMEBUFFER_PDPT_INDEX)
         .write(directory as u64 | PRESENT | WRITABLE);
-    Ok(FRAMEBUFFER_WINDOW_BASE + (physical - start) as usize)
+    Ok(FramebufferWindow {
+        address: FRAMEBUFFER_WINDOW_BASE + (physical - start) as usize,
+        length,
+    })
 }
 
 unsafe fn ensure_fine_region(

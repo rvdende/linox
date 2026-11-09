@@ -94,7 +94,7 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use linox_acpi_tables as acpi_tables;
-use trusted::{firmware, frame::Frame, mmio::Mmio, port::Port8};
+use trusted::{firmware, frame::Frame, mmio::Mmio, pixels::PixelBuffer, port::Port8};
 
 pub use bringup::report_panic;
 pub use pe::rebase_loaded_image;
@@ -331,18 +331,12 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // UEFI's page tables identity-map the framebuffer until Linox installs its
     // own. Check that they really do (a framebuffer in a 64-bit BAR far above
     // RAM may not be mapped) before drawing on it.
-    let framebuffer_mapped =
-        framebuffer::mapped_length(&boot_info.framebuffer).is_some_and(|length| {
-            let base = boot_info.framebuffer.base;
-            bringup::firmware_maps(base, true)
-                && bringup::firmware_maps(base + length as u64 - 1, true)
-        });
-    if !framebuffer_mapped && boot_info.framebuffer.base != 0 {
+    let firmware_pixels = framebuffer::mapped_length(&boot_info.framebuffer)
+        .and_then(|length| PixelBuffer::firmware(boot_info.framebuffer.base, length));
+    if firmware_pixels.is_none() && boot_info.framebuffer.base != 0 {
         serial_write_raw(b"linox: firmware page tables do not map the framebuffer\r\n");
     }
-    if framebuffer_mapped
-        && framebuffer::init(&boot_info.framebuffer, boot_info.framebuffer.base as usize)
-    {
+    if firmware_pixels.is_some_and(|pixels| framebuffer::init(&boot_info.framebuffer, pixels)) {
         serial_write_raw(b"linox: booting\r\n");
         serial_write_raw(b"linox: firmware framebuffer console active\r\n");
     }
@@ -662,8 +656,7 @@ unsafe extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         kernel_fail("linox: page-table transition failed\r\n");
     };
     if let Some(window) = framebuffer_window {
-        // SAFETY: the window maps the framebuffer that init validated.
-        unsafe { framebuffer::relocate(window) };
+        framebuffer::relocate(PixelBuffer::window(window));
     }
     serial_write("linox: kernel page tables active\r\n");
     if !arch::x86_64::cpu::execute_disable_enabled()

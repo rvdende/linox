@@ -16,10 +16,16 @@
 //! so a blocked device that firmware says needs memory keeps exactly that.
 //! Requester-ID aliases from IVHD device entries get their device's policy.
 //! Interrupt remapping is left off; bring-up drivers poll.
+//!
+//! The device table, the command buffer, the event log, the completion
+//! store and the page-table pool are static DMA pages
+//! (`trusted::dma::StaticDma`), which the one [`DeviceTableBuilder`] claims
+//! for good: the units use them for the rest of the boot.
 
-use core::ptr::{addr_of, addr_of_mut};
+#![forbid(unsafe_code)]
 
-use super::{wait_until_ms, DmaPage, DmaRegion};
+use super::{wait_until_ms, DmaRegion};
+use crate::trusted::dma::{DmaSpan, StaticDma};
 use crate::trusted::mmio::Mmio;
 
 const DEVICE_TABLE_BASE: usize = 0x00;
@@ -101,7 +107,9 @@ const IVMD_WRITE: u8 = 1 << 2;
 const IVMD_EXCLUSION: u8 = 1 << 3;
 /// Device table entries cover every 16-bit requester ID: 512 pages.
 const DEVICE_IDS: usize = 1 << 16;
-const DEVICE_TABLE_PAGES: u64 = (DEVICE_IDS * 32 / 4096) as u64;
+/// Bytes per device table entry (four quadwords).
+const ENTRY_BYTES: usize = 32;
+const DEVICE_TABLE_PAGES: usize = DEVICE_IDS * ENTRY_BYTES / 4096;
 /// The command buffer and event log each hold 2^8 entries of 16 bytes.
 const RING_LENGTH_LOG2: u64 = 8;
 const RING_BYTES: usize = 4096;
@@ -133,15 +141,20 @@ pub(crate) const MAX_UNITS: usize = 8;
 const MAX_UNITY_RANGES: usize = 16;
 const MAX_ALIASES: usize = 32;
 
-#[repr(C, align(4096))]
-struct DeviceTable([[u64; 4]; DEVICE_IDS]);
+static DEVICE_TABLE: StaticDma<DEVICE_TABLE_PAGES> = StaticDma::new();
+static COMMANDS: StaticDma<1> = StaticDma::new();
+static EVENTS: StaticDma<1> = StaticDma::new();
+static COMPLETION: StaticDma<1> = StaticDma::new();
+static PAGE_TABLES: StaticDma<PAGE_TABLE_POOL_PAGES> = StaticDma::new();
 
-static mut DEVICE_TABLE: DeviceTable = DeviceTable([[0; 4]; DEVICE_IDS]);
-static mut COMMANDS: DmaPage = DmaPage::ZERO;
-static mut EVENTS: DmaPage = DmaPage::ZERO;
-static mut COMPLETION: DmaPage = DmaPage::ZERO;
-static mut PAGE_TABLES: [DmaPage; PAGE_TABLE_POOL_PAGES] = [DmaPage::ZERO; PAGE_TABLE_POOL_PAGES];
-static mut PAGE_TABLES_USED: usize = 0;
+/// The memory every unit uses, claimed for good by the builder.
+#[derive(Clone)]
+struct Tables {
+    device: DmaSpan,
+    commands: DmaSpan,
+    events: DmaSpan,
+    completion: DmaSpan,
+}
 
 /// One IOMMU unit an IVHD block describes.
 #[derive(Clone, Copy)]
@@ -432,8 +445,9 @@ pub(crate) struct Fault {
 #[derive(Clone, Copy)]
 struct Domain {
     root: u64,
-    /// The driver's region slice it was built from (address, count), or
-    /// none for a domain of unity ranges only.
+    /// Which driver's region slice it was built from (its address and
+    /// count, compared, never dereferenced), or none for a domain of unity
+    /// ranges only.
     regions: Option<(usize, usize)>,
     /// Bit i set: unity range i is mapped.
     unity: u32,
@@ -446,29 +460,38 @@ pub(crate) struct DeviceTableBuilder<'a> {
     domains: [Option<Domain>; DOMAIN_LIMIT],
     assigned: [u16; ASSIGNED_LIMIT],
     assigned_count: usize,
+    tables: Tables,
+    /// The I/O page-table pool and the pages of it in use.
+    page_tables: DmaSpan,
+    page_tables_used: usize,
 }
 
 impl<'a> DeviceTableBuilder<'a> {
     /// Starts a device table in which every requester ID is blocked. The
     /// unity ranges are mapped for the devices they cover as those devices
-    /// are assigned.
-    ///
-    /// # Safety
-    ///
-    /// No unit may be using the device table or page-table pool, and only
-    /// one builder may exist.
-    pub(crate) unsafe fn new(unity: &'a [Option<UnityRange>]) -> Self {
-        let table = &mut *addr_of_mut!(DEVICE_TABLE);
-        for entry in table.0.iter_mut() {
-            *entry = [ENTRY_VALID | ENTRY_TRANSLATION_VALID, 0, 0, 0];
+    /// are assigned. The tables are claimed for good, so there is one
+    /// builder per boot: `None` after the first.
+    pub(crate) fn new(unity: &'a [Option<UnityRange>]) -> Option<Self> {
+        let tables = Tables {
+            device: DEVICE_TABLE.claim()?.keep(),
+            commands: COMMANDS.claim()?.keep(),
+            events: EVENTS.claim()?.keep(),
+            completion: COMPLETION.claim()?.keep(),
+        };
+        let page_tables = PAGE_TABLES.claim()?.keep();
+        for entry in 0..DEVICE_IDS {
+            let words = [ENTRY_VALID | ENTRY_TRANSLATION_VALID, 0, 0, 0];
+            write_entry(&tables.device, entry, words);
         }
-        PAGE_TABLES_USED = 0;
-        Self {
+        Some(Self {
             unity,
             domains: [None; DOMAIN_LIMIT],
             assigned: [0; ASSIGNED_LIMIT],
             assigned_count: 0,
-        }
+            tables,
+            page_tables,
+            page_tables_used: 0,
+        })
     }
 
     /// Sets the policy of requester ID `device`.
@@ -496,28 +519,23 @@ impl<'a> DeviceTableBuilder<'a> {
             ],
             Access::Blocked if unity == 0 => [ENTRY_VALID | ENTRY_TRANSLATION_VALID, 0, 0, 0],
             Access::Blocked => self.translated(None, unity)?,
-            Access::Regions(regions) => {
-                self.translated(Some((regions.as_ptr() as usize, regions.len())), unity)?
-            }
+            Access::Regions(regions) => self.translated(Some(regions), unity)?,
         };
         self.assigned[self.assigned_count] = device;
         self.assigned_count += 1;
-        // SAFETY: the builder owns the device table until units use it.
-        unsafe { (*addr_of_mut!(DEVICE_TABLE)).0[usize::from(device)] = entry };
+        write_entry(&self.tables.device, usize::from(device), entry);
         Ok(())
     }
 
     /// A translated device-table entry for the domain of `regions` plus the
     /// unity ranges in `unity`, building the domain if it is new.
-    fn translated(
-        &mut self,
-        regions: Option<(usize, usize)>,
-        unity: u32,
-    ) -> Result<[u64; 4], Error> {
+    fn translated(&mut self, regions: Option<&[DmaRegion]>, unity: u32) -> Result<[u64; 4], Error> {
+        // Devices given the same slice share a domain.
+        let key = regions.map(|regions| (regions.as_ptr() as usize, regions.len()));
         let found = self
             .domains
             .iter()
-            .position(|domain| domain.is_some_and(|d| d.regions == regions && d.unity == unity));
+            .position(|domain| domain.is_some_and(|d| d.regions == key && d.unity == unity));
         let index = match found {
             Some(index) => index,
             None => {
@@ -526,23 +544,18 @@ impl<'a> DeviceTableBuilder<'a> {
                     .iter()
                     .position(Option::is_none)
                     .ok_or(Error::TooManyDomains)?;
-                let root = allocate_page_table()?;
-                if let Some((address, count)) = regions {
-                    // SAFETY: the pair came from a live slice in assign.
-                    let regions =
-                        unsafe { core::slice::from_raw_parts(address as *const DmaRegion, count) };
-                    for region in regions {
-                        map_range(root, region.start, region.length)?;
-                    }
+                let root = self.allocate_page_table()?;
+                for region in regions.unwrap_or(&[]) {
+                    self.map_range(root, region.start, region.length)?;
                 }
                 for (bit, range) in self.unity.iter().enumerate() {
                     if let Some(range) = range.filter(|_| unity & 1 << bit != 0) {
-                        map_range(root, range.start, range.length)?;
+                        self.map_range(root, range.start, range.length)?;
                     }
                 }
                 self.domains[index] = Some(Domain {
                     root,
-                    regions,
+                    regions: key,
                     unity,
                 });
                 index
@@ -573,12 +586,87 @@ impl<'a> DeviceTableBuilder<'a> {
     pub(crate) fn assigned(&self) -> &[u16] {
         &self.assigned[..self.assigned_count]
     }
+
+    /// Takes a zeroed page from the page-table pool and returns its
+    /// physical address.
+    fn allocate_page_table(&mut self) -> Result<u64, Error> {
+        if self.page_tables_used == PAGE_TABLE_POOL_PAGES {
+            return Err(Error::OutOfPageTables);
+        }
+        let offset = self.page_tables_used * 4096;
+        self.page_tables_used += 1;
+        self.page_tables.fill(offset, 4096, 0);
+        Ok(self.page_tables.device_address(offset))
+    }
+
+    /// The pool offset of entry `index` of the page table at `table`, a
+    /// physical address `allocate_page_table` returned.
+    fn table_entry(&self, table: u64, index: usize) -> Result<usize, Error> {
+        table
+            .checked_sub(self.page_tables.device_address(0))
+            .map(|offset| offset as usize + index * 8)
+            .filter(|offset| offset + 8 <= self.page_tables.len())
+            .ok_or(Error::OutOfPageTables)
+    }
+
+    /// Identity-maps every page of `start..start + length`.
+    fn map_range(&mut self, root: u64, start: u64, length: u64) -> Result<(), Error> {
+        let first = start & !0xfff;
+        let end = start.saturating_add(length).saturating_add(0xfff) & !0xfff;
+        if end > PAGING_LIMIT {
+            return Err(Error::UnityRangeTooHigh(start));
+        }
+        for page in (first..end).step_by(4096) {
+            self.map_identity(root, page)?;
+        }
+        Ok(())
+    }
+
+    /// Maps `page` to itself, readable and writable, in the three-level
+    /// table rooted at `root`, adding intermediate tables as needed.
+    fn map_identity(&mut self, root: u64, page: u64) -> Result<(), Error> {
+        let mut table = root;
+        for level in (1..=PAGING_LEVELS).rev() {
+            let index = ((page >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
+            // Every table address came from the page-table pool.
+            let entry = self.table_entry(table, index)?;
+            if level == 1 {
+                // A leaf has next level 0.
+                self.page_tables
+                    .write::<u64>(entry, page | ENTRY_READ | ENTRY_WRITE | PAGE_PRESENT);
+                return Ok(());
+            }
+            let current = self.page_tables.read::<u64>(entry);
+            table = if current & PAGE_PRESENT != 0 {
+                current & 0x000f_ffff_ffff_f000
+            } else {
+                let next = self.allocate_page_table()?;
+                self.page_tables.write::<u64>(
+                    entry,
+                    next | (level - 1) << PAGE_NEXT_LEVEL_SHIFT
+                        | ENTRY_READ
+                        | ENTRY_WRITE
+                        | PAGE_PRESENT,
+                );
+                next
+            };
+        }
+        Ok(())
+    }
+}
+
+/// Writes device table entry `index`, quadword by quadword.
+fn write_entry(table: &DmaSpan, index: usize, words: [u64; 4]) {
+    for (word, value) in words.into_iter().enumerate() {
+        table.write::<u64>(index * ENTRY_BYTES + word * 8, value);
+    }
 }
 
 /// One unit with remapping turned on.
 pub(crate) struct Remapping {
     base: u64,
     registers: Mmio,
+    tables: Tables,
 }
 
 impl Remapping {
@@ -599,14 +687,12 @@ impl Remapping {
     /// 4. Enables the command buffer, event log and translation, then
     ///    invalidates every cached device entry and translation.
     ///
-    /// # Safety
-    ///
     /// `unit.base` must be an AMD-Vi unit from IVRS that nothing else
-    /// drives, and the device table must not change while it is on.
-    pub(crate) unsafe fn enable(
-        unit: &Unit,
-        table: &DeviceTableBuilder<'_>,
-    ) -> Result<Self, Error> {
+    /// drives (its registers are reached through the firmware's identity
+    /// map, which only bring-up uses), and the table should not change
+    /// while the unit is on.
+    pub(crate) fn enable(unit: &Unit, table: &DeviceTableBuilder<'_>) -> Result<Self, Error> {
+        let tables = table.tables.clone();
         let base = Mmio::firmware(unit.base, REGISTER_BYTES).ok_or(Error::NotMapped)?;
         let control = base.read::<u64>(CONTROL) & !CONTROL_FIRMWARE_FEATURES;
         base.write::<u64>(CONTROL, control);
@@ -618,19 +704,19 @@ impl Remapping {
             return Err(Error::StillRunning(base.read::<u64>(STATUS)));
         }
         base.write::<u64>(STATUS, STATUS_CLEARABLE);
-        (*addr_of_mut!(COMMANDS)).0.fill(0);
-        (*addr_of_mut!(EVENTS)).0.fill(0);
+        tables.commands.fill(0, RING_BYTES, 0);
+        tables.events.fill(0, RING_BYTES, 0);
         base.write::<u64>(
             DEVICE_TABLE_BASE,
-            addr_of!(DEVICE_TABLE) as u64 | (DEVICE_TABLE_PAGES - 1),
+            tables.device.device_address(0) | (DEVICE_TABLE_PAGES as u64 - 1),
         );
         base.write::<u64>(
             COMMAND_BUFFER_BASE,
-            addr_of!(COMMANDS) as u64 | RING_LENGTH_LOG2 << 56,
+            tables.commands.device_address(0) | RING_LENGTH_LOG2 << 56,
         );
         base.write::<u64>(
             EVENT_LOG_BASE,
-            addr_of!(EVENTS) as u64 | RING_LENGTH_LOG2 << 56,
+            tables.events.device_address(0) | RING_LENGTH_LOG2 << 56,
         );
         for register in [COMMAND_HEAD, COMMAND_TAIL, EVENT_HEAD, EVENT_TAIL] {
             base.write::<u64>(register, 0);
@@ -659,6 +745,7 @@ impl Remapping {
         let mut unit = Self {
             base: unit.base,
             registers: base,
+            tables,
         };
         // Invalidate each assigned entry even when the unit can invalidate
         // everything at once: emulated units such as QEMU's re-read device
@@ -704,16 +791,14 @@ impl Remapping {
         if head == tail {
             return None;
         }
-        // SAFETY: the unit finished writing entries before moving the tail.
-        let entry = unsafe {
-            let events = addr_of!(EVENTS).cast::<u32>().add(head / 4);
-            [
-                events.read_volatile(),
-                events.add(1).read_volatile(),
-                events.add(2).read_volatile(),
-                events.add(3).read_volatile(),
-            ]
-        };
+        // The unit finished writing entries before moving the tail.
+        let events = &self.tables.events;
+        let entry = [
+            events.read::<u32>(head),
+            events.read::<u32>(head + 4),
+            events.read::<u32>(head + 8),
+            events.read::<u32>(head + 12),
+        ];
         self.registers
             .write::<u64>(EVENT_HEAD, ((head + 16) % RING_BYTES) as u64);
         Some(Fault {
@@ -732,13 +817,10 @@ impl Remapping {
         }) {
             return Err(Error::CommandTimedOut);
         }
-        // SAFETY: the slot at the tail is not visible to the unit until the
-        // tail moves past it.
-        unsafe {
-            let slot = addr_of_mut!(COMMANDS).cast::<u32>().add(tail / 4);
-            for (index, word) in words.iter().enumerate() {
-                slot.add(index).write_volatile(*word);
-            }
+        // The slot at the tail is not visible to the unit until the tail
+        // moves past it.
+        for (index, word) in words.iter().enumerate() {
+            self.tables.commands.write::<u32>(tail + index * 4, *word);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.registers.write::<u64>(COMMAND_TAIL, next as u64);
@@ -747,18 +829,17 @@ impl Remapping {
 
     /// Waits until the unit has finished every queued command.
     fn wait(&mut self) -> Result<(), Error> {
-        let store = addr_of_mut!(COMPLETION).cast::<u64>();
-        // SAFETY: the completion page is only written here and by the unit.
-        unsafe { store.write_volatile(0) };
-        let address = store as u64;
+        // The completion page is only written here and by the unit.
+        let store = self.tables.completion.clone();
+        store.write::<u64>(0, 0);
+        let address = store.device_address(0);
         self.command([
             address as u32 | 1,
             (address >> 32) as u32 & 0xf_ffff | OPCODE_COMPLETION_WAIT << 28,
             1,
             0,
         ])?;
-        // SAFETY: as above.
-        if wait_until_ms(COMMAND_TIMEOUT_MS, || unsafe { store.read_volatile() } == 1) {
+        if wait_until_ms(COMMAND_TIMEOUT_MS, || store.read::<u64>(0) == 1) {
             Ok(())
         } else {
             Err(Error::CommandTimedOut)
@@ -778,62 +859,4 @@ impl UnityRange {
     pub(crate) fn access(&self) -> (bool, bool) {
         (self.flags & IVMD_READ != 0, self.flags & IVMD_WRITE != 0)
     }
-}
-
-fn allocate_page_table() -> Result<u64, Error> {
-    // SAFETY: the builder has exclusive use of the pool.
-    unsafe {
-        if PAGE_TABLES_USED == PAGE_TABLE_POOL_PAGES {
-            return Err(Error::OutOfPageTables);
-        }
-        let page = addr_of_mut!(PAGE_TABLES[PAGE_TABLES_USED]);
-        PAGE_TABLES_USED += 1;
-        (*page).0.fill(0);
-        Ok(page as u64)
-    }
-}
-
-/// Identity-maps every page of `start..start + length`.
-fn map_range(root: u64, start: u64, length: u64) -> Result<(), Error> {
-    let first = start & !0xfff;
-    let end = start.saturating_add(length).saturating_add(0xfff) & !0xfff;
-    if end > PAGING_LIMIT {
-        return Err(Error::UnityRangeTooHigh(start));
-    }
-    for page in (first..end).step_by(4096) {
-        map_identity(root, page)?;
-    }
-    Ok(())
-}
-
-/// Maps `page` to itself, readable and writable, in the three-level table
-/// rooted at `root`, adding intermediate tables as needed.
-fn map_identity(root: u64, page: u64) -> Result<(), Error> {
-    let mut table = root;
-    for level in (1..=PAGING_LEVELS).rev() {
-        let index = ((page >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
-        // SAFETY: every table address came from the page-table pool.
-        let entry = unsafe { (table as *mut u64).add(index) };
-        if level == 1 {
-            // A leaf has next level 0.
-            unsafe { entry.write_volatile(page | ENTRY_READ | ENTRY_WRITE | PAGE_PRESENT) };
-            return Ok(());
-        }
-        let current = unsafe { entry.read_volatile() };
-        table = if current & PAGE_PRESENT != 0 {
-            current & 0x000f_ffff_ffff_f000
-        } else {
-            let next = allocate_page_table()?;
-            unsafe {
-                entry.write_volatile(
-                    next | (level - 1) << PAGE_NEXT_LEVEL_SHIFT
-                        | ENTRY_READ
-                        | ENTRY_WRITE
-                        | PAGE_PRESENT,
-                )
-            };
-            next
-        };
-    }
-    Ok(())
 }

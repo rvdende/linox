@@ -12,12 +12,22 @@
 //! host copies only when told, so the console reports each rectangle it
 //! draws to the GPU driver, and the Linux timer tick calls [`refresh`] so
 //! that the driver can flush what a domain draws through /dev/fb0.
+//!
+//! Pixels go through a `trusted::pixels::PixelBuffer`, which checks every
+//! access against the surface. The console's state is claimed by one
+//! context at a time (`trusted::claim::ClaimCell`): output arriving while
+//! it is busy, for example from an exception handler, is dropped rather
+//! than interleaved. Each surface is published once, with the display mode
+//! /dev/fb0 reports, so that /dev/fb0 copies need no claim.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use font8x8::legacy::BASIC_LEGACY;
 use linox_virtio_gpu::Rect;
 
+use crate::owned_state::OwnedState;
+use crate::trusted::claim::ClaimCell;
+use crate::trusted::pixels::PixelBuffer;
 use crate::{BootFramebuffer, FRAMEBUFFER_FORMAT_BGRX, FRAMEBUFFER_FORMAT_RGBX};
 
 const GLYPH_SIZE: usize = 8;
@@ -27,6 +37,9 @@ const MAX_CSI_PARAMETERS: usize = 8;
 const DEFAULT_FOREGROUND: u8 = 7;
 const DEFAULT_BACKGROUND: u8 = 0;
 const TARGET_ROWS: usize = 50;
+/// Surfaces a boot publishes: the firmware's framebuffer, its kernel
+/// mapping, and a virtio-gpu surface, with one to spare.
+const SURFACE_LIMIT: usize = 4;
 
 /// The sixteen VGA colours as 0xRRGGBB.
 const PALETTE: [u32; 16] = [
@@ -65,7 +78,7 @@ enum Escape {
 }
 
 struct Console {
-    base: usize,
+    pixels: PixelBuffer,
     width: usize,
     height: usize,
     stride: usize,
@@ -90,11 +103,9 @@ struct Console {
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
-static BUSY: AtomicBool = AtomicBool::new(false);
 /// Set while a domain draws to the framebuffer through /dev/fb0; the console
 /// keeps its text model but stops drawing until the screen is handed back.
 static OWNED: AtomicBool = AtomicBool::new(false);
-static mut DISPLAY: Option<Display> = None;
 
 /// How pixels written to the framebuffer reach the screen.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -119,8 +130,23 @@ pub(crate) struct Display {
     pub(crate) bgrx: bool,
     pub(crate) scanout: Scanout,
 }
-static mut CONSOLE: Console = Console {
-    base: 0,
+
+/// A display mode and the pixels that show it.
+#[derive(Clone, Copy)]
+struct Surface {
+    display: Display,
+    pixels: PixelBuffer,
+}
+
+/// The surfaces published during boot (by [`init`], [`relocate`] and
+/// [`adopt`]), each once; [`CURRENT_SURFACE`] names the one in use.
+static SURFACES: [OwnedState<Surface>; SURFACE_LIMIT] =
+    [const { OwnedState::empty() }; SURFACE_LIMIT];
+/// One more than the index of the surface in use, or 0 for none.
+static CURRENT_SURFACE: AtomicUsize = AtomicUsize::new(0);
+
+static CONSOLE: ClaimCell<Console> = ClaimCell::new(Console {
+    pixels: PixelBuffer::EMPTY,
     width: 0,
     height: 0,
     stride: 0,
@@ -140,7 +166,26 @@ static mut CONSOLE: Console = Console {
     drawn: [[BLANK; MAX_COLUMNS]; MAX_ROWS],
     damage: None,
     jump_scroll: false,
-};
+});
+
+/// Makes `surface` the one /dev/fb0 and [`display`] report. Whether a
+/// slot was left for it.
+fn publish(surface: Surface) -> bool {
+    let Some(index) = SURFACES
+        .iter()
+        .position(|slot| slot.try_install(surface).is_ok())
+    else {
+        return false;
+    };
+    CURRENT_SURFACE.store(index + 1, Ordering::Release);
+    true
+}
+
+/// The surface in use, if any.
+fn surface() -> Option<Surface> {
+    let index = CURRENT_SURFACE.load(Ordering::Acquire).checked_sub(1)?;
+    SURFACES.get(index)?.get().copied()
+}
 
 /// Returns the byte length a framebuffer description covers, or `None` when
 /// the description is absent, unsupported, or inconsistent.
@@ -161,20 +206,18 @@ pub(crate) fn mapped_length(info: &BootFramebuffer) -> Option<usize> {
     (length as u64 <= info.size).then_some(length)
 }
 
-/// Starts the console on a framebuffer reachable at `virtual_base`.
-///
-/// # Safety
-///
-/// `virtual_base` must map `mapped_length(info)` writable bytes of the
-/// framebuffer described by `info` for as long as the console is used.
-pub(crate) unsafe fn init(info: &BootFramebuffer, virtual_base: usize) -> bool {
+/// Starts the console on the framebuffer `info` describes, which `pixels`
+/// covers.
+pub(crate) fn init(info: &BootFramebuffer, pixels: PixelBuffer) -> bool {
     let Some(length) = mapped_length(info) else {
         return false;
     };
-    if virtual_base == 0 || BUSY.swap(true, Ordering::Acquire) {
+    if pixels.len() < length {
         return false;
     }
-    let console = &mut *core::ptr::addr_of_mut!(CONSOLE);
+    let Some(mut console) = CONSOLE.try_claim() else {
+        return false;
+    };
     let display = Display {
         physical: info.base,
         width: info.width,
@@ -184,33 +227,32 @@ pub(crate) unsafe fn init(info: &BootFramebuffer, virtual_base: usize) -> bool {
         bgrx: info.format == FRAMEBUFFER_FORMAT_BGRX,
         scanout: Scanout::Firmware,
     };
-    DISPLAY = Some(display);
-    console.attach(&display, virtual_base);
+    if !publish(Surface { display, pixels }) {
+        return false;
+    }
+    console.attach(&display, pixels);
     console.column = 0;
     console.row = 0;
     console.reset_attributes();
     console.escape = Escape::None;
     console.clear_all();
-    console.fill(0, 0, console.width, console.height, DEFAULT_BACKGROUND);
+    let (width, height) = (console.width, console.height);
+    console.fill(0, 0, width, height, DEFAULT_BACKGROUND);
     for row in 0..console.rows {
-        console.drawn[row][..console.columns].fill(BLANK);
+        let columns = console.columns;
+        console.drawn[row][..columns].fill(BLANK);
     }
     console.damage = None;
-    BUSY.store(false, Ordering::Release);
+    drop(console);
     READY.store(true, Ordering::Release);
     true
 }
 
 /// Moves the console and /dev/fb0 to another surface, such as a virtio-gpu
-/// resource's backing, and repaints the console's text there. Called during
-/// boot, before Linux programs run, with or without a firmware framebuffer
-/// in use before it.
-///
-/// # Safety
-///
-/// `virtual_base` must map `display.length` writable bytes of the memory at
-/// `display.physical` for the rest of the kernel's life.
-pub(crate) unsafe fn adopt(display: Display, virtual_base: usize) -> bool {
+/// resource's backing that `pixels` covers, and repaints the console's text
+/// there. Called during boot, before Linux programs run, with or without a
+/// firmware framebuffer in use before it.
+pub(crate) fn adopt(display: Display, pixels: PixelBuffer) -> bool {
     let rows = display.height as usize;
     let valid = display.width as usize >= GLYPH_SIZE
         && rows >= GLYPH_SIZE
@@ -218,16 +260,21 @@ pub(crate) unsafe fn adopt(display: Display, virtual_base: usize) -> bool {
         && (display.line_length as usize)
             .checked_mul(rows)
             .is_some_and(|needed| needed <= display.length)
-        && display.physical.is_multiple_of(4096);
-    if !valid || virtual_base == 0 || BUSY.swap(true, Ordering::Acquire) {
+        && display.physical.is_multiple_of(4096)
+        && pixels.len() >= display.length;
+    if !valid {
         return false;
     }
-    let console = &mut *core::ptr::addr_of_mut!(CONSOLE);
-    DISPLAY = Some(display);
-    console.attach(&display, virtual_base);
+    let Some(mut console) = CONSOLE.try_claim() else {
+        return false;
+    };
+    if !publish(Surface { display, pixels }) {
+        return false;
+    }
+    console.attach(&display, pixels);
     console.repaint();
     let damage = console.damage.take();
-    BUSY.store(false, Ordering::Release);
+    drop(console);
     READY.store(true, Ordering::Release);
     if let Some(damage) = damage {
         present(damage);
@@ -235,28 +282,30 @@ pub(crate) unsafe fn adopt(display: Display, virtual_base: usize) -> bool {
     true
 }
 
-/// Moves the console to a new virtual address for the same framebuffer.
-///
-/// # Safety
-///
-/// `virtual_base` must map the framebuffer passed to [`init`].
-pub(crate) unsafe fn relocate(virtual_base: usize) {
-    if virtual_base == 0 || BUSY.swap(true, Ordering::Acquire) {
+/// Moves the console to `pixels`, a new mapping of the framebuffer passed
+/// to [`init`] (the kernel's own, once its page tables are live).
+pub(crate) fn relocate(pixels: PixelBuffer) {
+    let Some(mut console) = CONSOLE.try_claim() else {
         return;
+    };
+    if let Some(Surface { display, .. }) = surface() {
+        if pixels.len() < display.length || !publish(Surface { display, pixels }) {
+            return;
+        }
     }
-    (*core::ptr::addr_of_mut!(CONSOLE)).base = virtual_base;
-    BUSY.store(false, Ordering::Release);
+    console.pixels = pixels;
 }
 
 /// Mirrors console output. Output arriving while the console is busy, for
 /// example from an exception handler, is dropped rather than interleaved.
 pub(crate) fn write(bytes: &[u8]) {
-    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) {
         return;
     }
-    // SAFETY: BUSY grants exclusive access to CONSOLE, and READY guarantees
-    // that init mapped the framebuffer it describes.
-    let console = unsafe { &mut *core::ptr::addr_of_mut!(CONSOLE) };
+    // READY guarantees that init published the surface the console draws.
+    let Some(mut console) = CONSOLE.try_claim() else {
+        return;
+    };
     let owned = OWNED.load(Ordering::Acquire);
     if !owned {
         console.hide_cursor();
@@ -268,7 +317,7 @@ pub(crate) fn write(bytes: &[u8]) {
         console.show_cursor();
     }
     let damage = console.damage.take();
-    BUSY.store(false, Ordering::Release);
+    drop(console);
     if let Some(damage) = damage {
         present(damage);
     }
@@ -277,9 +326,14 @@ pub(crate) fn write(bytes: &[u8]) {
 /// Releases the console after a fatal exception or panic that may have
 /// struck while it was drawing, so the crash report still reaches the
 /// screen. The text model may be mid-update; a report is worth more.
-pub(crate) fn recover() {
+///
+/// # Safety
+///
+/// The caller reports a fatal error and halts, on the only CPU running:
+/// whatever it interrupted never resumes.
+pub(crate) unsafe fn recover() {
     OWNED.store(false, Ordering::Release);
-    BUSY.store(false, Ordering::Release);
+    CONSOLE.release_abandoned();
 }
 
 /// Scrolls a quarter of the screen at a time instead of one line. Each
@@ -288,12 +342,12 @@ pub(crate) fn recover() {
 /// noticeable fraction of a second per redraw; bring-up mode turns this on
 /// so that its long report scrolls in a few redraws, not hundreds.
 pub(crate) fn set_jump_scroll(enabled: bool) {
-    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) {
         return;
     }
-    // SAFETY: BUSY grants exclusive access to CONSOLE.
-    unsafe { (*core::ptr::addr_of_mut!(CONSOLE)).jump_scroll = enabled };
-    BUSY.store(false, Ordering::Release);
+    if let Some(mut console) = CONSOLE.try_claim() {
+        console.jump_scroll = enabled;
+    }
 }
 
 /// Stops drawing for good, after drawing itself faulted.
@@ -303,14 +357,11 @@ pub(crate) fn abandon() {
 
 /// The console's text grid as (columns, rows), once it is drawing.
 pub(crate) fn text_size() -> Option<(usize, usize)> {
-    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) {
         return None;
     }
-    // SAFETY: BUSY grants exclusive access to CONSOLE.
-    let console = unsafe { &*core::ptr::addr_of!(CONSOLE) };
-    let size = (console.columns, console.rows);
-    BUSY.store(false, Ordering::Release);
-    Some(size)
+    let console = CONSOLE.try_claim()?;
+    Some((console.columns, console.rows))
 }
 
 /// Whether a Linux program currently draws to the screen through /dev/fb0.
@@ -321,9 +372,7 @@ pub(crate) fn owned() -> bool {
 /// The framebuffer /dev/fb0 exposes: the firmware's, a virtio-gpu
 /// surface, or none.
 pub(crate) fn display() -> Option<Display> {
-    // SAFETY: DISPLAY is written by init and adopt during boot, before
-    // Linux programs run or the timer tick calls refresh.
-    unsafe { *core::ptr::addr_of!(DISPLAY) }
+    surface().map(|surface| surface.display)
 }
 
 /// Makes `damage` of the screen visible. The firmware framebuffer is on
@@ -361,14 +410,15 @@ pub(crate) fn set_owned(owned: bool) {
     if OWNED.swap(owned, Ordering::AcqRel) == owned || owned {
         return;
     }
-    if !READY.load(Ordering::Acquire) || BUSY.swap(true, Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) {
         return;
     }
-    // SAFETY: BUSY grants exclusive access to CONSOLE.
-    let console = unsafe { &mut *core::ptr::addr_of_mut!(CONSOLE) };
+    let Some(mut console) = CONSOLE.try_claim() else {
+        return;
+    };
     console.repaint();
     let damage = console.damage.take();
-    BUSY.store(false, Ordering::Release);
+    drop(console);
     if let Some(damage) = damage {
         present(damage);
     }
@@ -377,23 +427,18 @@ pub(crate) fn set_owned(owned: bool) {
 /// Copies between the framebuffer and `bytes` at a byte offset, for read(2)
 /// and write(2) on /dev/fb0. Returns the bytes copied.
 pub(crate) fn transfer(offset: usize, bytes: &mut [u8], write: bool) -> usize {
-    let Some(display) = display() else {
+    let Some(Surface { display, pixels }) = surface() else {
         return 0;
     };
     if !READY.load(Ordering::Acquire) || offset >= display.length {
         return 0;
     }
     let length = bytes.len().min(display.length - offset);
-    // SAFETY: CONSOLE.base maps display.length bytes of the framebuffer
-    // (checked by init), and offset + length stays inside them.
-    let base = unsafe { (*core::ptr::addr_of!(CONSOLE)).base } as *mut u8;
-    unsafe {
-        if write {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset), length);
-        } else {
-            core::ptr::copy_nonoverlapping(base.add(offset), bytes.as_mut_ptr(), length);
-        }
-    }
+    let length = if write {
+        pixels.copy_from(offset, &bytes[..length])
+    } else {
+        pixels.copy_to(offset, &mut bytes[..length])
+    };
     if write && length != 0 {
         let line = display.line_length as usize;
         present(Bounds {
@@ -412,8 +457,8 @@ impl Console {
     /// Points the console at a surface and lays the text grid out for its
     /// size. The text is kept, scrolled if needed so the cursor's line
     /// stays in view.
-    fn attach(&mut self, display: &Display, virtual_base: usize) {
-        self.base = virtual_base;
+    fn attach(&mut self, display: &Display, pixels: PixelBuffer) {
+        self.pixels = pixels;
         self.width = display.width as usize;
         self.height = display.height as usize;
         self.stride = display.line_length as usize / 4;
@@ -689,16 +734,13 @@ impl Console {
         self.touch(origin_x, origin_y, size, size);
         for y in 0..size {
             let bits = glyph[y / self.scale];
-            let line =
-                (self.base as *mut u32).wrapping_add((origin_y + y) * self.stride + origin_x);
+            let line = (origin_y + y) * self.stride + origin_x;
             for x in 0..size {
                 let lit = bits & (1 << (x / self.scale)) != 0;
-                // SAFETY: the cell lies inside the width-by-height area that
-                // init validated against the mapped framebuffer length.
-                unsafe {
-                    line.add(x)
-                        .write_volatile(if lit { foreground } else { background });
-                }
+                // The cell lies inside the width-by-height area that init
+                // validated against the framebuffer's length.
+                self.pixels
+                    .write_pixel(line + x, if lit { foreground } else { background });
             }
         }
     }
@@ -732,10 +774,10 @@ impl Console {
         }
         self.touch(x, y, width, height);
         for row in y..(y + height).min(self.height) {
-            let line = (self.base as *mut u32).wrapping_add(row * self.stride);
+            let line = row * self.stride;
             for column in x..(x + width).min(self.width) {
-                // SAFETY: row and column are clamped to the validated area.
-                unsafe { line.add(column).write_volatile(pixel) };
+                // Row and column are clamped to the validated area.
+                self.pixels.write_pixel(line + column, pixel);
             }
         }
     }

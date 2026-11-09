@@ -230,7 +230,7 @@ operations with a different layout:
   (moved from `drivers/amd_iommu.rs` into `arch/x86_64/amd_vi.rs`), but
   takes its device table (2 MiB, 512 contiguous frames), command buffer,
   event log and page tables from the frame allocator through
-  `device_memory::DmaBuffer`, and its registers through the device window
+  `trusted::dma::DmaBuffer`, and its registers through the device window
   instead of the identity map.
 - Per-device translation: a domain ID per device (VT-d uses one context
   entry per source ID; AMD-Vi one DTE per requester ID plus aliases), a

@@ -17,9 +17,9 @@ composes in software and copies each frame into its mapping of `/dev/fb0`.
 | Piece | Where | What it does |
 | --- | --- | --- |
 | Protocol | `crates/virtio-gpu` (`linox-virtio-gpu`) | Encodes `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`, `RESOURCE_ATTACH_BACKING`, `SET_SCANOUT`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH`, checks replies, picks the mode, and packs damage rectangles into one atomic word. Pure, `no_std`, host-tested (`cargo test -p linox-virtio-gpu`). |
-| Unsafe floor | `kernel/src/drivers/device_memory.rs` | `Mmio` (device registers in the kernel's uncached device window) and `DmaBuffer` (contiguous kernel frames from the frame allocator, reached through the direct map). Bounds-checked volatile access, no references to device-visible memory; the only `unsafe` the driver needs. |
+| Unsafe floor | `kernel/src/trusted/` (`mmio.rs`, `dma.rs`, `pixels.rs`, `claim.rs`) | `Mmio` (device registers in the kernel's uncached device window), `DmaBuffer` (contiguous kernel frames from the frame allocator, reached through the direct map), `PixelBuffer` (the surface the console draws into once the GPU keeps it for good) and `ClaimCell` (the scanout owner's try-only latch). Bounds-checked volatile access, no references to device-visible memory; the driver itself has no `unsafe` (`#![forbid(unsafe_code)]`). |
 | Transport | `kernel/src/drivers/virtio.rs` | Modern virtio 1.x over PCI, polled: capability parsing, reset, feature negotiation (`VERSION_1`, `ACCESS_PLATFORM`), and a split virtqueue used one batch of request/response chains at a time. Safe Rust. |
-| Driver | `kernel/src/drivers/virtio_gpu.rs` | Discovery, bring-up, the scanout owner and the flush policy. Safe Rust apart from the owner's latch (`SCANOUT`, one `UnsafeCell` behind a try-only `AtomicBool`). |
+| Driver | `kernel/src/drivers/virtio_gpu.rs` | Discovery, bring-up, the scanout owner (`SCANOUT`, the GPU in a try-only `ClaimCell`) and the flush policy. Safe Rust. |
 | Hooks | `kernel/src/lib.rs`, `kernel/src/framebuffer.rs`, `kernel/src/arch/x86_64/timer.rs` | Device-window mapping and I/O MMU admission at boot; `framebuffer::adopt` moves the console and `/dev/fb0` to the GPU surface; the Linux timer tick calls `framebuffer::refresh`. |
 
 ### Bring-up

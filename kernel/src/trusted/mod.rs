@@ -8,8 +8,12 @@
 //! - [`port`]: the I/O ports the kernel uses, each a typed handle.
 //! - [`root`]: reading and reloading the page-table root register.
 //! - [`firmware`]: firmware (ACPI) tables viewed in place for parsing.
-//! - [`dma`]: static DMA pages the hardware drivers claim, one instance
-//!   at a time.
+//! - [`dma`]: DMA memory the drivers' devices reach: static pages claimed
+//!   by one driver instance at a time, a static pool sub-allocated by one
+//!   instance at a time, and frame-allocator buffers.
+//! - [`pixels`]: a display surface the console and /dev/fb0 draw into.
+//! - [`claim`]: a value one context at a time may claim, the others
+//!   skipping it while it is busy.
 //! - [`pci_config`]: PCI configuration space.
 //! - [`mmio`]: a window of one device's memory-mapped registers.
 //! - [`msr`]: the model-specific registers the kernel uses outside the CPU
@@ -19,6 +23,7 @@
 //! bare physical address are confined to the memory layer by
 //! `tools/architecture/check-kernel-unsafe.sh`.
 
+pub(crate) mod claim;
 pub(crate) mod dma;
 pub(crate) mod firmware;
 pub(crate) mod frame;
@@ -26,5 +31,6 @@ pub(crate) mod mmio;
 pub(crate) mod msr;
 pub(crate) mod page_table;
 pub(crate) mod pci_config;
+pub(crate) mod pixels;
 pub(crate) mod port;
 pub(crate) mod root;

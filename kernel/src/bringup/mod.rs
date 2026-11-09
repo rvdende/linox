@@ -621,10 +621,7 @@ fn open_keyboards() -> UsbKeyboards {
             Mmio::firmware(bar, length)
         });
         let result = registers.map_or(Err(xhci::Error::NoMemoryBar), |registers| {
-            // SAFETY: bring-up mode is the only driver of these
-            // controllers, and the firmware identity map covers the DMA
-            // pool.
-            unsafe { xhci::Controller::open(*function, registers, true) }
+            xhci::Controller::open(*function, registers, true)
         });
         match result {
             Ok(controller) => {
@@ -1035,8 +1032,11 @@ fn enable_dma_remapping(ivrs: &amd_iommu::Ivrs) -> Remapping {
         realtek::dma_regions(),
         hda::dma_regions(),
     );
-    // SAFETY: no unit is enabled yet, and bring-up runs on one CPU.
-    let mut table = unsafe { amd_iommu::DeviceTableBuilder::new(&ivrs.unity) };
+    // The tables are claimed for good: remapping is enabled once per boot.
+    let Some(mut table) = amd_iommu::DeviceTableBuilder::new(&ivrs.unity) else {
+        say!("linox: AMD-Vi remapping not enabled: its tables are in use\n");
+        return units;
+    };
     let (mut confined, mut passthrough, mut blocked) = (0, 0, 0);
     let mut failure = None;
     pci::for_each_function(|device| {
@@ -1080,9 +1080,9 @@ fn enable_dma_remapping(ivrs: &amd_iommu::Ivrs) -> Remapping {
         let Some(unit) = unit else {
             continue;
         };
-        // SAFETY: the base comes from IVRS, the firmware identity map covers
-        // it, and bring-up is the only code driving the unit.
-        match unsafe { amd_iommu::Remapping::enable(unit, &table) } {
+        // The base comes from IVRS, the firmware identity map covers it,
+        // and bring-up is the only code driving the unit.
+        match amd_iommu::Remapping::enable(unit, &table) {
             Ok(remapping) => {
                 say!(
                     "linox: AMD-Vi {:#x}: DMA remapping on; {} devices confined to their \
