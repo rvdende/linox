@@ -153,6 +153,11 @@ impl LockRank {
     pub(crate) const IPC_SIGNAL: Self = Self(700);
     pub(crate) const DEVICE_NETWORK: Self = Self(800);
     pub(crate) const DIAGNOSTICS: Self = Self(900);
+    /// The evdev input queues (`linux_input`): drivers queue events from
+    /// interrupt handlers, over whatever lock the interrupted code holds,
+    /// so it ranks above every other lock, is only ever tried, and nothing
+    /// is taken while it is held.
+    pub(crate) const INPUT_EVENTS: Self = Self(950);
 }
 
 static HELD_RANKS: [AtomicU16; CPU_SLOT_LIMIT] = [const { AtomicU16::new(0) }; CPU_SLOT_LIMIT];

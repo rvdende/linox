@@ -4,8 +4,10 @@
 //! processes read them as 24-byte `struct input_event` records. Each device
 //! keeps a fixed ring of events, dropping the oldest when a reader falls
 //! behind, as the Linux evdev buffer does before it reports SYN_DROPPED.
+#![forbid(unsafe_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use crate::owned_state::OwnedState;
+use crate::sync::{LockRank, SpinLock};
 
 pub(crate) const DEVICE_LIMIT: usize = 4;
 pub(crate) const EVENT_SIZE: usize = 24;
@@ -67,8 +69,22 @@ impl Device {
     };
 }
 
-static mut DEVICES: [Device; DEVICE_LIMIT] = [const { Device::EMPTY }; DEVICE_LIMIT];
-static mut CONSOLE: Console = Console::EMPTY;
+/// The devices' event queues and the console's typed bytes.
+struct Input {
+    devices: [Device; DEVICE_LIMIT],
+    console: Console,
+}
+
+/// Drivers queue events from interrupt handlers too, so the table is only
+/// ever tried, never waited for: a caller that finds it in use (another
+/// CPU, or the reader an interrupt broke into) skips its turn.
+static INPUT: SpinLock<Input> = SpinLock::new(
+    LockRank::INPUT_EVENTS,
+    Input {
+        devices: [const { Device::EMPTY }; DEVICE_LIMIT],
+        console: Console::EMPTY,
+    },
+);
 
 /// Keyboard input translated for the text console (the controller prompt
 /// and attached domain shells), which otherwise reads only the serial port.
@@ -159,21 +175,19 @@ fn us_character(code: u16, shift: bool, caps_lock: bool) -> Option<u8> {
         }
     })
 }
-static BUSY: AtomicBool = AtomicBool::new(false);
 /// Polls input hardware for new reports; set by the driver that registers
 /// devices, and called whenever a reader looks for events.
-static mut PUMP: Option<fn()> = None;
+static PUMP: OwnedState<fn()> = OwnedState::empty();
 
-/// Runs `body` with exclusive access to the device table. Returns `None`
-/// if the table is in use, for example by an interrupted reader.
+/// Runs `body` with exclusive access to the device table and the console.
+/// Returns `None` if they are in use, for example by an interrupted reader.
+fn with_input<T>(body: impl FnOnce(&mut Input) -> T) -> Option<T> {
+    INPUT.try_lock().map(|mut input| body(&mut input))
+}
+
+/// As [`with_input`], for the device table alone.
 fn with_devices<T>(body: impl FnOnce(&mut [Device; DEVICE_LIMIT]) -> T) -> Option<T> {
-    if BUSY.swap(true, Ordering::Acquire) {
-        return None;
-    }
-    // SAFETY: BUSY grants exclusive access to DEVICES.
-    let result = body(unsafe { &mut *core::ptr::addr_of_mut!(DEVICES) });
-    BUSY.store(false, Ordering::Release);
-    Some(result)
+    with_input(|input| body(&mut input.devices))
 }
 
 /// Adds a device, returning its N in /dev/input/eventN.
@@ -190,13 +204,12 @@ pub(crate) fn register(kind: DeviceKind, name: &'static [u8]) -> Option<usize> {
 
 /// Sets the function that polls input hardware for reports.
 pub(crate) fn set_pump(pump: fn()) {
-    // SAFETY: written once while drivers start, before readers exist.
-    unsafe { PUMP = Some(pump) };
+    // Set once, while drivers start.
+    let _ = PUMP.try_install(pump);
 }
 
 pub(crate) fn pump() {
-    // SAFETY: PUMP is only written by set_pump during driver start-up.
-    if let Some(pump) = unsafe { PUMP } {
+    if let Some(pump) = PUMP.get() {
         pump();
     }
 }
@@ -286,9 +299,7 @@ fn fill_console() {
         return;
     }
     pump();
-    let _ = with_devices(|devices| {
-        // SAFETY: BUSY, held by with_devices, also guards CONSOLE.
-        let console = unsafe { &mut *core::ptr::addr_of_mut!(CONSOLE) };
+    let _ = with_input(|Input { devices, console }| {
         for device in devices
             .iter_mut()
             .filter(|device| device.kind == Some(DeviceKind::Keyboard))
@@ -308,19 +319,13 @@ fn fill_console() {
 /// Whether a typed byte is waiting for the text console.
 pub(crate) fn console_byte_ready() -> bool {
     fill_console();
-    with_devices(|_| {
-        // SAFETY: BUSY, held by with_devices, also guards CONSOLE.
-        unsafe { (*core::ptr::addr_of!(CONSOLE)).length != 0 }
-    })
-    .unwrap_or(false)
+    with_input(|input| input.console.length != 0).unwrap_or(false)
 }
 
 /// Takes the next byte typed for the text console.
 pub(crate) fn take_console_byte() -> Option<u8> {
     fill_console();
-    with_devices(|_| {
-        // SAFETY: BUSY, held by with_devices, also guards CONSOLE.
-        let console = unsafe { &mut *core::ptr::addr_of_mut!(CONSOLE) };
+    with_input(|Input { console, .. }| {
         (console.length != 0).then(|| {
             let byte = console.bytes[console.head];
             console.head = (console.head + 1) % console.bytes.len();
