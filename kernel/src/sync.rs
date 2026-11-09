@@ -16,6 +16,10 @@ impl LockRank {
     pub(crate) const PRIMITIVE_TEST_LOW: Self = Self(1);
     pub(crate) const PRIMITIVE_TEST_HIGH: Self = Self(2);
     pub(crate) const ARCHITECTURE: Self = Self(100);
+    /// Each IPC instance's System V and POSIX IPC objects: system calls
+    /// copy to and from user memory while holding it, so it ranks just
+    /// above system-call level, below anything a user copy may take.
+    pub(crate) const SYSV_IPC: Self = Self(101);
     /// The mounts domains made; ranks below the heap so the table may grow
     /// while held, and above ARCHITECTURE, which system calls run under.
     pub(crate) const MOUNTS: Self = Self(105);
