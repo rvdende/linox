@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 fn append_linux_process_snapshot_mapping(
@@ -30,7 +31,7 @@ fn append_linux_process_snapshot_mapping(
 }
 
 pub(super) fn live_runtime_linux_process_address_space_snapshot(
-) -> Option<&'static LinuxProcessAddressSpaceSnapshot> {
+) -> Option<Claim<'static, LinuxProcessAddressSpaceSnapshot>> {
     crate::linux_profile::span(
         crate::linux_profile::Span::Snapshot,
         take_runtime_linux_process_address_space_snapshot,
@@ -38,7 +39,7 @@ pub(super) fn live_runtime_linux_process_address_space_snapshot(
 }
 
 fn take_runtime_linux_process_address_space_snapshot(
-) -> Option<&'static LinuxProcessAddressSpaceSnapshot> {
+) -> Option<Claim<'static, LinuxProcessAddressSpaceSnapshot>> {
     X86_RUNTIME
         .LINUX_PROCESS_SNAPSHOT_STAGE
         .store(1, Ordering::SeqCst);
@@ -53,7 +54,8 @@ fn take_runtime_linux_process_address_space_snapshot(
             memory::FrameLease::from_parts(root_address, 1)
                 .filter(|frame| memory::frame_lease_is_runtime(*frame))
         })?;
-    let snapshot = unsafe { &mut *X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0 .0.get() };
+    let mut claim = X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0.try_claim()?;
+    let snapshot = &mut *claim;
     X86_RUNTIME
         .LINUX_PROCESS_SNAPSHOT_STAGE
         .store(8, Ordering::SeqCst);
@@ -127,11 +129,11 @@ fn take_runtime_linux_process_address_space_snapshot(
     X86_RUNTIME
         .LINUX_PROCESS_SNAPSHOT_STAGE
         .store(if valid { 9 } else { 8 }, Ordering::SeqCst);
-    valid.then_some(snapshot)
+    valid.then_some(claim)
 }
 
 pub(crate) fn live_linux_process_address_space_snapshot(
-) -> Option<&'static LinuxProcessAddressSpaceSnapshot> {
+) -> Option<Claim<'static, LinuxProcessAddressSpaceSnapshot>> {
     X86_RUNTIME
         .LINUX_PROCESS_SNAPSHOT_STAGE
         .store(1, Ordering::SeqCst);
@@ -140,7 +142,8 @@ pub(crate) fn live_linux_process_address_space_snapshot(
     {
         return None;
     }
-    let snapshot = unsafe { &mut *X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0 .0.get() };
+    let mut claim = X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0.try_claim()?;
+    let snapshot = &mut *claim;
     // The processes this path records are small: the lists' least lengths
     // hold them.
     if !snapshot.reset((false, false)) {
@@ -533,19 +536,19 @@ pub(crate) fn live_linux_process_address_space_snapshot(
     X86_RUNTIME
         .LINUX_PROCESS_SNAPSHOT_STAGE
         .store(if valid { 9 } else { 8 }, Ordering::SeqCst);
-    valid.then_some(snapshot)
+    valid.then_some(claim)
 }
 
 #[inline(never)]
 fn record_nonruntime_linux_process_snapshot() -> bool {
     live_linux_process_address_space_snapshot()
-        .is_some_and(verify_live_linux_process_snapshot_contract)
+        .is_some_and(|snapshot| verify_live_linux_process_snapshot_contract(&snapshot))
 }
 
 pub(super) fn record_live_linux_process_snapshot() -> bool {
     let valid = if X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst) {
         live_runtime_linux_process_address_space_snapshot()
-            .is_some_and(LinuxProcessAddressSpaceSnapshot::is_valid_runtime_walk)
+            .is_some_and(|snapshot| snapshot.is_valid_runtime_walk())
     } else {
         record_nonruntime_linux_process_snapshot()
     };
@@ -586,7 +589,7 @@ fn refresh_nonruntime_linux_process_registry(context: LinuxUserContext) -> bool 
     };
     linux_process::refresh_live_process_registry(
         current_linux_process_pid(),
-        snapshot,
+        &snapshot,
         context
             .registers
             .process_general(context.rax, context.rip, context.rflags),
@@ -640,7 +643,7 @@ pub(super) fn refresh_live_linux_process_registry(context: LinuxUserContext) -> 
         };
         let refreshed = linux_process::refresh_validated_runtime_process_registry(
             current_linux_process_pid(),
-            snapshot,
+            &snapshot,
             context
                 .registers
                 .process_general(context.rax, context.rip, context.rflags),
@@ -667,7 +670,7 @@ fn install_nonruntime_linux_process_registry(entry: usize, stack: usize, fs_base
         return false;
     };
     let installed = linux_process::install_live_process_registry(
-        snapshot,
+        &snapshot,
         [0; 15],
         entry as u64,
         stack as u64,
@@ -697,7 +700,7 @@ pub(super) fn install_live_linux_process_registry(
             return false;
         };
         return linux_process::install_live_process_registry(
-            snapshot,
+            &snapshot,
             [0; 15],
             entry as u64,
             stack as u64,
@@ -1514,7 +1517,10 @@ fn linux_request_process_fork_now(
     let refreshed = if share_vm
         && !linux_process::live_process_address_space_stale(current_linux_process_pid())
     {
-        let snapshot = unsafe { &mut *X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0 .0.get() };
+        let Some(mut claim) = X86_RUNTIME.LINUX_PROCESS_SNAPSHOT_SCRATCH.0.try_claim() else {
+            return LINUX_ENOMEM;
+        };
+        let snapshot = &mut *claim;
         let mut grow = false;
         let hierarchy_count = loop {
             if !snapshot.reset((grow, false)) {

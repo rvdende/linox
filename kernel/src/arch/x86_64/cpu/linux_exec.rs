@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -1098,20 +1099,20 @@ fn linux_rootfs_execve_source(
         serial_write("\r\n");
         return LINUX_ENOEXEC;
     };
-    let mut replacement_scratch =
-        LinuxExecScratch::allocate(replacement_count * size_of::<memory::FrameLease>());
-    let Some(replacements) = replacement_scratch
-        .as_mut()
-        .and_then(|scratch| scratch.frame_leases(replacement_count))
-        .and_then(|replacements| {
-            memory::allocate_frame_prefix_into(
-                memory::FrameOwner::KERNEL,
-                replacements,
-                replacement_count,
-            )
-            .then_some(replacements)
-        })
-    else {
+    let mut replacement_leases: Vec<memory::FrameLease> = Vec::new();
+    let reserved = replacement_leases
+        .try_reserve_exact(replacement_count)
+        .is_ok();
+    if reserved {
+        replacement_leases.resize(replacement_count, memory::FrameLease::EMPTY);
+    }
+    let Some(replacements) = (reserved
+        && memory::allocate_frame_prefix_into(
+            memory::FrameOwner::KERNEL,
+            &mut replacement_leases,
+            replacement_count,
+        ))
+    .then_some(replacement_leases.as_mut_slice()) else {
         serial_write("linox: Linux exec frame allocation failed count: ");
         serial_write_u64(replacement_count as u64);
         serial_write("\r\n");
@@ -1652,52 +1653,32 @@ fn linux_overlay_exec_image_of(
     Ok(Some((image, metadata.size)))
 }
 
-/// A zeroed, kernel-owned extent for exec data too large for the kernel
-/// stack. It is scrubbed and released when dropped.
+/// A zeroed heap buffer, whole pages long, for exec data too large for the
+/// kernel stack. It is zeroed again when dropped.
 struct LinuxExecScratch {
-    first: memory::FrameLease,
-    pages: usize,
+    bytes: Vec<u8>,
 }
 
 impl LinuxExecScratch {
     fn allocate(bytes: usize) -> Option<Self> {
-        let pages = bytes.div_ceil(PAGE_SIZE).max(1);
-        let (first, _) = memory::allocate_contiguous_extent(memory::FrameOwner::KERNEL, pages)?;
-        Some(Self { first, pages })
+        let length = bytes.div_ceil(PAGE_SIZE).max(1) * PAGE_SIZE;
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(length).ok()?;
+        buffer.resize(length, 0);
+        Some(Self { bytes: buffer })
     }
 
     fn bytes_mut(&mut self) -> &mut [u8] {
-        let length = self.pages * PAGE_SIZE;
-        let Some(address) = paging::direct_map_range_address(self.first.address(), length) else {
-            return &mut [];
-        };
-        // SAFETY: the extent is live, kernel-owned, contiguous, and only
-        // reachable through this value.
-        unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) }
-    }
-
-    /// Views the start of the extent as `count` frame leases, which are all
-    /// empty while the extent is still zeroed.
-    fn frame_leases(&mut self, count: usize) -> Option<&mut [memory::FrameLease]> {
-        let bytes = self.bytes_mut();
-        if count.checked_mul(size_of::<memory::FrameLease>())? > bytes.len() {
-            return None;
-        }
-        // SAFETY: the page-aligned extent holds `count` leases, a lease is
-        // plain integers, and the borrow of `self` keeps the view unique.
-        Some(unsafe {
-            core::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<memory::FrameLease>(), count)
-        })
+        &mut self.bytes
     }
 }
 
 impl Drop for LinuxExecScratch {
     fn drop(&mut self) {
-        let _ = memory::scrub_and_release_contiguous_extent(
-            memory::FrameOwner::KERNEL,
-            self.first,
-            self.pages,
-        );
+        // Scrub what the exec staged (arguments, image bytes) before the
+        // heap reuses it.
+        self.bytes.fill(0);
+        core::hint::black_box(&self.bytes);
     }
 }
 
@@ -2700,7 +2681,7 @@ fn linux_execve_at(
     };
     if !linux_process::refresh_live_process_registry(
         current_linux_process_pid(),
-        snapshot,
+        &snapshot,
         [0; 15],
         entry,
         new_stack,
@@ -2746,5 +2727,5 @@ fn reset_linux_signal_state_after_exec() {
     X86_RUNTIME
         .LINUX_SIGNAL_ACTIVE
         .store(false, Ordering::SeqCst);
-    unsafe { linux_signal_context().get().write(LinuxSignalContext::ZERO) };
+    set_current_linux_signal_context(LinuxSignalContext::ZERO);
 }

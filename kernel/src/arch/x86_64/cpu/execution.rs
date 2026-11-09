@@ -1,24 +1,20 @@
+//! The x87, SSE and AVX user state of domains and Linux threads, saved and
+//! restored through the trusted core (`trusted::xstate`).
+#![forbid(unsafe_code)]
+
 use core::{
-    arch::{
-        asm,
-        x86_64::{__cpuid, __cpuid_count},
-    },
+    arch::x86_64::{__cpuid, __cpuid_count},
     sync::atomic::Ordering,
 };
 
 use super::{
     active_container_slot, current_container_slot, current_linux_thread_slot, linux_process_record,
     LinuxProcessRecord, CPUID_AVX, CPUID_EXTENDED_STATE, CPUID_SSE, CPUID_XSAVE, CPU_ARCHITECTURE,
-    CR0_EM, CR0_MP, CR0_NE, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_OSXSAVE,
     LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT, LINUX_THREAD_LIMIT, X86_MUTABLE_RUNTIME, X86_RUNTIME,
 };
+use crate::trusted::xstate;
+pub(super) use crate::trusted::xstate::{ExtendedState, EXTENDED_STATE_SIZE};
 use crate::{control_abi, linux_process};
-
-pub(super) const EXTENDED_STATE_SIZE: usize = 1024;
-
-#[derive(Clone, Copy)]
-#[repr(C, align(64))]
-pub(super) struct ExtendedState(pub(super) [u8; EXTENDED_STATE_SIZE]);
 
 pub(crate) fn enable_extended_user_state() -> bool {
     let features = __cpuid(1);
@@ -29,25 +25,7 @@ pub(crate) fn enable_extended_user_state() -> bool {
     {
         return false;
     }
-    let mut cr0: u64;
-    let mut cr4: u64;
-    unsafe {
-        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
-        cr0 = (cr0 | CR0_MP | CR0_NE) & !CR0_EM;
-        asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT | CR4_OSXSAVE;
-        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
-        asm!(
-            "xsetbv",
-            in("ecx") 0_u32,
-            in("eax") 7_u32,
-            in("edx") 0_u32,
-            options(nostack, preserves_flags)
-        );
-    }
-    let state = __cpuid_count(CPUID_EXTENDED_STATE, 0);
-    let enabled = state.ebx as usize <= EXTENDED_STATE_SIZE && reset_extended_user_state();
+    let enabled = xstate::enable();
     CPU_ARCHITECTURE
         .extended_user_state_enabled
         .store(enabled, Ordering::Release);
@@ -55,12 +33,7 @@ pub(crate) fn enable_extended_user_state() -> bool {
 }
 
 pub(super) fn reset_extended_user_state() -> bool {
-    let default_mxcsr = 0x1f80_u32;
-    unsafe {
-        asm!("fninit", options(nostack));
-        asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack));
-        asm!("vzeroall", options(nostack));
-    }
+    xstate::reset();
     true
 }
 
@@ -77,24 +50,10 @@ pub(super) fn restore_container_extended_state() -> bool {
     if !X86_RUNTIME.CONTAINER_EXTENDED_STATE_VALID[slot].load(Ordering::Acquire) {
         return reset_extended_user_state();
     }
-    let state = unsafe {
-        X86_MUTABLE_RUNTIME
-            .container_extended_states
-            .get()
-            .cast_const()
-            .cast::<ExtendedState>()
-            .add(slot)
+    let Some(state) = X86_MUTABLE_RUNTIME.container_extended_states[slot].try_claim() else {
+        return false;
     };
-    unsafe {
-        asm!(
-            "xrstor64 [{}]",
-            in(reg) state,
-            in("eax") 7_u32,
-            in("edx") 0_u32,
-            options(nostack)
-        );
-    }
-    true
+    xstate::restore(&state)
 }
 
 pub(super) fn save_container_extended_state() -> bool {
@@ -107,22 +66,13 @@ pub(super) fn save_container_extended_state() -> bool {
     let Some(slot) = active_container_slot() else {
         return false;
     };
-    let state = unsafe {
-        X86_MUTABLE_RUNTIME
-            .container_extended_states
-            .get()
-            .cast::<ExtendedState>()
-            .add(slot)
+    let Some(mut state) = X86_MUTABLE_RUNTIME.container_extended_states[slot].try_claim() else {
+        return false;
     };
-    unsafe {
-        asm!(
-            "xsave64 [{}]",
-            in(reg) state,
-            in("eax") 7_u32,
-            in("edx") 0_u32,
-            options(nostack)
-        );
+    if !xstate::save(&mut state) {
+        return false;
     }
+    drop(state);
     X86_RUNTIME.CONTAINER_EXTENDED_STATE_VALID[slot].store(true, Ordering::Release);
     reset_extended_user_state()
 }
@@ -173,17 +123,8 @@ pub(super) fn save_linux_thread_extended_state(pid: u32, thread: usize) -> bool 
     let Some((record, thread)) = linux_thread_extended_record(pid, thread) else {
         return false;
     };
-    let state = &mut record.extended_states[thread];
-    // SAFETY: the state is a 64-byte aligned save area of EXTENDED_STATE_SIZE
-    // bytes, enough for the x87, SSE and AVX components saved here.
-    unsafe {
-        asm!(
-            "xsave64 [{}]",
-            in(reg) state,
-            in("eax") 7_u32,
-            in("edx") 0_u32,
-            options(nostack)
-        );
+    if !xstate::save(&mut record.extended_states[thread]) {
+        return false;
     }
     record.extended_state_valid[thread] = true;
     true
@@ -249,18 +190,7 @@ pub(super) fn restore_linux_thread_extended_state(pid: u32, thread: usize) -> bo
     if !record.extended_state_valid[thread] {
         return reset_extended_user_state();
     }
-    let state = &record.extended_states[thread];
-    // SAFETY: the state was written by xsave64 for this thread.
-    unsafe {
-        asm!(
-            "xrstor64 [{}]",
-            in(reg) state,
-            in("eax") 7_u32,
-            in("edx") 0_u32,
-            options(nostack)
-        );
-    }
-    true
+    xstate::restore(&record.extended_states[thread])
 }
 
 pub(super) fn save_linux_process_extended_state(pid: u32) -> bool {
@@ -334,9 +264,10 @@ pub(super) fn clone_linux_process_extended_state(parent: u32, child: u32) -> boo
     if parent_instance != child_instance {
         return false;
     }
-    let Some(parent) = linux_process_record(parent_instance, parent_slot)
-        .map(|record| record as *const LinuxProcessRecord)
-    else {
+    if parent_slot == child_slot {
+        return false;
+    }
+    let Some(parent) = linux_process_record(parent_instance, parent_slot) else {
         return false;
     };
     let Some(child) = linux_process_record(child_instance, child_slot) else {
@@ -346,20 +277,17 @@ pub(super) fn clone_linux_process_extended_state(parent: u32, child: u32) -> boo
     // stage_linux_fork_child_runtime_state): its state is all that is
     // copied, not every slot's (128 KiB on each fork).
     let Some(thread) = current_linux_thread_slot() else {
-        // SAFETY: parent and child are different slots, so the records do
-        // not overlap; both are live kernel-owned allocations.
-        unsafe {
-            child.extended_states = (*parent).extended_states;
-            child.extended_state_valid = (*parent).extended_state_valid;
-        }
+        // Parent and child are different slots, so different records; the
+        // slices copy in place (no record-sized temporary on the stack).
+        child
+            .extended_states
+            .copy_from_slice(&parent.extended_states);
+        child.extended_state_valid = parent.extended_state_valid;
         return true;
     };
     child.extended_state_valid = [false; LINUX_THREAD_LIMIT];
-    // SAFETY: as above.
-    unsafe {
-        child.extended_states[thread] = (*parent).extended_states[thread];
-        child.extended_state_valid[thread] = (*parent).extended_state_valid[thread];
-    }
+    child.extended_states[thread] = parent.extended_states[thread];
+    child.extended_state_valid[thread] = parent.extended_state_valid[thread];
     true
 }
 

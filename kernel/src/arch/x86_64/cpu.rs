@@ -1,6 +1,8 @@
 use alloc::vec::Vec;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::cell::UnsafeCell;
+
+use crate::trusted::claim::{Claim, ClaimCell};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -241,12 +243,6 @@ const CPUID_UMIP: u32 = 1 << 2;
 const CPUID_XSAVE: u32 = 1 << 26;
 const CPUID_AVX: u32 = 1 << 28;
 const CPUID_SSE: u32 = 1 << 25;
-const CR0_MP: u64 = 1 << 1;
-const CR0_EM: u64 = 1 << 2;
-const CR0_NE: u64 = 1 << 5;
-const CR4_OSFXSR: u64 = 1 << 9;
-const CR4_OSXMMEXCPT: u64 = 1 << 10;
-const CR4_OSXSAVE: u64 = 1 << 18;
 const GS_BASE_MSR: u32 = 0xc000_0101;
 const KERNEL_GS_BASE_MSR: u32 = 0xc000_0102;
 
@@ -611,7 +607,7 @@ struct X86RuntimeOwner {
     LINUX_PROCESS_CHILD_YIELD_PID: RuntimeRef<CpuBankedAtomicU32>,
     CONTAINER_EXEC_CHILD: RuntimeRef<[AtomicU32; control_abi::DOMAIN_LIMIT]>,
     LINUX_PROCESS_RELEASE_PARENT_ON_EXEC: RuntimeRef<CpuBankedAtomicBool>,
-    LINUX_PROCESS_SNAPSHOT_SCRATCH: RuntimeRef<LinuxProcessSnapshotScratch>,
+    LINUX_PROCESS_SNAPSHOT_SCRATCH: RuntimeRef<ClaimCell<LinuxProcessAddressSpaceSnapshot>>,
     LINUX_PROCESS_SNAPSHOT_STAGE: RuntimeRef<CpuBankedAtomicU8>,
     LINUX_PROCESS_SNAPSHOT_VALIDATED: RuntimeRef<CpuBankedAtomicBool>,
     LINUX_PROCESS_WAIT_COUNT: RuntimeRef<BankedAtomicU32>,
@@ -2750,17 +2746,16 @@ pub(crate) struct LinuxProcessAddressSpaceSnapshot {
     mapping_count: usize,
 }
 
-struct LinuxProcessSnapshotScratch(UnsafeCell<LinuxProcessAddressSpaceSnapshot>);
-
-unsafe impl Sync for LinuxProcessSnapshotScratch {}
-
-static X86_RUNTIME_BACKING_LINUX_PROCESS_SNAPSHOT_SCRATCH: LinuxProcessSnapshotScratch =
-    LinuxProcessSnapshotScratch(UnsafeCell::new(LinuxProcessAddressSpaceSnapshot {
-        hierarchy: Vec::new(),
-        hierarchy_count: 0,
-        mappings: Vec::new(),
-        mapping_count: 0,
-    }));
+/// The snapshot work lists, claimed by the one snapshot taken at a time
+/// (a claim that finds them busy fails the snapshot).
+static X86_RUNTIME_BACKING_LINUX_PROCESS_SNAPSHOT_SCRATCH: ClaimCell<
+    LinuxProcessAddressSpaceSnapshot,
+> = ClaimCell::new(LinuxProcessAddressSpaceSnapshot {
+    hierarchy: Vec::new(),
+    hierarchy_count: 0,
+    mappings: Vec::new(),
+    mapping_count: 0,
+});
 
 /// Starting lengths of the snapshot lists.
 const LINUX_SNAPSHOT_MIN_HIERARCHY: usize = 64;
@@ -2960,7 +2955,62 @@ struct LinuxSignalContext {
     alt_stack_flags: u32,
 }
 
+/// Words of a `LinuxSignalContext` as each CPU bank keeps it.
+const LINUX_SIGNAL_CONTEXT_WORDS: usize = LINUX_SYSCALL_FRAME_REGISTERS + 12;
+
 impl LinuxSignalContext {
+    /// The context as words, for the per-bank atomic copy.
+    const fn into_words(self) -> [u64; LINUX_SIGNAL_CONTEXT_WORDS] {
+        let registers = self.registers.into_array();
+        let mut words = [0; LINUX_SIGNAL_CONTEXT_WORDS];
+        let mut index = 0;
+        while index < LINUX_SYSCALL_FRAME_REGISTERS {
+            words[index] = registers[index];
+            index += 1;
+        }
+        let rest = [
+            self.rax,
+            self.rcx,
+            self.r11,
+            self.rip,
+            self.rsp,
+            self.rflags,
+            self.signal_stack,
+            self.signal_restorer,
+            self.signal_mask,
+            self.alt_stack_pointer,
+            self.alt_stack_size,
+            self.alt_stack_flags as u64,
+        ];
+        let mut rest_index = 0;
+        while rest_index < rest.len() {
+            words[LINUX_SYSCALL_FRAME_REGISTERS + rest_index] = rest[rest_index];
+            rest_index += 1;
+        }
+        words
+    }
+
+    fn from_words(words: [u64; LINUX_SIGNAL_CONTEXT_WORDS]) -> Self {
+        let mut registers = [0; LINUX_SYSCALL_FRAME_REGISTERS];
+        registers.copy_from_slice(&words[..LINUX_SYSCALL_FRAME_REGISTERS]);
+        let rest = &words[LINUX_SYSCALL_FRAME_REGISTERS..];
+        Self {
+            registers: LinuxSyscallFrame::from_array(registers),
+            rax: rest[0],
+            rcx: rest[1],
+            r11: rest[2],
+            rip: rest[3],
+            rsp: rest[4],
+            rflags: rest[5],
+            signal_stack: rest[6],
+            signal_restorer: rest[7],
+            signal_mask: rest[8],
+            alt_stack_pointer: rest[9],
+            alt_stack_size: rest[10],
+            alt_stack_flags: rest[11] as u32,
+        }
+    }
+
     const ZERO: Self = Self {
         registers: LinuxSyscallFrame::ZERO,
         rax: 0,
@@ -3205,6 +3255,61 @@ struct LinuxRestoredSignalContext {
     r11: u64,
 }
 
+crate::pod!(LinuxSignalStack {
+    pointer: u64,
+    flags: u32,
+    padding: u32,
+    size: u64,
+});
+crate::pod!(LinuxSignalMachineContext {
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rbx: u64,
+    rdx: u64,
+    rax: u64,
+    rcx: u64,
+    rsp: u64,
+    rip: u64,
+    rflags: u64,
+    cs: u16,
+    gs: u16,
+    fs: u16,
+    ss: u16,
+    error: u64,
+    trap: u64,
+    old_mask: u64,
+    cr2: u64,
+    fpstate: u64,
+    reserved: [u64; 8],
+});
+crate::pod!(LinuxSignalUserContext {
+    flags: u64,
+    link: u64,
+    stack: LinuxSignalStack,
+    machine: LinuxSignalMachineContext,
+    signal_mask: u64,
+});
+crate::pod!(LinuxSignalInformation {
+    signal: i32,
+    error: i32,
+    code: i32,
+    padding: i32,
+    fields: [u8; 112],
+});
+crate::pod!(LinuxRtSignalFrame {
+    restorer: u64,
+    context: LinuxSignalUserContext,
+    information: LinuxSignalInformation,
+});
 const _: [(); 24] = [(); size_of::<LinuxSignalStack>()];
 const _: [(); 256] = [(); size_of::<LinuxSignalMachineContext>()];
 const _: [(); 304] = [(); size_of::<LinuxSignalUserContext>()];
@@ -3695,29 +3800,36 @@ impl LinuxProcessRecordSlot {
 /// of processes does not keep its records.
 const LINUX_PROCESS_RECORDS_KEPT: usize = 256;
 
+/// `process_records` holds one record per process slot of every domain
+/// instance, each table as long as the highest slot used. A record is over
+/// 100 KiB, so it is allocated from the frame allocator the first time a
+/// process occupies its slot instead of being reserved in the kernel image.
 struct X86MutableRuntimeOwner {
-    container_extended_states: UnsafeCell<[ExtendedState; control_abi::DOMAIN_LIMIT]>,
-    /// One record per process slot of every domain instance, each table as
-    /// long as the highest slot used. A record is over 100 KiB, so it is
-    /// allocated from the frame allocator the first time a process
-    /// occupies its slot instead of being reserved in the kernel image.
     process_records:
         UnsafeCell<[Vec<LinuxProcessRecordSlot>; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT]>,
     /// The running process's signal context, per CPU (`linux_cpu_bank`):
     /// CPUs run different processes, each with its handler's saved context.
-    signal_context: [UnsafeCell<LinuxSignalContext>; LINUX_CPU_BANK_LIMIT],
+    /// Words copied in and out atomically; a bank is used by the CPU that
+    /// holds it, under the kernel-entry lock.
+    signal_context: [[AtomicU64; LINUX_SIGNAL_CONTEXT_WORDS]; LINUX_CPU_BANK_LIMIT],
+    /// Each domain's saved extended state while another runs, claimed by
+    /// the one saving or restoring it.
+    container_extended_states: [ClaimCell<ExtendedState>; control_abi::DOMAIN_LIMIT],
 }
 
-// SAFETY: Gate 5 centralizes the legacy mutable runtime banks behind this
-// owner. Gate 8 supplies cross-CPU synchronization before SMP activates them.
+// SAFETY: every field but `process_records` is a ClaimCell or atomics.
+// `process_records` is reached only through the accessors in
+// cpu/linux_process_state.rs, under the kernel-entry lock, which hand out
+// each slot's record (docs/FRAMEKERNEL.md lists them as still to make
+// sound: their `&'static mut` returns need per-record ownership).
 unsafe impl Sync for X86MutableRuntimeOwner {}
 
 static X86_MUTABLE_RUNTIME: X86MutableRuntimeOwner = X86MutableRuntimeOwner {
-    container_extended_states: UnsafeCell::new(
-        [ExtendedState([0; EXTENDED_STATE_SIZE]); control_abi::DOMAIN_LIMIT],
-    ),
+    container_extended_states: [const { ClaimCell::new(ExtendedState::ZERO) };
+        control_abi::DOMAIN_LIMIT],
     process_records: UnsafeCell::new([const { Vec::new() }; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT]),
-    signal_context: [const { UnsafeCell::new(LinuxSignalContext::ZERO) }; LINUX_CPU_BANK_LIMIT],
+    signal_context: [const { [const { AtomicU64::new(0) }; LINUX_SIGNAL_CONTEXT_WORDS] };
+        LINUX_CPU_BANK_LIMIT],
 };
 
 pub(crate) extern "sysv64" fn user_fault_handler(frame: &mut UserFaultFrame) -> u64 {

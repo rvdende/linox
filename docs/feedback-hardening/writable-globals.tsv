@@ -671,6 +671,7 @@ interior-mutable	boot/efi/src/main.rs	FIRMWARE_CONSOLE	bootstrap-init	allowlist	
 interior-mutable	kernel/src/trusted/cpu_tables.rs	ENTRY_STATES	per-cpu-arch	allowlist	none	set-once-installed-entry-state-registry
 interior-mutable	kernel/src/trusted/cpu_tables.rs	ENTRY_STATE_COUNT	per-cpu-arch	allowlist	none	set-once-installed-entry-state-registry
 interior-mutable	kernel/src/trusted/crash.rs	IDT	platform-device	allowlist	none	hardware-bringup-exception-table
+interior-mutable	kernel/src/trusted/xstate.rs	ENABLED	per-cpu-arch	allowlist	none	set-once-extended-state-support-flag
 interior-mutable	kernel/src/bringup/trap.rs	REPORTING	platform-device	allowlist	none	fatal-report-reentrancy-latch
 interior-mutable	kernel/src/bringup/trap.rs	STAGE	platform-device	allowlist	none	hardware-bringup-stage-publication
 interior-mutable	kernel/src/drivers/clock.rs	TICKS_PER_MS	platform-device	allowlist	none	atomic-published-after-calibration

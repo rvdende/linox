@@ -47,6 +47,8 @@
 //! - [`crash`]: the bring-up exception table, the live page-table walk and
 //!   the reads crash reports make.
 //! - [`take_once`]: a static handed out as `&'static mut` once.
+//! - [`pod`]: plain-old-data types viewed as bytes, for user copies.
+//! - [`xstate`]: the x87, SSE and AVX user state, saved and restored.
 //! - [`lock`]: the spin locks (`crate::sync` re-exports them with the lock
 //!   ranks).
 //! - [`owned_state`]: set-once owners for long-lived kernel objects.
@@ -78,6 +80,7 @@ pub(crate) mod owned_state;
 pub(crate) mod page_table;
 pub(crate) mod pci_config;
 pub(crate) mod pixels;
+pub(crate) mod pod;
 pub(crate) mod port;
 pub(crate) mod programs;
 pub(crate) mod random;
@@ -86,3 +89,4 @@ pub(crate) mod switch;
 pub(crate) mod take_once;
 pub(crate) mod tsc;
 pub(crate) mod user_copy;
+pub(crate) mod xstate;

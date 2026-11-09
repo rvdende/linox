@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 pub(super) fn linux_rt_sigaction(signal: u64, action: u64, old_action: u64, set_size: u64) -> u64 {
@@ -539,14 +540,7 @@ fn linux_take_requested_signal(requested: u64, information: u64) -> Option<u64> 
     let signal_information =
         LinuxSignalInformation::queued_from(signal, code, value, sender_pid, sender_uid);
     if information != 0 {
-        // SAFETY: every byte in this repr(C) value is initialized, including
-        // padding and the complete signal-specific payload.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                core::ptr::from_ref(&signal_information).cast::<u8>(),
-                size_of::<LinuxSignalInformation>(),
-            )
-        };
+        let bytes = crate::trusted::pod::bytes_of(&signal_information);
         if !copy_to_linux_user(information, bytes) {
             return Some(LINUX_EFAULT);
         }
@@ -793,14 +787,7 @@ pub(super) fn wake_linux_signal_wait_target(
                     )
                 },
             );
-            // SAFETY: LinuxSignalInformation is repr(C), and every byte of
-            // this generated value, including padding, is initialized.
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    core::ptr::from_ref(&value).cast::<u8>(),
-                    size_of::<LinuxSignalInformation>(),
-                )
-            };
+            let bytes = crate::trusted::pod::bytes_of(&value);
             if !copy_to_linux_user(information, bytes) {
                 return false;
             }
@@ -1333,30 +1320,14 @@ pub(super) fn linux_rt_signal_frame(
 }
 
 pub(super) fn copy_linux_signal_frame(address: u64, frame: &LinuxRtSignalFrame) -> bool {
-    // SAFETY: every field, including ABI padding and reserved bytes, is
-    // initialized above and the resulting byte view is used only for copy-out.
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            core::ptr::from_ref(frame).cast::<u8>(),
-            size_of::<LinuxRtSignalFrame>(),
-        )
-    };
-    copy_to_linux_user(address, bytes)
+    copy_to_linux_user(address, crate::trusted::pod::bytes_of(frame))
 }
 
 pub(super) fn copy_linux_signal_frame_from_user(
     address: u64,
     frame: &mut LinuxRtSignalFrame,
 ) -> bool {
-    // SAFETY: the destination is a fully initialized, repr(C) frame and the
-    // mutable byte view spans exactly that object for bounded copy-in.
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            core::ptr::from_mut(frame).cast::<u8>(),
-            size_of::<LinuxRtSignalFrame>(),
-        )
-    };
-    copy_from_linux_user(address, bytes)
+    copy_from_linux_user(address, crate::trusted::pod::bytes_of_mut(frame))
 }
 
 pub(super) fn linux_restored_signal_context(
@@ -2334,7 +2305,7 @@ pub(super) fn linux_kill_current(
     }
     // SAFETY: syscall entry is serialized with interrupts disabled until its
     // return context enters the handler.
-    unsafe { linux_signal_context().get().write(context) };
+    set_current_linux_signal_context(context);
     linux_apply_delivered_signal_action(index, signal_bit, old_mask, flags);
     if use_alt_stack {
         if old_alt_stack_flags & LINUX_SS_AUTODISARM != 0 {
@@ -2650,7 +2621,7 @@ pub(super) fn linux_deliver_signal_to_blocked_wait(
     }
     // SAFETY: the switch above made the target the sole running Linux thread,
     // and the live return already names its validated handler context.
-    unsafe { linux_signal_context().get().write(context) };
+    set_current_linux_signal_context(context);
     linux_apply_delivered_signal_action(index, signal_bit, restored_mask, flags);
     if use_alt_stack {
         if old_alt_stack_flags & LINUX_SS_AUTODISARM != 0 {
@@ -3265,7 +3236,7 @@ pub(super) fn deliver_linux_fault_signal(
     }
     // SAFETY: interrupts are disabled from exception entry through IRETQ, and
     // only one bounded Linux signal frame may be active at a time.
-    unsafe { linux_signal_context().get().write(context) };
+    set_current_linux_signal_context(context);
     linux_apply_delivered_signal_action(index, signal_bit, old_mask, flags);
     if use_alt_stack {
         if old_alt_stack_flags & LINUX_SS_AUTODISARM != 0 {
@@ -3299,7 +3270,7 @@ pub(super) fn linux_rt_sigreturn(output: LinuxSyscallFrameHandle, user_stack: u6
     }
     // SAFETY: signal delivery serializes this context while interrupts remain
     // disabled; active is cleared before another delivery can publish state.
-    let context = unsafe { linux_signal_context().get().cast_const().read() };
+    let context = current_linux_signal_context();
     if context.signal_stack.checked_add(8) != Some(user_stack) {
         return LINUX_EINVAL;
     }
@@ -3315,7 +3286,7 @@ pub(super) fn linux_rt_sigreturn(output: LinuxSyscallFrameHandle, user_stack: u6
     }
     // SAFETY: this serialized return consumes the sole active record before
     // checking whether another unblocked pending signal should replace it.
-    unsafe { linux_signal_context().get().write(LinuxSignalContext::ZERO) };
+    set_current_linux_signal_context(LinuxSignalContext::ZERO);
     store_current_linux_signal_mask(restored.signal_mask);
     X86_RUNTIME
         .ELF_PROBE_ALT_STACK_POINTER
@@ -3349,7 +3320,7 @@ pub(super) fn abort_linux_signal() {
     {
         // SAFETY: the active context is exclusively owned by this serialized
         // Linux execution while interrupts remain disabled.
-        let context = unsafe { linux_signal_context().get().cast_const().read() };
+        let context = current_linux_signal_context();
         store_current_linux_signal_mask(context.signal_mask);
         X86_RUNTIME
             .ELF_PROBE_ALT_STACK_POINTER
@@ -3360,7 +3331,7 @@ pub(super) fn abort_linux_signal() {
         X86_RUNTIME
             .ELF_PROBE_ALT_STACK_FLAGS
             .store(context.alt_stack_flags, Ordering::SeqCst);
-        unsafe { linux_signal_context().get().write(LinuxSignalContext::ZERO) };
+        set_current_linux_signal_context(LinuxSignalContext::ZERO);
     }
 }
 

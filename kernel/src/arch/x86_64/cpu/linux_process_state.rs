@@ -1,8 +1,49 @@
 use super::*;
 
-/// This CPU's running process's signal context.
-pub(super) fn linux_signal_context() -> &'static UnsafeCell<LinuxSignalContext> {
-    &X86_MUTABLE_RUNTIME.signal_context[linux_cpu_bank()]
+/// A copy of this CPU's running process's signal context.
+pub(super) fn current_linux_signal_context() -> LinuxSignalContext {
+    let words = &X86_MUTABLE_RUNTIME.signal_context[linux_cpu_bank()];
+    LinuxSignalContext::from_words(core::array::from_fn(|index| {
+        words[index].load(Ordering::Acquire)
+    }))
+}
+
+/// Replaces this CPU's running process's signal context.
+pub(super) fn set_current_linux_signal_context(context: LinuxSignalContext) {
+    let words = &X86_MUTABLE_RUNTIME.signal_context[linux_cpu_bank()];
+    for (word, value) in words.iter().zip(context.into_words()) {
+        word.store(value, Ordering::Release);
+    }
+}
+
+/// The signal context as `cpu/linux_mmap.rs` (another change's file) reads
+/// it, in an `unsafe` block: `linux_signal_context().get().cast_const()
+/// .read()`. It goes when that file calls `current_linux_signal_context`.
+pub(super) fn linux_signal_context() -> LinuxSignalContextView {
+    LinuxSignalContextView
+}
+
+/// See `linux_signal_context`.
+pub(super) struct LinuxSignalContextView;
+
+impl LinuxSignalContextView {
+    pub(super) fn get(&self) -> Self {
+        Self
+    }
+
+    pub(super) fn cast_const(self) -> Self {
+        self
+    }
+
+    /// The context (`current_linux_signal_context`).
+    ///
+    /// # Safety
+    ///
+    /// None: it is `unsafe` only so the caller's `unsafe` block stays valid
+    /// until that file moves to `current_linux_signal_context`.
+    pub(super) unsafe fn read(self) -> LinuxSignalContext {
+        current_linux_signal_context()
+    }
 }
 
 /// The record for process slot `slot` of domain instance `instance`,
@@ -301,51 +342,55 @@ pub(super) fn stage_linux_fork_child_runtime_state(
     child_pid: u32,
     new_mount_namespace: bool,
 ) -> Option<linux_mount::MountNamespaceHandle> {
-    let parent: *const LinuxProcessRuntimeState =
+    let parent: &LinuxProcessRuntimeState =
         linux_process_runtime_state(parent_pid).filter(|state| state.valid)?;
-    let child = linux_process_runtime_state(child_pid)? as *mut LinuxProcessRuntimeState;
-    let parent_threads: *const [LinuxThreadRuntimeState; LINUX_THREAD_LIMIT] =
+    let child = linux_process_runtime_state(child_pid)?;
+    let parent_threads: &[LinuxThreadRuntimeState; LINUX_THREAD_LIMIT] =
         linux_process_thread_runtime_state(parent_pid)?;
-    let child_threads: *mut [LinuxThreadRuntimeState; LINUX_THREAD_LIMIT] =
-        linux_process_thread_runtime_state(child_pid)?;
+    let child_threads = linux_process_thread_runtime_state(child_pid)?;
+    if parent_pid == child_pid {
+        return None;
+    }
     let mount_namespace = if new_mount_namespace {
         linux_clone_mount_namespace()?
     } else {
-        unsafe { (*parent).mount_namespace? }
+        parent.mount_namespace?
     };
-    unsafe {
-        core::ptr::copy_nonoverlapping(parent, child, 1);
-        core::ptr::copy_nonoverlapping(parent_threads, child_threads, 1);
-        let current = usize::from((*child).current_thread_slot);
-        for slot in 0..LINUX_THREAD_LIMIT {
+    // Parent and child are different processes, so different records; the
+    // slices copy in place, with no record-sized temporary on the stack.
+    core::slice::from_mut(&mut *child).copy_from_slice(core::slice::from_ref(parent));
+    child_threads.copy_from_slice(parent_threads);
+    {
+        let current = usize::from(child.current_thread_slot);
+        for (slot, thread) in child_threads.iter_mut().enumerate() {
             if slot != current {
-                (*child_threads)[slot] = LinuxThreadRuntimeState::EMPTY;
+                *thread = LinuxThreadRuntimeState::EMPTY;
             }
         }
         if current < LINUX_THREAD_LIMIT {
-            (*child_threads)[current].tid = child_pid;
-            (*child_threads)[current].state = LINUX_THREAD_RUNNING;
+            child_threads[current].tid = child_pid;
+            child_threads[current].state = LINUX_THREAD_RUNNING;
             // A new task's CPU time starts at zero: inherited, the parent's
             // (a test runner's minutes) counted against the child's
             // RLIMIT_CPU and CPU-clock timers (setrlimit06).
-            (*child_threads)[current].cpu_cycles = 0;
+            child_threads[current].cpu_cycles = 0;
         }
-        (*child).last_preempted_thread_slot = LINUX_THREAD_SLOT_NONE;
-        (*child).next_tid = child_pid.saturating_add(1);
-        (*child).active = true;
-        (*child).completed = false;
-        (*child).exit_status = 0;
-        (*child).termination_signal = 0;
-        (*child).real_timer_interval = 0;
-        (*child).real_timer_deadline = 0;
-        (*child).posix_timer_deadline = 0;
-        (*child).pending_signals = 0;
-        (*child).pending_signal_codes.fill(0);
-        (*child).pending_signal_values.fill(0);
-        (*child).signal_active = false;
-        (*child).signal_context = LinuxSignalContext::ZERO;
-        (*child).parent_death_signal = 0;
-        (*child).mount_namespace = Some(mount_namespace);
+        child.last_preempted_thread_slot = LINUX_THREAD_SLOT_NONE;
+        child.next_tid = child_pid.saturating_add(1);
+        child.active = true;
+        child.completed = false;
+        child.exit_status = 0;
+        child.termination_signal = 0;
+        child.real_timer_interval = 0;
+        child.real_timer_deadline = 0;
+        child.posix_timer_deadline = 0;
+        child.pending_signals = 0;
+        child.pending_signal_codes.fill(0);
+        child.pending_signal_values.fill(0);
+        child.signal_active = false;
+        child.signal_context = LinuxSignalContext::ZERO;
+        child.parent_death_signal = 0;
+        child.mount_namespace = Some(mount_namespace);
     }
     Some(mount_namespace)
 }
@@ -761,7 +806,7 @@ pub(super) fn capture_linux_process_runtime_state_for(
             X86_RUNTIME.ELF_PROBE_PENDING_SIGNAL_VALUES[signal].load(Ordering::SeqCst)
         }),
         signal_active: X86_RUNTIME.LINUX_SIGNAL_ACTIVE.load(Ordering::SeqCst),
-        signal_context: unsafe { linux_signal_context().get().cast_const().read() },
+        signal_context: current_linux_signal_context(),
         exec_ignored_signals: X86_RUNTIME
             .ELF_PROBE_EXEC_IGNORED_SIGNALS
             .load(Ordering::SeqCst),
@@ -905,9 +950,7 @@ fn restore_linux_process_runtime_state(state: &LinuxProcessRuntimeState) {
     X86_RUNTIME
         .LINUX_SIGNAL_ACTIVE
         .store(state.signal_active, Ordering::SeqCst);
-    unsafe {
-        linux_signal_context().get().write(state.signal_context);
-    }
+    set_current_linux_signal_context(state.signal_context);
     X86_RUNTIME
         .ELF_PROBE_EXEC_IGNORED_SIGNALS
         .store(state.exec_ignored_signals, Ordering::SeqCst);
@@ -1054,7 +1097,7 @@ pub(super) fn push_linux_shared_runtime_state() {
                 X86_RUNTIME.ELF_PROBE_SIGNAL_ACTION_MASKS[signal].load(Ordering::SeqCst);
         }
     }
-    let source: *const LinuxProcessRuntimeState = state;
+    let source: &LinuxProcessRuntimeState = state;
     let copy_to_sharers = |resource, copy: &dyn Fn(&mut LinuxProcessRuntimeState)| {
         for peer in linux_process::live_processes_sharing(pid, resource) {
             if let Some(destination) = linux_process_runtime_state(peer).filter(|state| state.valid)
@@ -1063,9 +1106,8 @@ pub(super) fn push_linux_shared_runtime_state() {
             }
         }
     };
-    // SAFETY: `source` is this process's record, which no copy below
-    // writes: each destination is another process's.
-    let source = unsafe { &*source };
+    // `source` is this process's record, which no copy below writes: each
+    // destination is another process's.
     if parts.descriptors {
         copy_to_sharers(SharedResource::Descriptors, &|destination| {
             destination.descriptors = source.descriptors;

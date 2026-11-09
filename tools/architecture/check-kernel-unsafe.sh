@@ -9,16 +9,16 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 182 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 182 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 154 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 154 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
 # floor on the number of SAFETY comments, which removing a documented
 # unsafe block would trip.)
 undocumented=$(( unsafe_blocks - safety_comments ))
-if (( undocumented > 4 )); then
-    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from 4 to ${undocumented}" >&2
+if (( undocumented > -27 )); then
+    echo "kernel unsafe check: unsafe blocks without a SAFETY comment grew from -27 to ${undocumented}" >&2
     exit 1
 fi
 if (( static_mut > 0 )); then
@@ -31,7 +31,6 @@ fi
 # extern blocks) may only go down. Lower a number when a change removes
 # sites; a file may not grow.
 per_file_limits=(
-    "arch/x86_64/cpu/boot_verify_elf.rs 2"
     "arch/x86_64/cpu/linux_user_memory.rs 1"
     "image_store.rs 1"
     "lib.rs 0"
@@ -55,6 +54,7 @@ per_file_limits=(
     "trusted/owned_state.rs 4"
     "trusted/page_table.rs 2"
     "trusted/pixels.rs 3"
+    "trusted/pod.rs 10"
     "trusted/port.rs 8"
     "trusted/programs.rs 1"
     "trusted/random.rs 1"
@@ -63,6 +63,7 @@ per_file_limits=(
     "trusted/take_once.rs 2"
     "trusted/tsc.rs 3"
     "trusted/user_copy.rs 8"
+    "trusted/xstate.rs 4"
 )
 for limit in "${per_file_limits[@]}"; do
     file="${limit% *}"
@@ -84,12 +85,17 @@ forbidding_files=(
     "arch/x86_64/cpu/activation.rs"
     "arch/x86_64/cpu/architecture.rs"
     "arch/x86_64/cpu/boot_verify.rs"
+    "arch/x86_64/cpu/boot_verify_elf.rs"
+    "arch/x86_64/cpu/execution.rs"
     "arch/x86_64/cpu/linux_cgroupfs.rs"
     "arch/x86_64/cpu/linux_domain_runtime.rs"
+    "arch/x86_64/cpu/linux_exec.rs"
+    "arch/x86_64/cpu/linux_process_lifecycle.rs"
     "arch/x86_64/cpu/linux_process_vm.rs"
     "arch/x86_64/cpu/linux_procfs.rs"
     "arch/x86_64/cpu/linux_runtime_loop.rs"
     "arch/x86_64/cpu/linux_scheduler.rs"
+    "arch/x86_64/cpu/linux_signal.rs"
     "arch/x86_64/cpu/linux_syscall.rs"
     "arch/x86_64/cpu/linux_system.rs"
     "arch/x86_64/cpu/linux_thread.rs"

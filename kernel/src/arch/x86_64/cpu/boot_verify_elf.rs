@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use super::*;
 
 #[inline(never)]
@@ -1377,7 +1378,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
     X86_RUNTIME
         .LINUX_SIGNAL_RETURN_COUNT
         .store(0, Ordering::SeqCst);
-    unsafe { linux_signal_context().get().write(LinuxSignalContext::ZERO) };
+    set_current_linux_signal_context(LinuxSignalContext::ZERO);
     let linux_clone_publication_valid = if execution.tls_size == 0 {
         true
     } else {
@@ -1896,7 +1897,7 @@ pub(crate) fn verify_linux_elf_entry(execution: &LinuxElfExecution<'_>) -> Linux
         .swap(false, Ordering::SeqCst)
         && signal_delivery_count == expected_signal_count
         && signal_return_count == expected_signal_count
-        && unsafe { linux_signal_context().get().cast_const().read() == LinuxSignalContext::ZERO };
+        && current_linux_signal_context() == LinuxSignalContext::ZERO;
     let system_supervisor_valid = if system_init {
         system_supervisor_wait_count == 1 && system_supervisor_shutdown_count == 1
     } else {
