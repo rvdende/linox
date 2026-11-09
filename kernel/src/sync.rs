@@ -589,15 +589,44 @@ pub(crate) fn held_rank() -> u16 {
 /// Records that this CPU takes a lock of `rank`, failing closed if it
 /// holds one ranked at or above it; returns the rank it held before. Only
 /// the spin locks (`trusted::lock`) and the kernel-entry lock call this.
+/// A violation names the ranks and where the refused lock was taken
+/// (`#[track_caller]` through the lock methods).
+#[track_caller]
 pub(crate) fn enter_rank(rank: LockRank) -> u16 {
     crate::linux_profile::count_lock(rank.0);
     let held = &HELD_RANKS[cpu_slot()];
     let previous = held.load(Ordering::Acquire);
     if previous >= rank.0 {
+        // Written raw: the kernel log takes a lock of its own.
+        let caller = core::panic::Location::caller();
+        crate::serial_write_raw(b"linox: lock-order violation held/taken rank: ");
+        write_decimal(u64::from(previous));
+        crate::serial_write_raw(b" ");
+        write_decimal(u64::from(rank.0));
+        crate::serial_write_raw(b" at ");
+        crate::serial_write_raw(caller.file().as_bytes());
+        crate::serial_write_raw(b":");
+        write_decimal(u64::from(caller.line()));
+        crate::serial_write_raw(b"\r\n");
         crate::kernel_fail("linox: synchronization lock-order violation\r\n");
     }
     held.store(rank.0, Ordering::Release);
     previous
+}
+
+/// Writes `value` in decimal straight to the serial port and console.
+fn write_decimal(mut value: u64) {
+    let mut digits = [0_u8; 20];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    crate::serial_write_raw(&digits[start..]);
 }
 
 /// Records that this CPU released its lock of `rank`, back to `previous`

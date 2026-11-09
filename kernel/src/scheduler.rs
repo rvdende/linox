@@ -5,6 +5,8 @@
 use alloc::vec::Vec;
 
 use crate::domain;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use crate::sync::{IrqSpinLock, LockRank, SpinLock};
 
 /// Threads one scheduler holds at most: their slots are 16-bit. The table
@@ -1551,6 +1553,7 @@ fn install_runtime(runtime: Runtime) -> bool {
     if installed.is_some() {
         return false;
     }
+    NATIVE_CURRENT.publish(&runtime);
     *installed = Some(runtime);
     true
 }
@@ -1823,42 +1826,23 @@ pub(crate) fn service_address_space_owner() -> Option<u64> {
 }
 
 pub(crate) fn current_domain() -> Option<u64> {
-    with_runtime(|runtime| {
-        let current = runtime.scheduler.current?;
-        Some(runtime.scheduler.thread(current)?.domain)
-    })
-    .flatten()
+    NATIVE_CURRENT.read().map(|current| current.domain)
 }
 
 pub(crate) fn current_address_space_root() -> Option<u64> {
-    with_runtime(|runtime| {
-        let current = runtime.scheduler.current?;
-        runtime
-            .scheduler
-            .thread(current)
-            .map(|thread| thread.context.address_space_root)
-    })
-    .flatten()
+    NATIVE_CURRENT
+        .read()
+        .map(|current| current.address_space_root)
 }
 
 pub(crate) fn current_instruction_and_stack() -> Option<(u64, u64)> {
-    with_runtime(|runtime| {
-        let current = runtime.scheduler.current?;
-        let context = runtime.scheduler.thread(current)?.context;
-        Some((context.rip, context.rsp))
-    })
-    .flatten()
+    NATIVE_CURRENT
+        .read()
+        .map(|current| (current.instruction, current.stack))
 }
 
 pub(crate) fn current_fs_base() -> Option<u64> {
-    with_runtime(|runtime| {
-        let current = runtime.scheduler.current?;
-        runtime
-            .scheduler
-            .thread(current)
-            .map(|thread| thread.context.fs_base)
-    })
-    .flatten()
+    NATIVE_CURRENT.read().map(|current| current.fs_base)
 }
 
 pub(crate) fn fault_runtime(
@@ -2509,10 +2493,101 @@ pub(crate) fn verify_runtime_complete() -> bool {
 
 /// Runs `f` on the native runtime, once initialized, holding its lock for
 /// `f` alone (`LockRank::NATIVE_SCHEDULER`: `f` may grow the thread table
-/// and ask the domain manager, nothing else).
+/// and ask the domain manager, nothing else), and publishes the current
+/// thread it leaves (`NATIVE_CURRENT`) before letting go.
 fn with_runtime<R>(f: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
-    SCHEDULER_RUNTIME.lock().as_mut().map(f)
+    let mut runtime = SCHEDULER_RUNTIME.lock();
+    let result = runtime.as_mut().map(f);
+    if let Some(runtime) = runtime.as_ref() {
+        NATIVE_CURRENT.publish(runtime);
+    }
+    result
 }
+
+/// The native runtime's current thread as the last hold of its lock left
+/// it: what the queries (`current_domain`, `current_address_space_root`,
+/// ...) read, with no lock, from whatever lock their callers hold (a path
+/// walk's check of mapped frames under the volumes, the timer and device
+/// interrupts). A sequence lock: the writer, who holds the runtime's lock,
+/// makes the count odd while it stores and even after; a reader retries
+/// until it reads one even count before and after its loads.
+struct PublishedCurrent {
+    sequence: AtomicU64,
+    present: AtomicBool,
+    domain: AtomicU64,
+    address_space_root: AtomicU64,
+    instruction: AtomicU64,
+    stack: AtomicU64,
+    fs_base: AtomicU64,
+}
+
+/// A copy of the native runtime's current thread (`PublishedCurrent`).
+#[derive(Clone, Copy)]
+struct CurrentThread {
+    domain: u64,
+    address_space_root: u64,
+    instruction: u64,
+    stack: u64,
+    fs_base: u64,
+}
+
+impl PublishedCurrent {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            present: AtomicBool::new(false),
+            domain: AtomicU64::new(0),
+            address_space_root: AtomicU64::new(0),
+            instruction: AtomicU64::new(0),
+            stack: AtomicU64::new(0),
+            fs_base: AtomicU64::new(0),
+        }
+    }
+
+    /// Stores `runtime`'s current thread; the caller holds the runtime's
+    /// lock, so writers never overlap.
+    fn publish(&self, runtime: &Runtime) {
+        let current = runtime
+            .scheduler
+            .current
+            .and_then(|current| runtime.scheduler.thread(current));
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.present.store(current.is_some(), Ordering::Release);
+        if let Some(thread) = current {
+            self.domain.store(thread.domain, Ordering::Release);
+            self.address_space_root
+                .store(thread.context.address_space_root, Ordering::Release);
+            self.instruction
+                .store(thread.context.rip, Ordering::Release);
+            self.stack.store(thread.context.rsp, Ordering::Release);
+            self.fs_base
+                .store(thread.context.fs_base, Ordering::Release);
+        }
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn read(&self) -> Option<CurrentThread> {
+        loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before % 2 == 1 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let current = self.present.load(Ordering::Acquire).then(|| CurrentThread {
+                domain: self.domain.load(Ordering::Acquire),
+                address_space_root: self.address_space_root.load(Ordering::Acquire),
+                instruction: self.instruction.load(Ordering::Acquire),
+                stack: self.stack.load(Ordering::Acquire),
+                fs_base: self.fs_base.load(Ordering::Acquire),
+            });
+            if self.sequence.load(Ordering::Acquire) == before {
+                return current;
+            }
+        }
+    }
+}
+
+static NATIVE_CURRENT: PublishedCurrent = PublishedCurrent::new();
 
 fn initial_context(
     address_space_root: u64,

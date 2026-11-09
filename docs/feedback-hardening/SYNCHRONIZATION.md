@@ -17,7 +17,10 @@ cross-CPU exclusion.
 
 Both locks use acquire/release ordering. Every lock has a rank, and each CPU
 tracks its currently held rank. Acquisition must proceed in strictly ascending
-rank order and release in reverse order. Violations fail closed in all builds.
+rank order and release in reverse order. Violations fail closed in all builds. A violation prints the rank held, the rank refused and where
+the refused lock was taken (`linox: lock-order violation held/taken rank:
+186 108 at kernel/src/scheduler.rs:2514`; the lock methods are
+`#[track_caller]`) before `LINOX_KERNEL_PANIC`.
 
 ## Global order
 
@@ -168,9 +171,16 @@ nothing that takes a lock. Two such leaves are never held together.
   auxiliary address spaces (106), so it ranks above those. Under it the
   thread table grows (the heap, 190) and the domain manager (450) is
   asked for service identities and thread counts, so it ranks below
-  them. Interrupt handlers take it only from user mode or an idle halt,
-  where no other lock is held (system calls run with interrupts off).
-  It was an `OwnedState` written through a raw pointer before.
+  them. The read-only queries of the current thread (`current_domain`,
+  `current_address_space_root`, `current_instruction_and_stack`,
+  `current_fs_base`) take no lock: every hold publishes the current
+  thread to `NATIVE_CURRENT`, a sequence lock the queries read, because
+  they are asked under any lock (a path walk's check of mapped frames
+  under VOLUMES, 186, found that: the first full LTP run with the lock
+  failed closed in mmap16 and readahead02). The interrupt handlers that
+  mutate the runtime (a native device wait's timeout or completion)
+  run only for native domains' waits. It was an `OwnedState` written
+  through a raw pointer before.
 - A Linux domain instance's run queue (`scheduler::ProcessScheduler`) is
   part of its process table now (`ProcessTable::run_queue`, under
   PROCESS_TABLE, 189): every use of it already ran under the table's

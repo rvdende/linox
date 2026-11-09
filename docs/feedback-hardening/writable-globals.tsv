@@ -694,3 +694,4 @@ interior-mutable	kernel/src/trusted/frame_tables.rs	CARVED	platform-device	allow
 interior-mutable	kernel/src/image_store.rs	IMAGE_STORE	shared-runtime	allowlist	none	ranked-image-store-and-leaf-rootfs-images-locks
 interior-mutable	kernel/src/published_rootfs.rs	PUBLISHED_ROOTFS	domain-runtime	allowlist	none	ranked-leaf-per-slot-published-rootfs-arc
 interior-mutable	kernel/src/trusted/heap.rs	KERNEL_HEAP	shared-runtime	allowlist	none	ranked-heap-slab-lock
+interior-mutable	kernel/src/scheduler.rs	NATIVE_CURRENT	shared-runtime	allowlist	none	seqlock-published-native-current-thread

@@ -50,6 +50,7 @@ impl<T> SpinLock<T> {
         }
     }
 
+    #[track_caller]
     pub(crate) fn lock(&self) -> SpinLockGuard<'_, T> {
         let previous_rank = enter_rank(self.rank);
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
@@ -63,6 +64,7 @@ impl<T> SpinLock<T> {
         }
     }
 
+    #[track_caller]
     pub(crate) fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let owner = self.owner.load(Ordering::Acquire);
         if self
@@ -129,6 +131,7 @@ impl<T> IrqSpinLock<T> {
         Self(SpinLock::new(rank, value))
     }
 
+    #[track_caller]
     pub(crate) fn lock(&self) -> IrqSpinLockGuard<'_, T> {
         let interrupts = InterruptsOff(interrupts::save_and_disable());
         let guard = self.0.lock();
@@ -138,6 +141,7 @@ impl<T> IrqSpinLock<T> {
         }
     }
 
+    #[track_caller]
     pub(crate) fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
         // Dropped on failure, which restores the interrupts.
         let interrupts = InterruptsOff(interrupts::save_and_disable());
