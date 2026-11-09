@@ -55,6 +55,14 @@ impl LockRank {
     /// The UTS, IPC, PID and time namespaces domains made; ranks below the
     /// heap so the table may grow while held.
     pub(crate) const NAMESPACES: Self = Self(107);
+    /// The native runtime's threads (`scheduler::with_runtime`): native
+    /// service calls, their faults and the timer and virtio interrupts
+    /// that preempt or wake them. Woken under the control channel (103)
+    /// and the packet mailboxes (104) and queued under the auxiliary
+    /// address spaces (106), so it ranks above them; its thread table grows
+    /// while held (the heap) and it asks the domain manager (450), so it
+    /// ranks below them. Interrupt-safe: the timer takes it.
+    pub(crate) const NATIVE_SCHEDULER: Self = Self(108);
     /// Processes' memory areas; ranks just below the heap so the sets may
     /// grow while held, and above the socket, inotify and futex locks, under
     /// which a copy to user memory may look up a lazily reserved page.

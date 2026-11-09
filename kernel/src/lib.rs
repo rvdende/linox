@@ -90,7 +90,6 @@ mod owned_state;
 mod packet;
 mod pe;
 mod published_rootfs;
-#[allow(unsafe_code)]
 mod scheduler;
 mod sync;
 #[allow(unsafe_code)]

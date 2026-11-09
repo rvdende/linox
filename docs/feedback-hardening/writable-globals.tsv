@@ -510,8 +510,8 @@ interior-mutable	kernel/src/linux_tmpfs.rs	TMPFS_RUNTIME	domain-runtime	allowlis
 interior-mutable	kernel/src/memory.rs	PHYSICAL_MEMORY	platform-device	allowlist	none	explicit-host-physical-memory-owner-root
 interior-mutable	kernel/src/network.rs	NETWORKS	platform-device	allowlist	none	explicit-host-virtual-network-owner-root
 interior-mutable	kernel/src/packet.rs	PACKETS	platform-device	allowlist	none	ranked-packet-mailbox-lock
-interior-mutable	kernel/src/scheduler.rs	PROCESS_WORKSPACES	domain-runtime	allowlist	none	explicit-per-domain-lifecycle-owner-root
-interior-mutable	kernel/src/scheduler.rs	SCHEDULER_RUNTIME	shared-runtime	allowlist	none	explicit-lifecycle-owner-root
+interior-mutable	kernel/src/scheduler.rs	VERIFICATION_RUN_QUEUE	verification-only	allowlist	none	ranked-boot-check-run-queue-lock
+interior-mutable	kernel/src/scheduler.rs	SCHEDULER_RUNTIME	shared-runtime	allowlist	none	irq-ranked-native-runtime-lock
 interior-mutable	kernel/src/sync.rs	HELD_RANKS	per-cpu-arch	allowlist	none	explicit-per-cpu-lock-order-tracker
 interior-mutable	kernel/src/sync.rs	HIGH	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/sync.rs	KERNEL_ENTRY_LOCK	shared-runtime	allowlist	none	explicit-ranked-kernel-entry-lock

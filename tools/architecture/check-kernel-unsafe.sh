@@ -9,8 +9,8 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 137 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 137 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 133 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 133 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a
@@ -50,7 +50,7 @@ per_file_limits=(
     "trusted/lock.rs 3"
     "trusted/mmio.rs 2"
     "trusted/msr.rs 4"
-    "trusted/owned_state.rs 4"
+    "trusted/owned_state.rs 3"
     "trusted/page_table.rs 2"
     "trusted/pixels.rs 3"
     "trusted/pod.rs 10"
@@ -145,6 +145,7 @@ forbidding_files=(
     "packet.rs"
     "pe.rs"
     "published_rootfs.rs"
+    "scheduler.rs"
     "sync.rs"
     "volume.rs"
 )
@@ -162,8 +163,8 @@ if ! rg -q '^#!\[deny\(unsafe_code\)\]$' "${kernel_source}/lib.rs"; then
     exit 1
 fi
 allowed_modules="$(rg -c -U '#\[allow\(unsafe_code\)\]\n(pub(\([^)]*\))? )?mod ' "${kernel_source}/lib.rs" || true)"
-if (( ${allowed_modules:-0} > 3 )); then
-    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 3" >&2
+if (( ${allowed_modules:-0} > 2 )); then
+    echo "kernel unsafe check: lib.rs allows unsafe code in ${allowed_modules} modules, more than 2" >&2
     exit 1
 fi
 if (( $(rg -c 'allow\(unsafe_code\)' "${kernel_source}/lib.rs" || echo 0) != ${allowed_modules:-0} )); then

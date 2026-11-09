@@ -1,18 +1,30 @@
+//! The native runtime's scheduler (the native service domains' threads)
+//! and the run queue Linux domain instances schedule their processes on.
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
 
 use crate::domain;
-use crate::owned_state::OwnedState;
+use crate::sync::{IrqSpinLock, LockRank, SpinLock};
 
 /// Threads one scheduler holds at most: their slots are 16-bit. The table
 /// grows to it as threads are created.
 const THREAD_LIMIT: usize = u16::MAX as usize;
 const PROCESS_CPU_LIMIT: usize = 4;
-const PROCESS_WORKSPACE_LIMIT: usize = crate::control_abi::DOMAIN_LIMIT + 1;
 pub(crate) const IPC_PEER_CLOSED: u64 = u64::MAX - 4;
 
-static SCHEDULER_RUNTIME: OwnedState<Runtime> = OwnedState::empty();
-static PROCESS_WORKSPACES: [OwnedState<ProcessScheduler>; PROCESS_WORKSPACE_LIMIT] =
-    [const { OwnedState::empty() }; PROCESS_WORKSPACE_LIMIT];
+/// The native runtime (`initialize_runtime`, `initialize_control_runtime`):
+/// the native service domains' threads, taken by native service calls,
+/// their faults and the timer and virtio interrupts that preempt or wake
+/// them (`with_runtime`).
+static SCHEDULER_RUNTIME: IrqSpinLock<Option<Runtime>> =
+    IrqSpinLock::new(LockRank::NATIVE_SCHEDULER, None);
+/// The run queue the cross-CPU scheduling check at boot
+/// (`verify_smp_process_scheduler`) fills and another CPU schedules from.
+/// A Linux domain instance's run queue is its process table's
+/// (`linux_process`), under the table's lock.
+static VERIFICATION_RUN_QUEUE: SpinLock<Option<ProcessScheduler>> =
+    SpinLock::new(LockRank::PROCESS_TABLE, None);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ThreadId {
@@ -1060,6 +1072,13 @@ impl ProcessScheduler {
         }
     }
 
+    /// Whether no thread is left in the run queue, nor current on a CPU.
+    pub(crate) fn is_clean(&self) -> bool {
+        self.scheduler.threads.iter().all(Option::is_none)
+            && self.scheduler.current.is_none()
+            && self.current_by_cpu.iter().all(Option::is_none)
+    }
+
     fn schedule_next_on_with_policy<L, C>(
         &mut self,
         cpu: usize,
@@ -1325,50 +1344,12 @@ impl ProcessScheduler {
     }
 }
 
-pub(crate) fn acquire_process_scheduler_workspace() -> Option<&'static mut ProcessScheduler> {
-    let workspace = current_process_scheduler_workspace();
-    // The workspace is small (its thread tables are on the heap), so it is
-    // built whole and published.
-    workspace.try_claim()?.publish(ProcessScheduler {
-        scheduler: Scheduler {
-            threads: Vec::new(),
-            generations: Vec::new(),
-            current: None,
-            next_slot: 0,
-        },
-        current_by_cpu: [None; PROCESS_CPU_LIMIT],
-        dispatches: [0; PROCESS_CPU_LIMIT],
-    });
-    // SAFETY: A successful claim gives this lifecycle exclusive workspace use.
-    Some(unsafe { &mut *workspace.get_mut_ptr()? })
-}
-
-pub(crate) fn active_process_scheduler_workspace() -> Option<&'static mut ProcessScheduler> {
-    let workspace = current_process_scheduler_workspace();
-    // SAFETY: The process lifecycle retains the exclusive workspace claim.
-    Some(unsafe { &mut *workspace.get_mut_ptr()? })
-}
-
-pub(crate) fn release_process_scheduler_workspace() -> bool {
-    let workspace_owner = current_process_scheduler_workspace();
-    let clean = {
-        let Some(workspace) = workspace_owner.get() else {
-            return false;
-        };
-        workspace.scheduler.threads.iter().all(Option::is_none)
-            && workspace.scheduler.current.is_none()
-            && workspace.current_by_cpu.iter().all(Option::is_none)
-    };
-    clean && workspace_owner.reset()
-}
-
-fn current_process_scheduler_workspace() -> &'static OwnedState<ProcessScheduler> {
-    let instance = crate::arch::x86_64::cpu::current_linux_execution_instance();
-    &PROCESS_WORKSPACES[instance]
-}
-
+/// One scheduling turn on this CPU from the boot check's run queue
+/// (`verify_smp_process_scheduler`), run on another CPU.
 pub(crate) fn schedule_process_on_current_cpu_for_test() -> bool {
-    active_process_scheduler_workspace()
+    VERIFICATION_RUN_QUEUE
+        .lock()
+        .as_mut()
         .and_then(ProcessScheduler::schedule_next)
         .is_some()
 }
@@ -1380,34 +1361,52 @@ pub(crate) fn verify_smp_process_scheduler(remote_operation: u64) -> bool {
     let Some(context) = process_user_context([0; 15], 0x1000, 0x2000, 0x202, 0x3000, 0) else {
         return false;
     };
-    let Some(run_queue) = acquire_process_scheduler_workspace() else {
-        return false;
+    {
+        let mut queue = VERIFICATION_RUN_QUEUE.lock();
+        if queue.is_some() {
+            return false;
+        }
+        *queue = Some(ProcessScheduler::new());
+    }
+    // The run queue's lock is let go while CPU 1 schedules from it.
+    let with_queue = |f: &mut dyn FnMut(&mut ProcessScheduler) -> Option<()>| {
+        VERIFICATION_RUN_QUEUE.lock().as_mut().and_then(f)
     };
+    let mut handles = None;
     let verified = (|| {
-        let first = run_queue.admit(1, context)?;
-        let second = run_queue.admit(1, context)?;
-        let fallback = run_queue.admit(1, context)?;
-        if !run_queue.set_affinity(first, 1)
-            || !run_queue.set_affinity(second, 2)
-            || !run_queue.set_affinity(fallback, 3)
-            || !run_queue.set_priority(first, 10)
-            || !run_queue.set_priority(second, 10)
-            || !run_queue.set_priority(fallback, 0)
-            || run_queue.schedule_next()?.handle() != first
-            || !crate::arch::x86_64::smp::execute_runtime_operation(1, remote_operation)
-            || run_queue.current_by_cpu[0] != Some(first.0)
-            || run_queue.current_by_cpu[1] != Some(second.0)
-            || run_queue.dispatch_count(0) != Some(1)
-            || run_queue.dispatch_count(1) != Some(1)
-            || run_queue.scheduler.thread(fallback.0)?.state != State::Ready
-        {
+        with_queue(&mut |run_queue| {
+            let first = run_queue.admit(1, context)?;
+            let second = run_queue.admit(1, context)?;
+            let fallback = run_queue.admit(1, context)?;
+            if !run_queue.set_affinity(first, 1)
+                || !run_queue.set_affinity(second, 2)
+                || !run_queue.set_affinity(fallback, 3)
+                || !run_queue.set_priority(first, 10)
+                || !run_queue.set_priority(second, 10)
+                || !run_queue.set_priority(fallback, 0)
+                || run_queue.schedule_next()?.handle() != first
+            {
+                return None;
+            }
+            handles = Some((first, second, fallback));
+            Some(())
+        })?;
+        let (first, second, fallback) = handles?;
+        if !crate::arch::x86_64::smp::execute_runtime_operation(1, remote_operation) {
             return None;
         }
-        Some(())
+        with_queue(&mut |run_queue| {
+            (run_queue.current_by_cpu[0] == Some(first.0)
+                && run_queue.current_by_cpu[1] == Some(second.0)
+                && run_queue.dispatch_count(0) == Some(1)
+                && run_queue.dispatch_count(1) == Some(1)
+                && run_queue.scheduler.thread(fallback.0)?.state == State::Ready)
+                .then_some(())
+        })
     })()
     .is_some();
-    run_queue.retire_all();
-    let policy_verified = (|| {
+    let policy_verified = with_queue(&mut |run_queue| {
+        run_queue.retire_all();
         const LIMITED_DOMAIN: u64 = 0x100;
         const STANDARD_DOMAIN: u64 = 0x200;
         let limited_first = run_queue.admit(LIMITED_DOMAIN, context)?;
@@ -1440,10 +1439,16 @@ pub(crate) fn verify_smp_process_scheduler(remote_operation: u64) -> bool {
             return None;
         }
         Some(())
-    })()
+    })
     .is_some();
-    run_queue.retire_all();
-    verified && policy_verified && release_process_scheduler_workspace()
+    let released = VERIFICATION_RUN_QUEUE
+        .lock()
+        .take()
+        .is_some_and(|mut run_queue| {
+            run_queue.retire_all();
+            run_queue.is_clean()
+        });
+    verified && policy_verified && released
 }
 
 pub(crate) fn initialize_runtime(
@@ -1460,7 +1465,7 @@ pub(crate) fn initialize_runtime(
     let [first_entry, second_entry] = entries;
     let [first_stack, second_stack] = stacks;
     let [first_handles, second_handles] = handles;
-    if SCHEDULER_RUNTIME.get().is_some() || first_address_space_root == second_address_space_root {
+    if SCHEDULER_RUNTIME.lock().is_some() || first_address_space_root == second_address_space_root {
         return false;
     }
     let Some(service_identity) = domain::domain_service_identity(second_domain) else {
@@ -1517,29 +1522,36 @@ pub(crate) fn initialize_runtime(
         return false;
     }
 
-    if SCHEDULER_RUNTIME
-        .try_install(Runtime {
-            scheduler,
-            control_domain: first_domain,
-            yields: 0,
-            preemptions: 0,
-            exits: 0,
-            address_space_switches: 0,
-            faults: 0,
-            expected_fault_instruction: expected_fault_instruction as u64,
-            expected_fault_observed: false,
-            service_restart_context,
-            service_address_space_owner: second_domain,
-            restarts: 0,
-            blocks: 0,
-            wakes: 0,
-            last_wake_source: None,
-            last_wake_sequence: None,
-        })
-        .is_err()
-    {
+    if !install_runtime(Runtime {
+        scheduler,
+        control_domain: first_domain,
+        yields: 0,
+        preemptions: 0,
+        exits: 0,
+        address_space_switches: 0,
+        faults: 0,
+        expected_fault_instruction: expected_fault_instruction as u64,
+        expected_fault_observed: false,
+        service_restart_context,
+        service_address_space_owner: second_domain,
+        restarts: 0,
+        blocks: 0,
+        wakes: 0,
+        last_wake_source: None,
+        last_wake_sequence: None,
+    }) {
         return false;
     }
+    true
+}
+
+/// Installs the native runtime unless one is: false then.
+fn install_runtime(runtime: Runtime) -> bool {
+    let mut installed = SCHEDULER_RUNTIME.lock();
+    if installed.is_some() {
+        return false;
+    }
+    *installed = Some(runtime);
     true
 }
 
@@ -1547,49 +1559,47 @@ pub(crate) fn initialize_control_runtime(control_domain: u64) -> bool {
     if control_domain == 0 {
         return false;
     }
-    SCHEDULER_RUNTIME
-        .try_install(Runtime {
-            scheduler: Scheduler::new(),
-            control_domain,
-            yields: 0,
-            preemptions: 0,
-            exits: 0,
-            address_space_switches: 0,
-            faults: 0,
-            expected_fault_instruction: 0,
-            expected_fault_observed: false,
-            service_restart_context: UserContext::ZERO,
-            service_address_space_owner: 0,
-            restarts: 0,
-            blocks: 0,
-            wakes: 0,
-            last_wake_source: None,
-            last_wake_sequence: None,
-        })
-        .is_ok()
+    install_runtime(Runtime {
+        scheduler: Scheduler::new(),
+        control_domain,
+        yields: 0,
+        preemptions: 0,
+        exits: 0,
+        address_space_switches: 0,
+        faults: 0,
+        expected_fault_instruction: 0,
+        expected_fault_observed: false,
+        service_restart_context: UserContext::ZERO,
+        service_address_space_owner: 0,
+        restarts: 0,
+        blocks: 0,
+        wakes: 0,
+        last_wake_source: None,
+        last_wake_sequence: None,
+    })
 }
 
 pub(crate) fn queue_service_restart(domain: u64, ipc_handle: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    if runtime.restarts != 0 {
-        return false;
-    }
-    let context = UserContext {
-        r8: ipc_handle,
-        ..runtime.service_restart_context
-    };
-    if !domain::attach_thread(domain) {
-        return false;
-    }
-    if runtime.scheduler.create(domain, context).is_none() {
-        let _ = domain::detach_thread(domain);
-        return false;
-    }
-    runtime.restarts = 1;
-    runtime.service_address_space_owner = domain;
-    true
+    with_runtime(|runtime| {
+        if runtime.restarts != 0 {
+            return false;
+        }
+        let context = UserContext {
+            r8: ipc_handle,
+            ..runtime.service_restart_context
+        };
+        if !domain::attach_thread(domain) {
+            return false;
+        }
+        if runtime.scheduler.create(domain, context).is_none() {
+            let _ = domain::detach_thread(domain);
+            return false;
+        }
+        runtime.restarts = 1;
+        runtime.service_address_space_owner = domain;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn queue_auxiliary(
@@ -1599,52 +1609,54 @@ pub(crate) fn queue_auxiliary(
     stack: usize,
     console_handle: u64,
 ) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    if domain::service_failure_policy(domain_id) != Some(domain::ServiceFailurePolicy::StopOnly) {
-        return false;
-    }
-    let Some(service_identity) = domain::domain_service_identity(domain_id) else {
-        return false;
-    };
-    let mut context = initial_context(address_space_root, entry, stack, 0, console_handle, 0, 4);
-    context.r10 = domain_id;
-    context.r11 = service_identity;
-    if !domain::attach_thread(domain_id) {
-        return false;
-    }
-    let Some(thread) = runtime.scheduler.create(domain_id, context) else {
-        let _ = domain::detach_thread(domain_id);
-        return false;
-    };
-    if runtime.scheduler.current.is_some() {
-        let Some(queued) = runtime.scheduler.thread_mut(thread) else {
+    with_runtime(|runtime| {
+        if domain::service_failure_policy(domain_id) != Some(domain::ServiceFailurePolicy::StopOnly)
+        {
+            return false;
+        }
+        let Some(service_identity) = domain::domain_service_identity(domain_id) else {
             return false;
         };
-        queued.state = State::Staged;
-        queued.initialized = false;
-        true
-    } else {
-        let Some(next) = runtime.scheduler.schedule_next() else {
-            let _ = runtime.scheduler.remove_cancellable_domain(domain_id);
+        let mut context =
+            initial_context(address_space_root, entry, stack, 0, console_handle, 0, 4);
+        context.r10 = domain_id;
+        context.r11 = service_identity;
+        if !domain::attach_thread(domain_id) {
+            return false;
+        }
+        let Some(thread) = runtime.scheduler.create(domain_id, context) else {
             let _ = domain::detach_thread(domain_id);
             return false;
         };
-        next.context == context
-    }
+        if runtime.scheduler.current.is_some() {
+            let Some(queued) = runtime.scheduler.thread_mut(thread) else {
+                return false;
+            };
+            queued.state = State::Staged;
+            queued.initialized = false;
+            true
+        } else {
+            let Some(next) = runtime.scheduler.schedule_next() else {
+                let _ = runtime.scheduler.remove_cancellable_domain(domain_id);
+                let _ = domain::detach_thread(domain_id);
+                return false;
+            };
+            next.context == context
+        }
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn cancel_auxiliary(domain_id: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    if domain::service_failure_policy(domain_id) != Some(domain::ServiceFailurePolicy::StopOnly)
-        || !runtime.scheduler.remove_cancellable_domain(domain_id)
-    {
-        return false;
-    }
-    domain::detach_thread(domain_id)
+    with_runtime(|runtime| {
+        if domain::service_failure_policy(domain_id) != Some(domain::ServiceFailurePolicy::StopOnly)
+            || !runtime.scheduler.remove_cancellable_domain(domain_id)
+        {
+            return false;
+        }
+        domain::detach_thread(domain_id)
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn initialize_staged_auxiliary(
@@ -1652,192 +1664,201 @@ pub(crate) fn initialize_staged_auxiliary(
     payload_address: u64,
     payload_length: u64,
 ) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let mut matched = None;
-    for thread in runtime.scheduler.threads.iter_mut().flatten() {
-        if thread.domain == domain_id {
-            if matched.is_some() || thread.state != State::Staged || thread.initialized {
-                return false;
+    with_runtime(|runtime| {
+        let mut matched = None;
+        for thread in runtime.scheduler.threads.iter_mut().flatten() {
+            if thread.domain == domain_id {
+                if matched.is_some() || thread.state != State::Staged || thread.initialized {
+                    return false;
+                }
+                matched = Some(thread);
             }
-            matched = Some(thread);
         }
-    }
-    let Some(thread) = matched else {
-        return false;
-    };
-    thread.context.rsi = payload_address;
-    thread.context.rdx = payload_length;
-    thread.initialized = true;
-    true
+        let Some(thread) = matched else {
+            return false;
+        };
+        thread.context.rsi = payload_address;
+        thread.context.rdx = payload_length;
+        thread.initialized = true;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn initialize_staged_packet_auxiliary(domain_id: u64, sequence: u64) -> bool {
     if sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let mut matched = None;
-    for thread in runtime.scheduler.threads.iter_mut().flatten() {
-        if thread.domain == domain_id {
-            if matched.is_some() || thread.state != State::Staged || thread.initialized {
-                return false;
+    with_runtime(|runtime| {
+        let mut matched = None;
+        for thread in runtime.scheduler.threads.iter_mut().flatten() {
+            if thread.domain == domain_id {
+                if matched.is_some() || thread.state != State::Staged || thread.initialized {
+                    return false;
+                }
+                matched = Some(thread);
             }
-            matched = Some(thread);
         }
-    }
-    let Some(thread) = matched else {
-        return false;
-    };
-    thread.context.rbx = sequence;
-    thread.initialized = true;
-    true
+        let Some(thread) = matched else {
+            return false;
+        };
+        thread.context.rbx = sequence;
+        thread.initialized = true;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn initialize_staged_native_auxiliary(domain_id: u64, boot_info: u64) -> bool {
     if boot_info == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let mut matched = None;
-    for thread in runtime.scheduler.threads.iter_mut().flatten() {
-        if thread.domain == domain_id {
-            if matched.is_some() || thread.state != State::Staged || thread.initialized {
-                return false;
+    with_runtime(|runtime| {
+        let mut matched = None;
+        for thread in runtime.scheduler.threads.iter_mut().flatten() {
+            if thread.domain == domain_id {
+                if matched.is_some() || thread.state != State::Staged || thread.initialized {
+                    return false;
+                }
+                matched = Some(thread);
             }
-            matched = Some(thread);
         }
-    }
-    let Some(thread) = matched else {
-        return false;
-    };
-    thread.context.rbx = boot_info;
-    thread.initialized = true;
-    true
+        let Some(thread) = matched else {
+            return false;
+        };
+        thread.context.rbx = boot_info;
+        thread.initialized = true;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn auxiliary_is_staged(domain_id: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let mut matches = runtime
-        .scheduler
-        .threads
-        .iter()
-        .flatten()
-        .filter(|thread| thread.domain == domain_id);
-    matches
-        .next()
-        .is_some_and(|thread| thread.state == State::Staged)
-        && matches.next().is_none()
+    with_runtime(|runtime| {
+        let mut matches = runtime
+            .scheduler
+            .threads
+            .iter()
+            .flatten()
+            .filter(|thread| thread.domain == domain_id);
+        matches
+            .next()
+            .is_some_and(|thread| thread.state == State::Staged)
+            && matches.next().is_none()
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn auxiliary_runtime_state(domain_id: u64) -> Option<u64> {
-    let runtime = runtime_mut()?;
-    let mut matches = runtime
-        .scheduler
-        .threads
-        .iter()
-        .flatten()
-        .filter(|thread| thread.domain == domain_id);
-    let state = matches.next().map(|thread| thread.state);
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(match state {
-        None => crate::control_abi::AUXILIARY_STATE_CREATED,
-        Some(State::Staged) => crate::control_abi::AUXILIARY_STATE_STAGED,
-        Some(State::Ready) => crate::control_abi::AUXILIARY_STATE_READY,
-        Some(State::Running) => crate::control_abi::AUXILIARY_STATE_RUNNING,
-        Some(State::Blocked) => crate::control_abi::AUXILIARY_STATE_BLOCKED,
+    with_runtime(|runtime| {
+        let mut matches = runtime
+            .scheduler
+            .threads
+            .iter()
+            .flatten()
+            .filter(|thread| thread.domain == domain_id);
+        let state = matches.next().map(|thread| thread.state);
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(match state {
+            None => crate::control_abi::AUXILIARY_STATE_CREATED,
+            Some(State::Staged) => crate::control_abi::AUXILIARY_STATE_STAGED,
+            Some(State::Ready) => crate::control_abi::AUXILIARY_STATE_READY,
+            Some(State::Running) => crate::control_abi::AUXILIARY_STATE_RUNNING,
+            Some(State::Blocked) => crate::control_abi::AUXILIARY_STATE_BLOCKED,
+        })
     })
+    .flatten()
 }
 
 pub(crate) fn auxiliary_runtime_flags(domain_id: u64) -> Option<u64> {
-    let runtime = runtime_mut()?;
-    let mut matches = runtime
-        .scheduler
-        .threads
-        .iter()
-        .flatten()
-        .filter(|thread| thread.domain == domain_id);
-    let initialized = matches.next().map(|thread| thread.initialized);
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(if initialized.unwrap_or(false) {
-        crate::control_abi::AUXILIARY_FLAG_INITIALIZED
-    } else {
-        0
+    with_runtime(|runtime| {
+        let mut matches = runtime
+            .scheduler
+            .threads
+            .iter()
+            .flatten()
+            .filter(|thread| thread.domain == domain_id);
+        let initialized = matches.next().map(|thread| thread.initialized);
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(if initialized.unwrap_or(false) {
+            crate::control_abi::AUXILIARY_FLAG_INITIALIZED
+        } else {
+            0
+        })
     })
+    .flatten()
 }
 
 pub(crate) fn start_staged_auxiliary(domain_id: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    runtime.scheduler.start_staged_domain(domain_id)
+    with_runtime(|runtime| runtime.scheduler.start_staged_domain(domain_id)).unwrap_or(false)
 }
 
 pub(crate) fn rollback_service_restart(domain: u64, prior_owner: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    if runtime.restarts != 1
-        || runtime.service_address_space_owner != domain
-        || !runtime.scheduler.remove_cancellable_domain(domain)
-        || !domain::detach_thread(domain)
-    {
-        return false;
-    }
-    runtime.restarts = 0;
-    runtime.service_address_space_owner = prior_owner;
-    true
+    with_runtime(|runtime| {
+        if runtime.restarts != 1
+            || runtime.service_address_space_owner != domain
+            || !runtime.scheduler.remove_cancellable_domain(domain)
+            || !domain::detach_thread(domain)
+        {
+            return false;
+        }
+        runtime.restarts = 0;
+        runtime.service_address_space_owner = prior_owner;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn service_restart_stack_mapping() -> Option<(u64, u64)> {
-    let context = runtime_mut()?.service_restart_context;
+    let context = with_runtime(|runtime| runtime.service_restart_context)?;
     Some((context.address_space_root, context.rsp))
 }
 
 pub(crate) fn service_address_space_owner() -> Option<u64> {
-    Some(runtime_mut()?.service_address_space_owner)
+    with_runtime(|runtime| runtime.service_address_space_owner)
 }
 
 pub(crate) fn current_domain() -> Option<u64> {
-    let runtime = runtime_mut()?;
-    let current = runtime.scheduler.current?;
-    Some(runtime.scheduler.thread(current)?.domain)
+    with_runtime(|runtime| {
+        let current = runtime.scheduler.current?;
+        Some(runtime.scheduler.thread(current)?.domain)
+    })
+    .flatten()
 }
 
 pub(crate) fn current_address_space_root() -> Option<u64> {
-    let runtime = runtime_mut()?;
-    let current = runtime.scheduler.current?;
-    runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
+    with_runtime(|runtime| {
+        let current = runtime.scheduler.current?;
+        runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+    })
+    .flatten()
 }
 
 pub(crate) fn current_instruction_and_stack() -> Option<(u64, u64)> {
-    let runtime = runtime_mut()?;
-    let current = runtime.scheduler.current?;
-    let context = runtime.scheduler.thread(current)?.context;
-    Some((context.rip, context.rsp))
+    with_runtime(|runtime| {
+        let current = runtime.scheduler.current?;
+        let context = runtime.scheduler.thread(current)?.context;
+        Some((context.rip, context.rsp))
+    })
+    .flatten()
 }
 
 pub(crate) fn current_fs_base() -> Option<u64> {
-    let runtime = runtime_mut()?;
-    let current = runtime.scheduler.current?;
-    runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.fs_base)
+    with_runtime(|runtime| {
+        let current = runtime.scheduler.current?;
+        runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.fs_base)
+    })
+    .flatten()
 }
 
 pub(crate) fn fault_runtime(
@@ -1850,58 +1871,58 @@ pub(crate) fn fault_runtime(
     if !frame.selectors_match(code_selector, data_selector) {
         return RuntimeAction::Invalid;
     }
-    let Some(runtime) = runtime_mut() else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current_root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return RuntimeAction::Invalid;
-    };
-    if let Some(reason) = peer_close {
-        let Some(dead_domain) = runtime
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
+            return RuntimeAction::Invalid;
+        };
+        let Some(current_root) = runtime
             .scheduler
             .thread(current)
-            .map(|thread| thread.domain)
+            .map(|thread| thread.context.address_space_root)
         else {
             return RuntimeAction::Invalid;
         };
-        runtime
-            .scheduler
-            .cancel_blocked_peers(dead_domain, reason, IPC_PEER_CLOSED);
-    }
-    let expected = frame.vector == 14
-        && frame.error == 6
-        && fault_address == 0
-        && frame.rip == runtime.expected_fault_instruction
-        && frame.r9 == 2;
-    let next = runtime.scheduler.exit_current(current);
-    let Some(faults) = runtime.faults.checked_add(1) else {
-        return RuntimeAction::Invalid;
-    };
-    runtime.faults = faults;
-    runtime.expected_fault_observed |= expected;
-    if let Some(next) = next {
-        if next.context.address_space_root != current_root {
-            let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+        if let Some(reason) = peer_close {
+            let Some(dead_domain) = runtime
+                .scheduler
+                .thread(current)
+                .map(|thread| thread.domain)
+            else {
                 return RuntimeAction::Invalid;
             };
-            runtime.address_space_switches = switches;
+            runtime
+                .scheduler
+                .cancel_blocked_peers(dead_domain, reason, IPC_PEER_CLOSED);
         }
-        frame.restore(next.context, code_selector, data_selector);
-        RuntimeAction::Resume {
-            result: next.context.rax,
-            address_space_root: next.context.address_space_root,
-            fs_base: next.context.fs_base,
+        let expected = frame.vector == 14
+            && frame.error == 6
+            && fault_address == 0
+            && frame.rip == runtime.expected_fault_instruction
+            && frame.r9 == 2;
+        let next = runtime.scheduler.exit_current(current);
+        let Some(faults) = runtime.faults.checked_add(1) else {
+            return RuntimeAction::Invalid;
+        };
+        runtime.faults = faults;
+        runtime.expected_fault_observed |= expected;
+        if let Some(next) = next {
+            if next.context.address_space_root != current_root {
+                let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+                    return RuntimeAction::Invalid;
+                };
+                runtime.address_space_switches = switches;
+            }
+            frame.restore(next.context, code_selector, data_selector);
+            RuntimeAction::Resume {
+                result: next.context.rax,
+                address_space_root: next.context.address_space_root,
+                fs_base: next.context.fs_base,
+            }
+        } else {
+            RuntimeAction::Complete
         }
-    } else {
-        RuntimeAction::Complete
-    }
+    })
+    .unwrap_or(RuntimeAction::Invalid)
 }
 
 pub(crate) fn yield_runtime(
@@ -1913,39 +1934,39 @@ pub(crate) fn yield_runtime(
     if !frame.selectors_match(code_selector, data_selector) {
         return RuntimeAction::Invalid;
     }
-    let Some(runtime) = runtime_mut() else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return RuntimeAction::Invalid;
-    };
-    let saved = frame.saved_context(0, root, fs_base);
-    let Some(next) = runtime.scheduler.yield_current(current, saved) else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(yields) = runtime.yields.checked_add(1) else {
-        return RuntimeAction::Invalid;
-    };
-    runtime.yields = yields;
-    if next.context.address_space_root != root {
-        let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
             return RuntimeAction::Invalid;
         };
-        runtime.address_space_switches = switches;
-    }
-    frame.restore(next.context, code_selector, data_selector);
-    RuntimeAction::Resume {
-        result: next.context.rax,
-        address_space_root: next.context.address_space_root,
-        fs_base: next.context.fs_base,
-    }
+        let Some(root) = runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+        else {
+            return RuntimeAction::Invalid;
+        };
+        let saved = frame.saved_context(0, root, fs_base);
+        let Some(next) = runtime.scheduler.yield_current(current, saved) else {
+            return RuntimeAction::Invalid;
+        };
+        let Some(yields) = runtime.yields.checked_add(1) else {
+            return RuntimeAction::Invalid;
+        };
+        runtime.yields = yields;
+        if next.context.address_space_root != root {
+            let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+                return RuntimeAction::Invalid;
+            };
+            runtime.address_space_switches = switches;
+        }
+        frame.restore(next.context, code_selector, data_selector);
+        RuntimeAction::Resume {
+            result: next.context.rax,
+            address_space_root: next.context.address_space_root,
+            fs_base: next.context.fs_base,
+        }
+    })
+    .unwrap_or(RuntimeAction::Invalid)
 }
 
 pub(crate) fn preempt_runtime(
@@ -1957,39 +1978,39 @@ pub(crate) fn preempt_runtime(
     if !frame.selectors_match(code_selector, data_selector) {
         return RuntimeAction::Invalid;
     }
-    let Some(runtime) = runtime_mut() else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return RuntimeAction::Invalid;
-    };
-    let saved = frame.saved_context(root, fs_base);
-    let Some(next) = runtime.scheduler.yield_current(current, saved) else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(preemptions) = runtime.preemptions.checked_add(1) else {
-        return RuntimeAction::Invalid;
-    };
-    runtime.preemptions = preemptions;
-    if next.context.address_space_root != root {
-        let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
             return RuntimeAction::Invalid;
         };
-        runtime.address_space_switches = switches;
-    }
-    frame.restore(next.context, code_selector, data_selector);
-    RuntimeAction::Resume {
-        result: next.context.rax,
-        address_space_root: next.context.address_space_root,
-        fs_base: next.context.fs_base,
-    }
+        let Some(root) = runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+        else {
+            return RuntimeAction::Invalid;
+        };
+        let saved = frame.saved_context(root, fs_base);
+        let Some(next) = runtime.scheduler.yield_current(current, saved) else {
+            return RuntimeAction::Invalid;
+        };
+        let Some(preemptions) = runtime.preemptions.checked_add(1) else {
+            return RuntimeAction::Invalid;
+        };
+        runtime.preemptions = preemptions;
+        if next.context.address_space_root != root {
+            let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+                return RuntimeAction::Invalid;
+            };
+            runtime.address_space_switches = switches;
+        }
+        frame.restore(next.context, code_selector, data_selector);
+        RuntimeAction::Resume {
+            result: next.context.rax,
+            address_space_root: next.context.address_space_root,
+            fs_base: next.context.fs_base,
+        }
+    })
+    .unwrap_or(RuntimeAction::Invalid)
 }
 
 pub(crate) fn block_runtime(
@@ -2002,39 +2023,39 @@ pub(crate) fn block_runtime(
     if !frame.selectors_match(code_selector, data_selector) {
         return RuntimeAction::Invalid;
     }
-    let Some(runtime) = runtime_mut() else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return RuntimeAction::Invalid;
-    };
-    let saved = frame.saved_context(0, root, fs_base);
-    let Some(next) = runtime.scheduler.block_current(current, saved, reason) else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(blocks) = runtime.blocks.checked_add(1) else {
-        return RuntimeAction::Invalid;
-    };
-    runtime.blocks = blocks;
-    if next.context.address_space_root != root {
-        let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
             return RuntimeAction::Invalid;
         };
-        runtime.address_space_switches = switches;
-    }
-    frame.restore(next.context, code_selector, data_selector);
-    RuntimeAction::Resume {
-        result: next.context.rax,
-        address_space_root: next.context.address_space_root,
-        fs_base: next.context.fs_base,
-    }
+        let Some(root) = runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+        else {
+            return RuntimeAction::Invalid;
+        };
+        let saved = frame.saved_context(0, root, fs_base);
+        let Some(next) = runtime.scheduler.block_current(current, saved, reason) else {
+            return RuntimeAction::Invalid;
+        };
+        let Some(blocks) = runtime.blocks.checked_add(1) else {
+            return RuntimeAction::Invalid;
+        };
+        runtime.blocks = blocks;
+        if next.context.address_space_root != root {
+            let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+                return RuntimeAction::Invalid;
+            };
+            runtime.address_space_switches = switches;
+        }
+        frame.restore(next.context, code_selector, data_selector);
+        RuntimeAction::Resume {
+            result: next.context.rax,
+            address_space_root: next.context.address_space_root,
+            fs_base: next.context.fs_base,
+        }
+    })
+    .unwrap_or(RuntimeAction::Invalid)
 }
 
 pub(crate) fn block_runtime_idle(
@@ -2047,28 +2068,28 @@ pub(crate) fn block_runtime_idle(
     if !frame.selectors_match(code_selector, data_selector) {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return false;
-    };
-    let Some(root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return false;
-    };
-    let Some(blocks) = runtime.blocks.checked_add(1) else {
-        return false;
-    };
-    let saved = frame.saved_context(0, root, fs_base);
-    if !runtime.scheduler.block_current_idle(current, saved, reason) {
-        return false;
-    }
-    runtime.blocks = blocks;
-    true
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
+            return false;
+        };
+        let Some(root) = runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+        else {
+            return false;
+        };
+        let Some(blocks) = runtime.blocks.checked_add(1) else {
+            return false;
+        };
+        let saved = frame.saved_context(0, root, fs_base);
+        if !runtime.scheduler.block_current_idle(current, saved, reason) {
+            return false;
+        }
+        runtime.blocks = blocks;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn suspend_container_lifecycle(
@@ -2081,78 +2102,80 @@ pub(crate) fn suspend_container_lifecycle(
     if !frame.selectors_match(code_selector, data_selector) {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return false;
-    };
-    let Some(root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return false;
-    };
-    let Some(blocks) = runtime.blocks.checked_add(1) else {
-        return false;
-    };
-    let saved = frame.saved_context(result, root, fs_base);
-    if !runtime
-        .scheduler
-        .block_current_idle(current, saved, WaitReason::ContainerLifecycle)
-    {
-        return false;
-    }
-    runtime.blocks = blocks;
-    true
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
+            return false;
+        };
+        let Some(root) = runtime
+            .scheduler
+            .thread(current)
+            .map(|thread| thread.context.address_space_root)
+        else {
+            return false;
+        };
+        let Some(blocks) = runtime.blocks.checked_add(1) else {
+            return false;
+        };
+        let saved = frame.saved_context(result, root, fs_base);
+        if !runtime
+            .scheduler
+            .block_current_idle(current, saved, WaitReason::ContainerLifecycle)
+        {
+            return false;
+        }
+        runtime.blocks = blocks;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn resume_container_lifecycle(domain: u64) -> Option<NativeResumeContext> {
-    let runtime = runtime_mut()?;
-    let result = runtime
-        .scheduler
-        .threads
-        .iter()
-        .flatten()
-        .find(|thread| {
-            thread.domain == domain && thread.wait == Some(WaitReason::ContainerLifecycle)
-        })?
-        .context
-        .rax;
-    let scheduled =
-        runtime
+    with_runtime(|runtime| {
+        let result = runtime
             .scheduler
-            .wake_idle_domain(domain, WaitReason::ContainerLifecycle, result)?;
-    (runtime.scheduler.thread(scheduled.id)?.domain == domain)
-        .then_some(NativeResumeContext(scheduled.context))
+            .threads
+            .iter()
+            .flatten()
+            .find(|thread| {
+                thread.domain == domain && thread.wait == Some(WaitReason::ContainerLifecycle)
+            })?
+            .context
+            .rax;
+        let scheduled =
+            runtime
+                .scheduler
+                .wake_idle_domain(domain, WaitReason::ContainerLifecycle, result)?;
+        (runtime.scheduler.thread(scheduled.id)?.domain == domain)
+            .then_some(NativeResumeContext(scheduled.context))
+    })
+    .flatten()
 }
 
 pub(crate) fn wake_device_completion(domain: u64, object: u64, request: u64, result: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    let reason = WaitReason::DeviceCompletion {
-        object,
-        domain,
-        request,
-    };
-    let Some(scheduled) = runtime.scheduler.wake_idle_domain(domain, reason, result) else {
-        return false;
-    };
-    if runtime
-        .scheduler
-        .thread(scheduled.id)
-        .map(|thread| thread.domain)
-        != Some(domain)
-    {
-        return false;
-    }
-    runtime.wakes = wakes;
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        let reason = WaitReason::DeviceCompletion {
+            object,
+            domain,
+            request,
+        };
+        let Some(scheduled) = runtime.scheduler.wake_idle_domain(domain, reason, result) else {
+            return false;
+        };
+        if runtime
+            .scheduler
+            .thread(scheduled.id)
+            .map(|thread| thread.domain)
+            != Some(domain)
+        {
+            return false;
+        }
+        runtime.wakes = wakes;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn wake_ipc_peer(
@@ -2165,27 +2188,27 @@ pub(crate) fn wake_ipc_peer(
     if sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    if !runtime.scheduler.wake_blocked_peer(
-        sender_domain,
-        WaitReason::IpcReceive {
-            object,
-            service_side,
-            peer_domain: sender_domain,
-        },
-        result,
-    ) {
-        return false;
-    }
-    runtime.wakes = wakes;
-    runtime.last_wake_source = Some(sender_domain);
-    runtime.last_wake_sequence = Some(sequence);
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        if !runtime.scheduler.wake_blocked_peer(
+            sender_domain,
+            WaitReason::IpcReceive {
+                object,
+                service_side,
+                peer_domain: sender_domain,
+            },
+            result,
+        ) {
+            return false;
+        }
+        runtime.wakes = wakes;
+        runtime.last_wake_source = Some(sender_domain);
+        runtime.last_wake_sequence = Some(sequence);
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn packet_wait_is_available(sequence: u64) -> bool {
@@ -2200,12 +2223,12 @@ fn packet_object_wait_is_available(object: u64, sequence: u64) -> bool {
     if sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    !runtime
-        .scheduler
-        .has_blocked_wait(WaitReason::PacketAvailable { object, sequence })
+    with_runtime(|runtime| {
+        !runtime
+            .scheduler
+            .has_blocked_wait(WaitReason::PacketAvailable { object, sequence })
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn wake_packet_waiter(sender_domain: u64, sequence: u64) -> bool {
@@ -2221,70 +2244,73 @@ pub(crate) fn wake_egress_waiter(sender_domain: u64, sequence: u64) -> bool {
 }
 
 pub(crate) fn blocked_egress_waiter() -> Option<(u64, u64)> {
-    let runtime = runtime_mut()?;
-    let mut matched = None;
-    for thread in runtime.scheduler.threads.iter().flatten() {
-        let Some(WaitReason::PacketAvailable { object, sequence }) = thread.wait else {
-            continue;
-        };
-        if thread.state != State::Blocked || object != crate::control_abi::PACKET_EGRESS_OBJECT {
-            continue;
+    with_runtime(|runtime| {
+        let mut matched = None;
+        for thread in runtime.scheduler.threads.iter().flatten() {
+            let Some(WaitReason::PacketAvailable { object, sequence }) = thread.wait else {
+                continue;
+            };
+            if thread.state != State::Blocked || object != crate::control_abi::PACKET_EGRESS_OBJECT
+            {
+                continue;
+            }
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some((thread.domain, sequence));
         }
-        if matched.is_some() {
-            return None;
-        }
-        matched = Some((thread.domain, sequence));
-    }
-    matched
+        matched
+    })
+    .flatten()
 }
 
 pub(crate) fn wake_egress_waiter_drained(sender_domain: u64, sequence: u64) -> bool {
     if sender_domain == 0 || sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    if !runtime.scheduler.wake_blocked_peer(
-        sender_domain,
-        WaitReason::PacketAvailable {
-            object: crate::control_abi::PACKET_EGRESS_OBJECT,
-            sequence,
-        },
-        crate::control_abi::PACKET_RESULT_DRAINED,
-    ) {
-        return false;
-    }
-    runtime.wakes = wakes;
-    runtime.last_wake_source = Some(sender_domain);
-    runtime.last_wake_sequence = Some(sequence);
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        if !runtime.scheduler.wake_blocked_peer(
+            sender_domain,
+            WaitReason::PacketAvailable {
+                object: crate::control_abi::PACKET_EGRESS_OBJECT,
+                sequence,
+            },
+            crate::control_abi::PACKET_RESULT_DRAINED,
+        ) {
+            return false;
+        }
+        runtime.wakes = wakes;
+        runtime.last_wake_source = Some(sender_domain);
+        runtime.last_wake_sequence = Some(sequence);
+        true
+    })
+    .unwrap_or(false)
 }
 
 fn wake_packet_object_waiter(sender_domain: u64, object: u64, sequence: u64) -> bool {
     if sender_domain == 0 || sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    if !runtime.scheduler.wake_blocked_peer(
-        sender_domain,
-        WaitReason::PacketAvailable { object, sequence },
-        sequence,
-    ) {
-        return false;
-    }
-    runtime.wakes = wakes;
-    runtime.last_wake_source = Some(sender_domain);
-    runtime.last_wake_sequence = Some(sequence);
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        if !runtime.scheduler.wake_blocked_peer(
+            sender_domain,
+            WaitReason::PacketAvailable { object, sequence },
+            sequence,
+        ) {
+            return false;
+        }
+        runtime.wakes = wakes;
+        runtime.last_wake_source = Some(sender_domain);
+        runtime.last_wake_sequence = Some(sequence);
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn packet_space_wait_is_available() -> bool {
@@ -2296,12 +2322,12 @@ pub(crate) fn egress_space_wait_is_available() -> bool {
 }
 
 fn packet_object_space_wait_is_available(object: u64) -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    !runtime
-        .scheduler
-        .has_blocked_wait(WaitReason::PacketSpaceAvailable { object })
+    with_runtime(|runtime| {
+        !runtime
+            .scheduler
+            .has_blocked_wait(WaitReason::PacketSpaceAvailable { object })
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn wake_packet_space_waiter(sender_domain: u64) -> bool {
@@ -2313,96 +2339,96 @@ pub(crate) fn wake_egress_space_waiter(sender_domain: u64) -> bool {
 }
 
 pub(crate) fn egress_drain_wait_is_available() -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    !runtime
-        .scheduler
-        .has_blocked_wait(WaitReason::PacketQueueDrained {
-            object: crate::control_abi::PACKET_EGRESS_OBJECT,
-        })
+    with_runtime(|runtime| {
+        !runtime
+            .scheduler
+            .has_blocked_wait(WaitReason::PacketQueueDrained {
+                object: crate::control_abi::PACKET_EGRESS_OBJECT,
+            })
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn wake_egress_drain_waiter(sender_domain: u64) -> bool {
     if sender_domain == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    if !runtime.scheduler.wake_blocked_peer(
-        sender_domain,
-        WaitReason::PacketQueueDrained {
-            object: crate::control_abi::PACKET_EGRESS_OBJECT,
-        },
-        0,
-    ) {
-        return false;
-    }
-    runtime.wakes = wakes;
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        if !runtime.scheduler.wake_blocked_peer(
+            sender_domain,
+            WaitReason::PacketQueueDrained {
+                object: crate::control_abi::PACKET_EGRESS_OBJECT,
+            },
+            0,
+        ) {
+            return false;
+        }
+        runtime.wakes = wakes;
+        true
+    })
+    .unwrap_or(false)
 }
 
 fn wake_packet_object_space_waiter(sender_domain: u64, object: u64) -> bool {
     if sender_domain == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    if !runtime.scheduler.wake_blocked_peer(
-        sender_domain,
-        WaitReason::PacketSpaceAvailable { object },
-        0,
-    ) {
-        return false;
-    }
-    runtime.wakes = wakes;
-    true
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
+            return false;
+        };
+        if !runtime.scheduler.wake_blocked_peer(
+            sender_domain,
+            WaitReason::PacketSpaceAvailable { object },
+            0,
+        ) {
+            return false;
+        }
+        runtime.wakes = wakes;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn timeout_packet_waiter(domain: u64, sequence: u64) -> bool {
     if domain == 0 || sequence == 0 {
         return false;
     }
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    let Some(wakes) = runtime.wakes.checked_add(1) else {
-        return false;
-    };
-    let was_idle = runtime.scheduler.current.is_none();
-    if !runtime.scheduler.wake_blocked_domain(
-        domain,
-        WaitReason::PacketAvailable {
-            object: crate::control_abi::PACKET_OBJECT,
-            sequence,
-        },
-        crate::control_abi::PACKET_RESULT_TIMED_OUT,
-    ) {
-        return false;
-    }
-    if was_idle {
-        let Some(scheduled) = runtime.scheduler.schedule_next() else {
+    with_runtime(|runtime| {
+        let Some(wakes) = runtime.wakes.checked_add(1) else {
             return false;
         };
-        if runtime
-            .scheduler
-            .thread(scheduled.id)
-            .map(|thread| thread.domain)
-            != Some(domain)
-        {
+        let was_idle = runtime.scheduler.current.is_none();
+        if !runtime.scheduler.wake_blocked_domain(
+            domain,
+            WaitReason::PacketAvailable {
+                object: crate::control_abi::PACKET_OBJECT,
+                sequence,
+            },
+            crate::control_abi::PACKET_RESULT_TIMED_OUT,
+        ) {
             return false;
         }
-    }
-    runtime.wakes = wakes;
-    true
+        if was_idle {
+            let Some(scheduled) = runtime.scheduler.schedule_next() else {
+                return false;
+            };
+            if runtime
+                .scheduler
+                .thread(scheduled.id)
+                .map(|thread| thread.domain)
+                != Some(domain)
+            {
+                return false;
+            }
+        }
+        runtime.wakes = wakes;
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn exit_runtime(
@@ -2414,77 +2440,78 @@ pub(crate) fn exit_runtime(
     if !frame.selectors_match(code_selector, data_selector) {
         return RuntimeAction::Invalid;
     }
-    let Some(runtime) = runtime_mut() else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current) = runtime.scheduler.current else {
-        return RuntimeAction::Invalid;
-    };
-    let Some(current_root) = runtime
-        .scheduler
-        .thread(current)
-        .map(|thread| thread.context.address_space_root)
-    else {
-        return RuntimeAction::Invalid;
-    };
-    if let Some(reason) = peer_close {
-        let Some(dead_domain) = runtime
+    with_runtime(|runtime| {
+        let Some(current) = runtime.scheduler.current else {
+            return RuntimeAction::Invalid;
+        };
+        let Some(current_root) = runtime
             .scheduler
             .thread(current)
-            .map(|thread| thread.domain)
+            .map(|thread| thread.context.address_space_root)
         else {
             return RuntimeAction::Invalid;
         };
-        runtime
-            .scheduler
-            .cancel_blocked_peers(dead_domain, reason, IPC_PEER_CLOSED);
-    }
-    let next = runtime.scheduler.exit_current(current);
-    let Some(exits) = runtime.exits.checked_add(1) else {
-        return RuntimeAction::Invalid;
-    };
-    runtime.exits = exits;
-    if let Some(next) = next {
-        if next.context.address_space_root != current_root {
-            let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+        if let Some(reason) = peer_close {
+            let Some(dead_domain) = runtime
+                .scheduler
+                .thread(current)
+                .map(|thread| thread.domain)
+            else {
                 return RuntimeAction::Invalid;
             };
-            runtime.address_space_switches = switches;
+            runtime
+                .scheduler
+                .cancel_blocked_peers(dead_domain, reason, IPC_PEER_CLOSED);
         }
-        frame.restore(next.context, code_selector, data_selector);
-        RuntimeAction::Resume {
-            result: next.context.rax,
-            address_space_root: next.context.address_space_root,
-            fs_base: next.context.fs_base,
+        let next = runtime.scheduler.exit_current(current);
+        let Some(exits) = runtime.exits.checked_add(1) else {
+            return RuntimeAction::Invalid;
+        };
+        runtime.exits = exits;
+        if let Some(next) = next {
+            if next.context.address_space_root != current_root {
+                let Some(switches) = runtime.address_space_switches.checked_add(1) else {
+                    return RuntimeAction::Invalid;
+                };
+                runtime.address_space_switches = switches;
+            }
+            frame.restore(next.context, code_selector, data_selector);
+            RuntimeAction::Resume {
+                result: next.context.rax,
+                address_space_root: next.context.address_space_root,
+                fs_base: next.context.fs_base,
+            }
+        } else {
+            RuntimeAction::Complete
         }
-    } else {
-        RuntimeAction::Complete
-    }
+    })
+    .unwrap_or(RuntimeAction::Invalid)
 }
 
 pub(crate) fn verify_runtime_complete() -> bool {
-    let Some(runtime) = runtime_mut() else {
-        return false;
-    };
-    runtime.yields == 6
-        && runtime.preemptions == 2
-        && runtime.exits == 3
-        && runtime.faults == 1
-        && runtime.restarts == 1
-        && runtime.blocks == 3
-        && runtime.wakes == 3
-        && runtime.last_wake_source == Some(runtime.control_domain)
-        && runtime.last_wake_sequence == Some(4)
-        && runtime.expected_fault_observed
-        && (13..=14).contains(&runtime.address_space_switches)
-        && runtime.scheduler.current.is_none()
-        && runtime.scheduler.threads.iter().all(Option::is_none)
+    with_runtime(|runtime| {
+        runtime.yields == 6
+            && runtime.preemptions == 2
+            && runtime.exits == 3
+            && runtime.faults == 1
+            && runtime.restarts == 1
+            && runtime.blocks == 3
+            && runtime.wakes == 3
+            && runtime.last_wake_source == Some(runtime.control_domain)
+            && runtime.last_wake_sequence == Some(4)
+            && runtime.expected_fault_observed
+            && (13..=14).contains(&runtime.address_space_switches)
+            && runtime.scheduler.current.is_none()
+            && runtime.scheduler.threads.iter().all(Option::is_none)
+    })
+    .unwrap_or(false)
 }
 
-fn runtime_mut() -> Option<&'static mut Runtime> {
-    // SAFETY: Scheduler mutation is serialized on the bootstrap CPU until
-    // Gate 8 supplies the runtime lock for this explicit owner root.
-    Some(unsafe { &mut *SCHEDULER_RUNTIME.get_mut_ptr()? })
+/// Runs `f` on the native runtime, once initialized, holding its lock for
+/// `f` alone (`LockRank::NATIVE_SCHEDULER`: `f` may grow the thread table
+/// and ask the domain manager, nothing else).
+fn with_runtime<R>(f: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
+    SCHEDULER_RUNTIME.lock().as_mut().map(f)
 }
 
 fn initial_context(

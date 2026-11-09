@@ -158,6 +158,29 @@ nothing that takes a lock. Two such leaves are never held together.
   fault into the memory layer), and a timed-out device wait releases it
   before quiescing the device, which takes it again.
 
+- `NATIVE_SCHEDULER` (108, `scheduler`): the native runtime (the native
+  service domains' threads), an `IrqSpinLock` reached only through
+  `with_runtime`, which holds it for one closure. Its callers are native
+  service calls and their faults at system-call level, the timer
+  interrupt (preemption, a packet or device wait's timeout) and the virtio
+  interrupt (a device completion), and it is woken under the control
+  channel (103) and the packet mailboxes (104) and queued under the
+  auxiliary address spaces (106), so it ranks above those. Under it the
+  thread table grows (the heap, 190) and the domain manager (450) is
+  asked for service identities and thread counts, so it ranks below
+  them. Interrupt handlers take it only from user mode or an idle halt,
+  where no other lock is held (system calls run with interrupts off).
+  It was an `OwnedState` written through a raw pointer before.
+- A Linux domain instance's run queue (`scheduler::ProcessScheduler`) is
+  part of its process table now (`ProcessTable::run_queue`, under
+  PROCESS_TABLE, 189): every use of it already ran under the table's
+  lock, so it needs none of its own. An operation that calls the table's
+  own methods with it (admitting or withdrawing a process) takes it out
+  of the table for the while and puts it back. The boot check of
+  cross-CPU scheduling has a run queue of its own
+  (`VERIFICATION_RUN_QUEUE`, a SpinLock at PROCESS_TABLE's rank, taken
+  with no other lock held), let go while the other CPU schedules from it.
+
 - `CONTROL_CHANNEL` (103, `ipc`) and `PACKET_MAILBOXES` (104, `packet`):
   taken by native service calls at system-call level, never under another
   lock. The channel calls the scheduler's wakeup while held; a packet

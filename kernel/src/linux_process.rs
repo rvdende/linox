@@ -778,6 +778,12 @@ struct ProcessTable {
     /// Calls into the namespaces that table operations leave for after the
     /// table's lock is released (`with_live_table`).
     deferred: DeferredWork,
+    /// The instance's run queue while its processes are scheduled: set up
+    /// by the fork that first admits a parent and child, released by the
+    /// exit or stop that withdraws the last of them. Held under the
+    /// table's lock with the rest of it; an operation that also calls the
+    /// table's own methods takes it out for the while and puts it back.
+    run_queue: Option<scheduler::ProcessScheduler>,
 }
 
 /// Namespace bookkeeping a table operation owes: the namespaces rank below
@@ -869,7 +875,22 @@ impl ProcessTable {
             thread_blocks: Vec::new(),
             spaces: SpaceLists::new(),
             deferred: DeferredWork::NONE,
+            run_queue: None,
         }
+    }
+
+    /// Lets the run queue go if no thread is left in it: false (and the
+    /// queue kept) otherwise, or without one.
+    fn release_run_queue(&mut self) -> bool {
+        if !self
+            .run_queue
+            .as_ref()
+            .is_some_and(scheduler::ProcessScheduler::is_clean)
+        {
+            return false;
+        }
+        self.run_queue = None;
+        true
     }
 
     /// Owes `forget_pid` for `pid` (see `DeferredWork`). Only PID
@@ -3572,13 +3593,12 @@ pub(crate) fn force_stop_runtime_process_registry() -> bool {
     }
     let withdrawn = with_live_table(|table| {
         let init = table.init?;
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
-        run_queue.retire_all();
+        table.run_queue.as_mut()?.retire_all();
         table.thread_blocks.clear();
         for process in table.processes.iter_mut().flatten() {
             process.scheduler_thread = None;
         }
-        scheduler::release_process_scheduler_workspace().then_some(init)
+        table.release_run_queue().then_some(init)
     })
     .flatten();
     let Some(init) = withdrawn else {
@@ -5096,8 +5116,11 @@ pub(crate) fn set_live_process_cpu_affinity(pid: u32, mask: u64) -> bool {
             return false;
         }
         process.cpu_affinity = mask;
-        process.scheduler_thread.is_none_or(|thread| {
-            scheduler::active_process_scheduler_workspace()
+        let thread = process.scheduler_thread;
+        thread.is_none_or(|thread| {
+            table
+                .run_queue
+                .as_mut()
                 .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
         })
     })
@@ -5118,8 +5141,11 @@ pub(crate) fn pin_live_process(pid: u32, cpu: Option<usize>) -> bool {
             return false;
         };
         let mask = cpu.map_or(process.cpu_affinity, |cpu| 1_u64 << cpu);
-        process.scheduler_thread.is_none_or(|thread| {
-            scheduler::active_process_scheduler_workspace()
+        let thread = process.scheduler_thread;
+        thread.is_none_or(|thread| {
+            table
+                .run_queue
+                .as_mut()
                 .is_some_and(|run_queue| run_queue.set_affinity(thread, mask))
         })
     })
@@ -5140,7 +5166,7 @@ pub(crate) fn set_live_process_scheduler_nice(pid: u32, nice: u8) -> bool {
         else {
             return true;
         };
-        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+        let Some(run_queue) = table.run_queue.as_mut() else {
             return false;
         };
         run_queue.set_priority(thread, 39_i8 - nice as i8)
@@ -6634,48 +6660,63 @@ fn schedule_live_fork(
     let nested = table
         .process(parent_handle)
         .is_some_and(|process| process.scheduler_thread.is_some());
-    let run_queue = if nested {
-        scheduler::active_process_scheduler_workspace()
+    // A nested fork schedules on the queue the outer one set up; an outer
+    // fork sets one up, which none may be yet. The queue is out of the
+    // table while the table's methods admit to it, and goes back after:
+    // an outer fork that fails lets it go again, if it is left empty.
+    let mut run_queue = if nested {
+        let Some(run_queue) = table.run_queue.take() else {
+            return Ok(None);
+        };
+        run_queue
     } else {
-        scheduler::acquire_process_scheduler_workspace()
-    };
-    let Some(run_queue) = run_queue else {
-        return Ok(None);
-    };
-    if !nested && !table.admit_to_scheduler(parent_handle, run_queue, scheduler_domain) {
-        let _ = scheduler::release_process_scheduler_workspace();
-        return Err(());
-    }
-    if !table.admit_to_scheduler(child_handle, run_queue, scheduler_domain) {
-        if !nested {
-            let _ = table.withdraw_from_scheduler(parent_handle, run_queue);
-            let _ = scheduler::release_process_scheduler_workspace();
+        if table.run_queue.is_some() {
+            return Ok(None);
         }
-        return Err(());
-    }
+        scheduler::ProcessScheduler::new()
+    };
     let scheduled = (|| {
-        let parent_thread = table.process(parent_handle)?.scheduler_thread?;
-        let child_thread = table.process(child_handle)?.scheduler_thread?;
-        if !nested {
-            let initial = run_queue.schedule_next()?;
-            if initial.handle() != parent_thread || initial.context() != parent_scheduler_context {
-                return None;
+        if !nested && !table.admit_to_scheduler(parent_handle, &mut run_queue, scheduler_domain) {
+            return false;
+        }
+        if !table.admit_to_scheduler(child_handle, &mut run_queue, scheduler_domain) {
+            if !nested {
+                let _ = table.withdraw_from_scheduler(parent_handle, &mut run_queue);
+            }
+            return false;
+        }
+        let scheduled = (|| {
+            let parent_thread = table.process(parent_handle)?.scheduler_thread?;
+            let child_thread = table.process(child_handle)?.scheduler_thread?;
+            if !nested {
+                let initial = run_queue.schedule_next()?;
+                if initial.handle() != parent_thread
+                    || initial.context() != parent_scheduler_context
+                {
+                    return None;
+                }
+            }
+            if !child_first {
+                return Some(());
+            }
+            let selected =
+                run_queue.switch_current(parent_thread, parent_scheduler_context, child_thread)?;
+            (selected.handle() == child_thread && selected.context() == child_scheduler_context)
+                .then_some(())
+        })()
+        .is_some();
+        if !scheduled {
+            let _ = table.withdraw_from_scheduler(child_handle, &mut run_queue);
+            if !nested {
+                let _ = table.withdraw_from_scheduler(parent_handle, &mut run_queue);
             }
         }
-        if !child_first {
-            return Some(());
-        }
-        let selected =
-            run_queue.switch_current(parent_thread, parent_scheduler_context, child_thread)?;
-        (selected.handle() == child_thread && selected.context() == child_scheduler_context)
-            .then_some(())
-    })()
-    .is_some();
+        scheduled
+    })();
+    table.run_queue = Some(run_queue);
     if !scheduled {
-        let _ = table.withdraw_from_scheduler(child_handle, run_queue);
         if !nested {
-            let _ = table.withdraw_from_scheduler(parent_handle, run_queue);
-            let _ = scheduler::release_process_scheduler_workspace();
+            let _ = table.release_run_queue();
         }
         return Err(());
     }
@@ -6817,8 +6858,10 @@ pub(crate) fn force_exit_live_process(pid: u32, status: u8) -> bool {
         }
         let space = process.address_space?;
         if process.scheduler_thread.is_some() {
-            let run_queue = scheduler::active_process_scheduler_workspace()?;
-            if !table.withdraw_from_scheduler(handle, run_queue) {
+            let mut run_queue = table.run_queue.take()?;
+            let withdrawn = table.withdraw_from_scheduler(handle, &mut run_queue);
+            table.run_queue = Some(run_queue);
+            if !withdrawn {
                 return None;
             }
         }
@@ -6860,7 +6903,7 @@ pub(crate) fn complete_live_child_exit(pid: u32, status: u8) -> Option<LiveProce
         let parent_thread = parent.scheduler_thread?;
         let child_thread = child.scheduler_thread?;
         let nested = parent.parent.is_some();
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        let run_queue = table.run_queue.as_mut()?;
         process_runtime()
             .fork_execution_stage
             .store(153, Ordering::Release);
@@ -6882,14 +6925,13 @@ pub(crate) fn complete_live_child_exit(pid: u32, status: u8) -> Option<LiveProce
             .filter(|process| process.scheduler_thread.is_some())
             .count()
             == 2;
-        if !table.withdraw_from_scheduler(child_handle, run_queue) {
-            return None;
-        }
-        if !nested
-            && standalone_transaction
-            && (!table.withdraw_from_scheduler(parent_handle, run_queue)
-                || !scheduler::release_process_scheduler_workspace())
-        {
+        let mut run_queue = table.run_queue.take()?;
+        let withdrawn = table.withdraw_from_scheduler(child_handle, &mut run_queue)
+            && (nested
+                || !standalone_transaction
+                || table.withdraw_from_scheduler(parent_handle, &mut run_queue));
+        table.run_queue = Some(run_queue);
+        if !withdrawn || (!nested && standalone_transaction && !table.release_run_queue()) {
             return None;
         }
         process_runtime()
@@ -6947,9 +6989,11 @@ pub(crate) fn resume_live_parent_after_child_exec(pid: u32) -> Option<LiveProces
             child_context.scheduler_context(child_space, &table.spaces)?;
         let parent_scheduler_context =
             parent_context.scheduler_context(parent_space, &table.spaces)?;
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
-        let resumed =
-            run_queue.switch_current(child_thread, child_scheduler_context, parent_thread)?;
+        let resumed = table.run_queue.as_mut()?.switch_current(
+            child_thread,
+            child_scheduler_context,
+            parent_thread,
+        )?;
         if resumed.handle() != parent_thread || resumed.context() != parent_scheduler_context {
             return None;
         }
@@ -6973,11 +7017,12 @@ pub(crate) fn claim_live_process(pid: u32) -> Option<LiveProcessDispatch> {
         let space = process.address_space.as_ref()?;
         let context = process.context?.scheduler_context(space, &table.spaces)?;
         let thread = process.scheduler_thread?;
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
-        run_queue.claim(thread)?;
+        table.run_queue.as_mut()?.claim(thread)?;
         let dispatched = table.dispatch(handle);
         if dispatched.is_none() {
-            let _ = run_queue.release(thread, context);
+            if let Some(run_queue) = table.run_queue.as_mut() {
+                let _ = run_queue.release(thread, context);
+            }
         }
         dispatched
     })
@@ -7000,13 +7045,14 @@ pub(crate) fn start_runtime_scheduler() -> bool {
             return true;
         }
         let domain = table.scheduler_domain();
-        let Some(run_queue) = scheduler::acquire_process_scheduler_workspace() else {
-            return false;
-        };
-        if !table.admit_to_scheduler(init, run_queue, domain) {
-            let _ = scheduler::release_process_scheduler_workspace();
+        if table.run_queue.is_some() {
             return false;
         }
+        let mut run_queue = scheduler::ProcessScheduler::new();
+        if !table.admit_to_scheduler(init, &mut run_queue, domain) {
+            return false;
+        }
+        table.run_queue = Some(run_queue);
         true
     })
     .unwrap_or(false)
@@ -7068,11 +7114,12 @@ pub(crate) fn retire_lone_live_process(pid: u32) -> bool {
         if !lone {
             return true;
         }
-        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+        let Some(mut run_queue) = table.run_queue.take() else {
             return false;
         };
-        table.withdraw_from_scheduler(handle, run_queue)
-            && scheduler::release_process_scheduler_workspace()
+        let withdrawn = table.withdraw_from_scheduler(handle, &mut run_queue);
+        table.run_queue = Some(run_queue);
+        withdrawn && table.release_run_queue()
     })
     .unwrap_or(false)
 }
@@ -7096,7 +7143,7 @@ pub(crate) fn release_live_process(pid: u32) -> bool {
         };
         let (Some(context), Some(run_queue)) = (
             context.scheduler_context(space, &table.spaces),
-            scheduler::active_process_scheduler_workspace(),
+            table.run_queue.as_mut(),
         ) else {
             return false;
         };
@@ -7119,7 +7166,7 @@ pub(crate) fn ready_live_process_after(
     // every pass. `accept` asks the table itself, so it runs with the
     // table's lock released.
     let mut ready: Vec<u32> = with_live_table(|table| {
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
+        let run_queue = table.run_queue.as_ref()?;
         let mut ready = Vec::new();
         for process in table.processes.iter().flatten() {
             if process.state == ProcessState::Running
@@ -7147,7 +7194,7 @@ pub(crate) fn ready_live_process_after(
 /// itself otherwise.
 pub(crate) fn other_live_process_ready(pid: u32, now: u64) -> bool {
     with_live_table(|table| {
-        let Some(run_queue) = scheduler::active_process_scheduler_workspace() else {
+        let Some(run_queue) = table.run_queue.as_ref() else {
             return true;
         };
         table.processes.iter().flatten().any(|process| {
@@ -7181,10 +7228,10 @@ pub(crate) fn complete_live_process_exit_detached(pid: u32, status: u8) -> bool 
             .process(handle)
             .filter(|process| process.state == ProcessState::Running)
             .and_then(|process| process.address_space)?;
-        let run_queue = scheduler::active_process_scheduler_workspace()?;
-        table
-            .withdraw_from_scheduler(handle, run_queue)
-            .then(|| (handle, space, space.root(&table.spaces)))
+        let mut run_queue = table.run_queue.take()?;
+        let withdrawn = table.withdraw_from_scheduler(handle, &mut run_queue);
+        table.run_queue = Some(run_queue);
+        withdrawn.then(|| (handle, space, space.root(&table.spaces)))
     })
     .flatten();
     let Some((handle, space, root)) = withdrawn else {

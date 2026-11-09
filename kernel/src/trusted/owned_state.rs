@@ -2,26 +2,15 @@
 //! readiness flag cannot be published apart from the value it guards.
 //!
 //! States: EMPTY (no value), CLAIMED (one [`OwnedStateClaim`] is writing
-//! the value, or `reset` is dropping it) and READY (initialized). Only a
+//! the value) and READY (initialized). Only a
 //! claim moves EMPTY to READY, with a release store after the value is
 //! written, and [`OwnedState::get`] reads the value only after an acquire
 //! load sees READY, so a reader always sees the complete value.
 //!
-//! What this type does not do is lock. After publication:
-//! - [`OwnedState::get`] hands out shared references;
-//! - [`OwnedState::get_mut_ptr`] hands out the raw pointer to the value;
-//!   writing through it is `unsafe` at the caller (`domain.rs`,
-//!   `scheduler.rs`, `ipc.rs`), whose SAFETY comments name the
-//!   serialization rule they rely on (the kernel-entry lock and the
-//!   bootstrap CPU); docs/FRAMEKERNEL.md §4.3 A replaces those callers with
-//!   locks.
-//!
-//! Known gaps, kept for the callers above (outside this module's owner's
-//! files; each closes when its caller moves to a lock):
-//! - [`OwnedState::reset`] drops the value while a reference from an
-//!   earlier `get` could still be live. Its one caller (the scheduler's
-//!   per-process workspace) never holds `get` references, only
-//!   `get_mut_ptr` ones scoped to a call.
+//! After publication the value is only ever shared ([`OwnedState::get`]):
+//! a set-once owner never hands out `&mut`, and never drops its value
+//! (owners that change their value after publication hold a lock or
+//! atomics inside it).
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -38,11 +27,10 @@ pub(crate) struct OwnedState<T> {
 
 // SAFETY: sharing the owner between CPUs lets any CPU read the published
 // value through `get` (needs `T: Sync`), and lets the CPU that claims it
-// write the value and the one that resets it drop it, either of which may
-// differ from the CPU that made it (needs `T: Send`). The state machine in
-// the module comment orders initialization before every read; mutation
-// after publication is the `unsafe` callers' of `get_mut_ptr` to
-// serialize.
+// write the value, which may differ from the CPU that made the owner
+// (needs `T: Send`). The state machine in the module comment orders
+// initialization before every read, and nothing writes the value after
+// publication.
 unsafe impl<T: Send + Sync> Sync for OwnedState<T> {}
 
 impl<T> OwnedState<T> {
@@ -80,30 +68,6 @@ impl<T> OwnedState<T> {
         // acquire load above saw it, so the value is initialized and its
         // writes are visible here.
         Some(unsafe { (&*self.value.get()).assume_init_ref() })
-    }
-
-    pub(crate) fn get_mut_ptr(&self) -> Option<*mut T> {
-        if self.state.load(Ordering::Acquire) != READY {
-            return None;
-        }
-        Some(self.value.get().cast::<T>())
-    }
-
-    pub(crate) fn reset(&self) -> bool {
-        if self
-            .state
-            .compare_exchange(READY, CLAIMED, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        // SAFETY: the READY -> CLAIMED exchange succeeded on this call alone,
-        // so the value is initialized, no claim writes it, and new `get` and
-        // `get_mut_ptr` calls see no value until EMPTY is stored below; for
-        // references taken before, see the module comment's known gaps.
-        unsafe { (&mut *self.value.get()).assume_init_drop() };
-        self.state.store(EMPTY, Ordering::Release);
-        true
     }
 }
 
