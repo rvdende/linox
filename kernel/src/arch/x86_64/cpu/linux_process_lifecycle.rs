@@ -1366,18 +1366,19 @@ pub(super) fn execute_deferred_live_fork() -> bool {
     release_linux_process_shared_mappings(child.pid);
     release_linux_process_keys(child.pid);
     linux_fanotify_exit(child.pid);
-    let mut left_namespace = None;
-    if let Some(child_state_slot) = linux_process_runtime_state(child.pid) {
-        release_linux_process_descriptors(child.pid, child_state_slot);
-        left_namespace = child_state_slot.mount_namespace;
-        *child_state_slot = LinuxProcessRuntimeState::EMPTY;
-    }
+    release_linux_process_record_descriptors(child.pid, false);
+    let left_namespace = with_linux_process_runtime_state(child.pid, |state| {
+        let namespace = state.mount_namespace;
+        *state = LinuxProcessRuntimeState::EMPTY;
+        namespace
+    })
+    .flatten();
     if let Some(namespace) = left_namespace {
         linux_release_mount_namespace(namespace);
     }
-    if let Some(threads) = linux_process_thread_runtime_state(child.pid) {
+    let _ = with_linux_process_threads(child.pid, |threads| {
         threads.fill(LinuxThreadRuntimeState::EMPTY);
-    }
+    });
     discard_linux_process_extended_state(child.pid);
     if !release_linux_process_runtime_slot(child.pid) {
         return false;
@@ -2294,15 +2295,11 @@ pub(super) fn linux_reap_child(parent: u32, pid: u32) -> Option<(u32, u8)> {
 /// Drops what the runtime saved for process `pid`, which will not run again:
 /// its open descriptions, its thread table and its threads' register state.
 fn retire_linux_process_record(pid: u32) {
-    if let Some(state) = linux_process_runtime_state(pid) {
-        if state.valid {
-            release_linux_process_descriptors(pid, state);
-        }
-        *state = LinuxProcessRuntimeState::EMPTY;
-    }
-    if let Some(threads) = linux_process_thread_runtime_state(pid) {
-        threads.fill(LinuxThreadRuntimeState::EMPTY);
-    }
+    release_linux_process_record_descriptors(pid, true);
+    let _ = with_linux_process_record(pid, |record| {
+        *record.runtime() = LinuxProcessRuntimeState::EMPTY;
+        record.threads.fill(LinuxThreadRuntimeState::EMPTY);
+    });
     discard_linux_process_extended_state(pid);
 }
 
@@ -2529,7 +2526,7 @@ pub(crate) fn current_process_mount_namespace() -> Option<linux_mount::MountName
     if pid == 0 {
         return None;
     }
-    linux_process_runtime_state(pid)?.mount_namespace
+    with_linux_process_runtime_state(pid, |state| state.mount_namespace)?
 }
 
 pub(super) fn linux_child_exited(pid: u32) -> bool {

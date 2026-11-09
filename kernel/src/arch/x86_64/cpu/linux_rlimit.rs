@@ -237,9 +237,10 @@ pub(super) fn linux_process_resource_limit_values(pid: u32, resource: u64) -> Op
             X86_RUNTIME.LINUX_RUNTIME_MODE.load(Ordering::SeqCst),
         );
     }
-    let state = linux_process_runtime_state(pid).filter(|state| state.valid)?;
     let index = resource as usize * 2;
-    Some([state.rlimits[index], state.rlimits[index + 1]])
+    with_valid_linux_process_runtime_state(pid, |state| {
+        [state.rlimits[index], state.rlimits[index + 1]]
+    })
 }
 
 pub(super) fn linux_set_process_resource_limit(
@@ -294,12 +295,11 @@ pub(super) fn linux_set_process_resource_limit(
         X86_RUNTIME.ELF_PROBE_RLIMITS[index + 1].store(requested[1], Ordering::SeqCst);
         return 0;
     }
-    let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
-        return LINUX_ESRCH;
-    };
-    state.rlimits[index] = requested[0];
-    state.rlimits[index + 1] = requested[1];
-    0
+    with_valid_linux_process_runtime_state(pid, |state| {
+        state.rlimits[index] = requested[0];
+        state.rlimits[index + 1] = requested[1];
+    })
+    .map_or(LINUX_ESRCH, |()| 0)
 }
 
 pub(super) fn linux_prlimit_target(pid: u64) -> Result<u32, u64> {

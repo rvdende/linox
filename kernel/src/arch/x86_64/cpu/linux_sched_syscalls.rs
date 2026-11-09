@@ -59,9 +59,7 @@ fn linux_process_nice(pid: u32) -> Option<u8> {
     if pid == current_linux_process_pid() {
         Some(X86_RUNTIME.ELF_PROBE_NICE.load(Ordering::SeqCst))
     } else {
-        linux_process_runtime_state(pid)
-            .filter(|state| state.valid)
-            .map(|state| state.nice)
+        with_valid_linux_process_runtime_state(pid, |state| state.nice)
     }
 }
 
@@ -75,16 +73,19 @@ fn linux_set_process_nice(pid: u32, nice: u8) -> bool {
             X86_RUNTIME.LINUX_THREAD_NICES[usize::from(handle.slot)].store(nice, Ordering::SeqCst);
         }
         true
-    } else if let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) {
-        state.nice = nice;
-        if let Some(threads) = linux_process_thread_runtime_state(pid) {
-            for thread in threads.iter_mut().filter(|thread| thread.tid == pid) {
+    } else {
+        with_linux_process_record(pid, |record| {
+            let state = record.runtime();
+            if !state.valid {
+                return false;
+            }
+            state.nice = nice;
+            for thread in record.threads.iter_mut().filter(|thread| thread.tid == pid) {
                 thread.nice = nice;
             }
-        }
-        true
-    } else {
-        false
+            true
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -92,9 +93,7 @@ fn linux_process_ioprio(pid: u32) -> Option<u16> {
     if pid == current_linux_process_pid() {
         Some(X86_RUNTIME.ELF_PROBE_IOPRIO.load(Ordering::SeqCst))
     } else {
-        linux_process_runtime_state(pid)
-            .filter(|state| state.valid)
-            .map(|state| state.ioprio)
+        with_valid_linux_process_runtime_state(pid, |state| state.ioprio)
     }
 }
 
@@ -104,11 +103,8 @@ fn linux_set_process_ioprio(pid: u32, priority: u16) -> bool {
             .ELF_PROBE_IOPRIO
             .store(priority, Ordering::SeqCst);
         true
-    } else if let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) {
-        state.ioprio = priority;
-        true
     } else {
-        false
+        with_valid_linux_process_runtime_state(pid, |state| state.ioprio = priority).is_some()
     }
 }
 

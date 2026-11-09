@@ -768,10 +768,10 @@ fn map_linux_leaf_in_root(
 }
 
 /// The kernel's frames a verified Linux process lifecycle must give back:
-/// all but the heap's and the process records', which both stay allocated
-/// for reuse once first grown.
+/// all but the heap's (the process records are on it), which stay
+/// allocated for reuse once first grown.
 fn linux_lifecycle_kernel_frames() -> Option<usize> {
-    crate::heap::kernel_frames_outside_heap()?.checked_sub(cpu::linux_process_record_frames())
+    crate::heap::kernel_frames_outside_heap()
 }
 
 #[inline(never)]

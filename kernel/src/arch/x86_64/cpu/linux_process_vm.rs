@@ -116,7 +116,7 @@ pub(super) fn linux_ptrace_access_permitted(pid: u32) -> bool {
     if pid == current_linux_process_pid() {
         return true;
     }
-    let Some(target_state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
+    let Some(dumpable) = with_valid_linux_process_runtime_state(pid, |state| state.dumpable) else {
         return false;
     };
     let Some(caller_namespace) = current_linux_user_namespace() else {
@@ -131,7 +131,7 @@ pub(super) fn linux_ptrace_access_permitted(pid: u32) -> bool {
     ) else {
         return false;
     };
-    target_state.dumpable
+    dumpable
         && caller_namespace == target_namespace
         && (caller.privileged() || linux_ids_match(&caller, &target))
 }
@@ -423,15 +423,25 @@ pub(super) fn linux_process_descriptor_open_file_id(pid: u32, descriptor: u64) -
     let id = if pid == current_linux_process_pid() {
         linux_descriptor_open_file_id(descriptor)?
     } else {
-        let state = linux_process_runtime_state(pid).filter(|state| state.valid)?;
-        if descriptor >= LINUX_DESCRIPTOR_TABLE_LIMIT {
-            crate::linux_fd_table::get(state.descriptors.overflow, descriptor)
-                .filter(|entry| !entry.vacant())?
-                .open_file_id
-        } else if descriptor < LINUX_AUX_DESCRIPTOR_FIRST {
-            state.descriptors.stdio_open_file_ids[descriptor as usize]
-        } else {
-            state.descriptors.open_file_ids[(descriptor - LINUX_AUX_DESCRIPTOR_FIRST) as usize]
+        let saved = with_valid_linux_process_runtime_state(pid, |state| {
+            if descriptor >= LINUX_DESCRIPTOR_TABLE_LIMIT {
+                Err(state.descriptors.overflow)
+            } else if descriptor < LINUX_AUX_DESCRIPTOR_FIRST {
+                Ok(state.descriptors.stdio_open_file_ids[descriptor as usize])
+            } else {
+                Ok(state.descriptors.open_file_ids
+                    [(descriptor - LINUX_AUX_DESCRIPTOR_FIRST) as usize])
+            }
+        })?;
+        match saved {
+            Ok(id) => id,
+            // Above the fixed table: its own table, with the record lock
+            // released.
+            Err(overflow) => {
+                crate::linux_fd_table::get(overflow, descriptor)
+                    .filter(|entry| !entry.vacant())?
+                    .open_file_id
+            }
         }
     };
     (id != 0).then_some(id)

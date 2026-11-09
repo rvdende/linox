@@ -244,6 +244,18 @@ impl LockRank {
     /// 199 with ADDRESS_SPACE_SCRATCH: both are leaves that take nothing
     /// while held, so neither is ever taken under the other.
     pub(crate) const SIGNAL_QUEUES: Self = Self(199);
+    /// Each domain instance's Linux process records (cpu.rs's
+    /// `LinuxProcessRecordTable`: a process's saved state, thread table and
+    /// extended register state while it is not running): an interrupt-safe
+    /// leaf held only for one copy in or out of a record, never across a
+    /// park, a user copy or any other lock, and which allocates and frees
+    /// nothing while held (a record and room for it are made before it is
+    /// taken, a released record is dropped after). Records are read and
+    /// written under whatever lock a system call holds, so it ranks above
+    /// every lock below the heap and the other leaves, sharing 199 with
+    /// SIGNAL_QUEUES and ADDRESS_SPACE_SCRATCH: all three take nothing
+    /// while held, so none is ever taken under another.
+    pub(crate) const PROCESS_RECORDS: Self = Self(199);
     pub(crate) const PHYSICAL_MEMORY: Self = Self(200);
     pub(crate) const ADDRESS_SPACE: Self = Self(300);
     pub(crate) const SCHEDULER: Self = Self(400);

@@ -8,13 +8,12 @@ use core::{
 };
 
 use super::{
-    active_container_slot, current_container_slot, current_linux_thread_slot, linux_process_record,
-    LinuxProcessRecord, CPUID_AVX, CPUID_EXTENDED_STATE, CPUID_SSE, CPUID_XSAVE, CPU_ARCHITECTURE,
-    LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT, LINUX_THREAD_LIMIT, X86_MUTABLE_RUNTIME, X86_RUNTIME,
+    active_container_slot, current_linux_thread_slot, with_linux_process_record,
+    with_linux_process_record_pair, LinuxProcessRecord, CPUID_AVX, CPUID_EXTENDED_STATE, CPUID_SSE,
+    CPUID_XSAVE, CPU_ARCHITECTURE, LINUX_THREAD_LIMIT, X86_MUTABLE_RUNTIME, X86_RUNTIME,
 };
 use crate::trusted::xstate;
 pub(super) use crate::trusted::xstate::{ExtendedState, EXTENDED_STATE_SIZE};
-use crate::{control_abi, linux_process};
 
 pub(crate) fn enable_extended_user_state() -> bool {
     let features = __cpuid(1);
@@ -91,24 +90,19 @@ pub(super) fn discard_container_extended_state() -> bool {
     reset_extended_user_state()
 }
 
-fn linux_process_extended_state_index(pid: u32) -> Option<(usize, usize)> {
-    let instance = current_container_slot().unwrap_or(control_abi::DOMAIN_LIMIT);
-    let slot = linux_process::live_process_runtime_slot(pid)?;
-    (instance < LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT && slot < linux_process::PROCESS_RUNTIME_LIMIT)
-        .then_some((instance, slot))
-}
-
-fn linux_thread_extended_state_index(pid: u32, thread: usize) -> Option<(usize, usize, usize)> {
-    let (instance, process) = linux_process_extended_state_index(pid)?;
-    (thread < LINUX_THREAD_LIMIT).then_some((instance, process, thread))
-}
-
-fn linux_thread_extended_record(
+/// Runs `f` on process `pid`'s record and thread slot `thread` of it,
+/// under the record lock (`with_linux_process_record`): `f` only copies
+/// extended state in and out of the record, or saves and restores it with
+/// XSAVE and XRSTOR.
+fn with_linux_thread_extended_record<R>(
     pid: u32,
     thread: usize,
-) -> Option<(&'static mut LinuxProcessRecord, usize)> {
-    let (instance, process, thread) = linux_thread_extended_state_index(pid, thread)?;
-    Some((linux_process_record(instance, process)?, thread))
+    f: impl FnOnce(&mut LinuxProcessRecord, usize) -> R,
+) -> Option<R> {
+    if thread >= LINUX_THREAD_LIMIT {
+        return None;
+    }
+    with_linux_process_record(pid, |record| f(record, thread))
 }
 
 /// Saves the live extended state as thread `thread` of process `pid`, which
@@ -120,14 +114,14 @@ pub(super) fn save_linux_thread_extended_state(pid: u32, thread: usize) -> bool 
     {
         return true;
     }
-    let Some((record, thread)) = linux_thread_extended_record(pid, thread) else {
-        return false;
-    };
-    if !xstate::save(&mut record.extended_states[thread]) {
-        return false;
-    }
-    record.extended_state_valid[thread] = true;
-    true
+    with_linux_thread_extended_record(pid, thread, |record, thread| {
+        if !xstate::save(&mut record.extended_states[thread]) {
+            return false;
+        }
+        record.extended_state_valid[thread] = true;
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The size of the XSAVE area the enabled features (x87, SSE, AVX) take,
@@ -147,9 +141,11 @@ pub(super) fn linux_thread_xstate(pid: u32, thread: usize) -> Option<ExtendedSta
     {
         return None;
     }
-    let (record, thread) = linux_thread_extended_record(pid, thread)?;
-    if record.extended_state_valid[thread] {
-        return Some(record.extended_states[thread]);
+    let saved = with_linux_thread_extended_record(pid, thread, |record, thread| {
+        record.extended_state_valid[thread].then(|| record.extended_states[thread])
+    })?;
+    if saved.is_some() {
+        return saved;
     }
     // The initial state: FCW 0x37f, MXCSR 0x1f80, nothing else in use.
     let mut state = ExtendedState([0; EXTENDED_STATE_SIZE]);
@@ -168,13 +164,12 @@ pub(super) fn set_linux_thread_xstate(pid: u32, thread: usize, state: &[u8]) -> 
     {
         return false;
     }
-    let Some((record, thread)) = linux_thread_extended_record(pid, thread) else {
-        return false;
-    };
     let length = state.len().min(EXTENDED_STATE_SIZE);
-    record.extended_states[thread].0[..length].copy_from_slice(&state[..length]);
-    record.extended_state_valid[thread] = true;
-    true
+    with_linux_thread_extended_record(pid, thread, |record, thread| {
+        record.extended_states[thread].0[..length].copy_from_slice(&state[..length]);
+        record.extended_state_valid[thread] = true;
+    })
+    .is_some()
 }
 
 pub(super) fn restore_linux_thread_extended_state(pid: u32, thread: usize) -> bool {
@@ -184,13 +179,13 @@ pub(super) fn restore_linux_thread_extended_state(pid: u32, thread: usize) -> bo
     {
         return true;
     }
-    let Some((record, thread)) = linux_thread_extended_record(pid, thread) else {
-        return false;
-    };
-    if !record.extended_state_valid[thread] {
-        return reset_extended_user_state();
-    }
-    xstate::restore(&record.extended_states[thread])
+    with_linux_thread_extended_record(pid, thread, |record, thread| {
+        if !record.extended_state_valid[thread] {
+            return reset_extended_user_state();
+        }
+        xstate::restore(&record.extended_states[thread])
+    })
+    .unwrap_or(false)
 }
 
 pub(super) fn save_linux_process_extended_state(pid: u32) -> bool {
@@ -236,65 +231,48 @@ pub(super) fn initialize_linux_thread_extended_state(thread: usize) -> bool {
     if !save_linux_thread_extended_state(pid, parent) {
         return false;
     }
-    let (Some((record, parent)), Some((_, _, thread))) = (
-        linux_thread_extended_record(pid, parent),
-        linux_thread_extended_state_index(pid, thread),
-    ) else {
+    if thread >= LINUX_THREAD_LIMIT {
         return false;
-    };
-    record.extended_states[thread] = record.extended_states[parent];
-    record.extended_state_valid[thread] = record.extended_state_valid[parent];
-    true
+    }
+    with_linux_thread_extended_record(pid, parent, |record, parent| {
+        record.extended_states[thread] = record.extended_states[parent];
+        record.extended_state_valid[thread] = record.extended_state_valid[parent];
+    })
+    .is_some()
 }
 
 pub(super) fn discard_linux_thread_extended_state(thread: usize) {
     let pid = super::current_linux_process_pid();
-    if let Some((record, thread)) = linux_thread_extended_record(pid, thread) {
+    let _ = with_linux_thread_extended_record(pid, thread, |record, thread| {
         record.extended_state_valid[thread] = false;
-    }
+    });
 }
 
 pub(super) fn clone_linux_process_extended_state(parent: u32, child: u32) -> bool {
-    let (Some((parent_instance, parent_slot)), Some((child_instance, child_slot))) = (
-        linux_process_extended_state_index(parent),
-        linux_process_extended_state_index(child),
-    ) else {
-        return false;
-    };
-    if parent_instance != child_instance {
-        return false;
-    }
-    if parent_slot == child_slot {
-        return false;
-    }
-    let Some(parent) = linux_process_record(parent_instance, parent_slot) else {
-        return false;
-    };
-    let Some(child) = linux_process_record(child_instance, child_slot) else {
-        return false;
-    };
     // The child has one thread, the forking one, in the same slot (see
     // stage_linux_fork_child_runtime_state): its state is all that is
     // copied, not every slot's (128 KiB on each fork).
-    let Some(thread) = current_linux_thread_slot() else {
-        // Parent and child are different slots, so different records; the
-        // slices copy in place (no record-sized temporary on the stack).
-        child
-            .extended_states
-            .copy_from_slice(&parent.extended_states);
-        child.extended_state_valid = parent.extended_state_valid;
-        return true;
-    };
-    child.extended_state_valid = [false; LINUX_THREAD_LIMIT];
-    child.extended_states[thread] = parent.extended_states[thread];
-    child.extended_state_valid[thread] = parent.extended_state_valid[thread];
-    true
+    let current = current_linux_thread_slot();
+    // Parent and child are different processes (the pair is None for one
+    // process), so different records; the copies go from one heap record
+    // to the other.
+    with_linux_process_record_pair(parent, child, |parent, child| {
+        let Some(thread) = current else {
+            child
+                .extended_states
+                .copy_from_slice(&*parent.extended_states);
+            child.extended_state_valid = parent.extended_state_valid;
+            return;
+        };
+        child.extended_state_valid = [false; LINUX_THREAD_LIMIT];
+        child.extended_states[thread] = parent.extended_states[thread];
+        child.extended_state_valid[thread] = parent.extended_state_valid[thread];
+    })
+    .is_some()
 }
 
 pub(super) fn discard_linux_process_extended_state(pid: u32) {
-    if let Some(record) = linux_process_extended_state_index(pid)
-        .and_then(|(instance, slot)| linux_process_record(instance, slot))
-    {
+    let _ = with_linux_process_record(pid, |record| {
         record.extended_state_valid = [false; LINUX_THREAD_LIMIT];
-    }
+    });
 }

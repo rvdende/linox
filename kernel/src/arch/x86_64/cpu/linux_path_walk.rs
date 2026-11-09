@@ -702,35 +702,40 @@ pub(super) fn linux_overlay_file_open_for_write(generation: u32) -> bool {
         .filter_map(linux_process::live_process_pid_at)
         .filter(|pid| *pid != me)
         .any(|pid| {
-            linux_process_runtime_state(pid).is_some_and(|state| {
+            // The fixed table is looked at under the record lock, the
+            // table above it (its own lock) after.
+            with_valid_linux_process_runtime_state(pid, |state| {
                 let descriptors = &state.descriptors;
-                state.valid
-                    && (descriptors
-                        .stdio_devices
+                let fixed = descriptors
+                    .stdio_devices
+                    .iter()
+                    .zip(&descriptors.stdio_tmp_generations)
+                    .any(|(state, file)| writer(*state, *file))
+                    || descriptors
+                        .devices
                         .iter()
-                        .zip(&descriptors.stdio_tmp_generations)
-                        .any(|(state, file)| writer(*state, *file))
-                        || descriptors
-                            .devices
-                            .iter()
-                            .zip(&descriptors.tmp_generations)
-                            .any(|(state, file)| writer(*state, *file))
-                        || linux_saved_overflow_entries(descriptors)
-                            .iter()
-                            .any(|(_, entry)| writer(entry.state, entry.generation)))
+                        .zip(&descriptors.tmp_generations)
+                        .any(|(state, file)| writer(*state, *file));
+                (fixed, descriptors.overflow)
+            })
+            .is_some_and(|(fixed, overflow)| {
+                fixed
+                    || linux_saved_overflow_entries(overflow)
+                        .iter()
+                        .any(|(_, entry)| writer(entry.state, entry.generation))
             })
         })
 }
 
-/// The descriptors above the fixed table of saved descriptor table
-/// `state` (another process's), in order.
+/// The descriptors above the fixed table of a saved descriptor table
+/// (another process's), whose table above it is `overflow`, in order.
 pub(super) fn linux_saved_overflow_entries(
-    state: &LinuxDescriptorRuntimeState,
+    overflow: u32,
 ) -> Vec<(u64, crate::linux_fd_table::Entry)> {
-    if state.overflow == 0 || !crate::linux_fd_table::active() {
+    if overflow == 0 || !crate::linux_fd_table::active() {
         return Vec::new();
     }
-    crate::linux_fd_table::entries(state.overflow)
+    crate::linux_fd_table::entries(overflow)
 }
 
 pub(super) fn linux_overlay_descriptor_handle(

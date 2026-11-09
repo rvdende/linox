@@ -677,27 +677,56 @@ fn run_linux_light_thread(cpu: usize, bank: usize, slot: usize) -> bool {
             // descriptors stay retained.
             let registry_thread = LINUX_BANK_REGISTRY_THREAD[bank].load(Ordering::Acquire);
             let staged = LINUX_BANK_STAGED[bank].load(Ordering::Acquire);
-            if let (Some(mut state), Some(destination)) = (
-                capture_linux_process_runtime_state_for(registry_thread),
-                linux_process_runtime_state(pid),
-            ) {
-                if staged {
-                    state.active = true;
-                    state.completed = false;
-                    state.exit_status = 0;
-                    state.termination_signal = 0;
-                    if retain_linux_descriptor_runtime_state(&mut state.descriptors) {
-                        release_linux_descriptor_runtime_state(&destination.descriptors);
-                    }
-                }
-                *destination = state;
-            }
-        } else if let Some(threads) = linux_process_thread_runtime_state(pid) {
-            threads[slot] = capture_linux_thread_runtime_state(slot);
+            save_linux_bank_state(pid, registry_thread, staged);
+        } else {
+            let _ = with_linux_process_threads(pid, |threads| {
+                threads[slot] = capture_linux_thread_runtime_state(slot);
+            });
         }
     }
     leave_linux_process_bank(false);
     ran
+}
+
+/// The bank's state as process `pid`'s saved state, from the last CPU to
+/// leave the bank, its registry thread `registry_thread` the one it
+/// resumes with. A record a fork transaction `staged` keeps what the
+/// staging set, and its descriptors stay retained: the bank's descriptors
+/// are retained in their place and the staged ones released.
+#[inline(never)]
+fn save_linux_bank_state(pid: u32, registry_thread: u8, staged: bool) {
+    let Some(mut state) = capture_linux_process_runtime_state_for(registry_thread) else {
+        return;
+    };
+    if !staged {
+        let _ = with_linux_process_runtime_state(pid, |destination| *destination = state);
+        return;
+    }
+    state.active = true;
+    state.completed = false;
+    state.exit_status = 0;
+    state.termination_signal = 0;
+    // The staged descriptors are released after the record lock (they
+    // close sockets and files), so they move to the heap rather than add
+    // a second table to this frame. Without memory, or when the bank's
+    // cannot be retained, the record keeps the staged ones.
+    let mut replaced = crate::heap::try_boxed_array::<_, 1>(LinuxDescriptorRuntimeState::EMPTY);
+    let retained =
+        replaced.is_some() && retain_linux_descriptor_runtime_state(&mut state.descriptors);
+    let saved = with_linux_process_runtime_state(pid, |destination| {
+        match replaced.as_deref_mut().filter(|_| retained) {
+            Some([replaced]) => *replaced = destination.descriptors,
+            None => state.descriptors = destination.descriptors,
+        }
+        *destination = state;
+    });
+    match replaced.filter(|_| retained) {
+        Some(replaced) if saved.is_some() => {
+            release_linux_descriptor_runtime_state(&replaced[0]);
+        }
+        Some(_) => release_linux_descriptor_runtime_state(&state.descriptors),
+        None => {}
+    }
 }
 
 /// `run_linux_light_thread` with the bank attached.
@@ -1631,7 +1660,7 @@ pub(super) fn settle_linux_process_exit(pid: u32, status: u8) -> bool {
     // The process leaves its mount namespace before its record may go
     // with its runtime slot.
     let mount_namespace =
-        linux_process_runtime_state(pid).and_then(|state| state.mount_namespace.take());
+        with_linux_process_runtime_state(pid, |state| state.mount_namespace.take()).flatten();
     let process_slot = linux_process::live_process_slot(pid);
     let parent = linux_process::live_process_parent_pid(pid);
     let signals_cleared = process_slot
@@ -1646,16 +1675,16 @@ pub(super) fn settle_linux_process_exit(pid: u32, status: u8) -> bool {
     release_linux_process_shared_mappings(pid);
     release_linux_process_keys(pid);
     linux_fanotify_exit(pid);
-    if let Some(state) = linux_process_runtime_state(pid) {
-        release_linux_process_descriptors(pid, state);
+    release_linux_process_record_descriptors(pid, false);
+    let _ = with_linux_process_runtime_state(pid, |state| {
         *state = LinuxProcessRuntimeState::EMPTY;
-    }
+    });
     if let Some(namespace) = mount_namespace {
         linux_release_mount_namespace(namespace);
     }
-    if let Some(threads) = linux_process_thread_runtime_state(pid) {
+    let _ = with_linux_process_threads(pid, |threads| {
         threads.fill(LinuxThreadRuntimeState::EMPTY);
-    }
+    });
     discard_linux_process_extended_state(pid);
     wake_linux_descriptor_waits();
     // What it held (descriptors, locks, memory) went: waits on those look

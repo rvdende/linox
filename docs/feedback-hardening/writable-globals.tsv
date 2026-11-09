@@ -22,7 +22,7 @@ interior-mutable	kernel/src/arch/x86_64/cpu.rs	SERVICE_FRAMES_TRANSFERRED	verifi
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SERVICE_STACK_SCRUBBED	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	SYSCALL_STATE	verification-only	allowlist	none	verification-build-only
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME	shared-runtime	allowlist	none	explicit-x86-runtime-owner-root
-interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_MUTABLE_RUNTIME	shared-runtime	allowlist	none	explicit-x86-mutable-runtime-owner-root
+interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_MUTABLE_RUNTIME	process-runtime	allowlist	none	ranked-leaf-process-records-per-instance-claimed-container-xstate-atomic-signal-context
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_CONTAINER_ACTIVE_SLOT	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_CONTAINER_BACKGROUND_SUSPENDED	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
 interior-mutable	kernel/src/arch/x86_64/cpu.rs	X86_RUNTIME_BACKING_CONTAINER_CONFIG_FLAGS	domain-runtime	allowlist	none	explicit-x86-runtime-owner-backing
@@ -691,3 +691,6 @@ interior-mutable	kernel/src/framebuffer.rs	CURRENT_SURFACE	platform-device	allow
 interior-mutable	kernel/src/framebuffer.rs	SURFACES	platform-device	allowlist	none	set-once-owned-state-framebuffer-surfaces
 interior-mutable	kernel/src/memory.rs	TEST_METADATA	verification-only	allowlist	none	private-allocator-self-test-metadata-atomics
 interior-mutable	kernel/src/trusted/frame_tables.rs	CARVED	platform-device	allowlist	none	atomic-carve-once-latch-for-frame-allocator-tables
+interior-mutable	kernel/src/image_store.rs	IMAGE_STORE	shared-runtime	allowlist	none	ranked-image-store-and-leaf-rootfs-images-locks
+interior-mutable	kernel/src/published_rootfs.rs	PUBLISHED_ROOTFS	domain-runtime	allowlist	none	ranked-leaf-per-slot-published-rootfs-arc
+interior-mutable	kernel/src/trusted/heap.rs	KERNEL_HEAP	shared-runtime	allowlist	none	ranked-heap-slab-lock

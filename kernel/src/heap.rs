@@ -45,6 +45,15 @@ pub(crate) fn zeroed_page() -> Option<Box<[u8; PAGE_SIZE]>> {
     bytes.into_boxed_slice().try_into().ok()
 }
 
+/// `N` copies of `value` in one heap allocation, built in place (only
+/// `value` itself is ever on the stack), or `None` without memory.
+pub(crate) fn try_boxed_array<T: Clone, const N: usize>(value: T) -> Option<Box<[T; N]>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(N).ok()?;
+    values.resize(N, value);
+    values.into_boxed_slice().try_into().ok()
+}
+
 /// Exercises both allocation paths at boot, so a broken heap fails here
 /// rather than in whatever first uses it.
 pub(crate) fn verify() -> bool {

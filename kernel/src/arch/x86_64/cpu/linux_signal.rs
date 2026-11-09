@@ -1604,11 +1604,10 @@ pub(super) fn linux_parent_reaps_automatically(parent: u32) -> bool {
             X86_RUNTIME.ELF_PROBE_SIGNAL_FLAGS[index].load(Ordering::SeqCst),
         )
     } else {
-        linux_process_runtime_state(parent)
-            .filter(|state| state.valid)
-            .map_or((0, 0), |state| {
-                (state.signal_handlers[index], state.signal_flags[index])
-            })
+        with_valid_linux_process_runtime_state(parent, |state| {
+            (state.signal_handlers[index], state.signal_flags[index])
+        })
+        .unwrap_or((0, 0))
     };
     handler == 1 || flags & LINUX_SA_NOCLDWAIT != 0
 }
@@ -1644,13 +1643,9 @@ pub(super) fn linux_target_signal_ignored(target: u32, signal: u64) -> bool {
             X86_RUNTIME.ELF_PROBE_SIGNAL_MASK.load(Ordering::SeqCst),
         )
     } else {
-        linux_process_runtime_state(target)
-            .filter(|state| state.valid)
-            .map_or((0, 0), |state| {
-                (
-                    state.signal_handlers[index],
-                    linux_saved_target_signal_mask(target),
-                )
+        with_valid_linux_process_runtime_state(target, |state| state.signal_handlers[index])
+            .map_or((0, 0), |handler| {
+                (handler, linux_saved_target_signal_mask(target))
             })
     };
     // A blocked signal is never discarded as ignored (rt_sigtimedwait01).
@@ -1766,11 +1761,12 @@ fn linux_target_signal_mask(target: u32) -> u64 {
 /// threads blocks, so a signal one of them waits for (sigtimedwait) is not
 /// discarded as ignored.
 fn linux_saved_target_signal_mask(target: u32) -> u64 {
-    let Some(state) = linux_process_runtime_state(target).filter(|state| state.valid) else {
-        return 0;
-    };
-    let current = usize::from(state.current_thread_slot);
-    linux_process_thread_runtime_state(target).map_or(0, |threads| {
+    with_linux_process_record(target, |record| {
+        if !record.runtime().valid {
+            return 0;
+        }
+        let current = usize::from(record.runtime().current_thread_slot);
+        let threads = &record.threads;
         threads.get(current).map_or_else(
             || {
                 threads
@@ -1781,6 +1777,7 @@ fn linux_saved_target_signal_mask(target: u32) -> u64 {
             |thread| thread.signal_mask,
         )
     })
+    .unwrap_or(0)
 }
 
 pub(super) fn linux_kill(
@@ -2705,11 +2702,11 @@ pub(super) fn linux_saved_thread_target(pid: u32, tid: u32) -> Option<LinuxThrea
         return None;
     }
     let process_slot = linux_process::live_process_slot(pid)?;
-    let state = linux_process_runtime_state(pid)?;
-    let thread_slot = state.valid.then(|| {
-        linux_process_thread_runtime_state(pid)?
-            .iter()
-            .position(|thread| thread.tid == tid)
+    let thread_slot = with_linux_process_record(pid, |record| {
+        if !record.runtime().valid {
+            return None;
+        }
+        record.threads.iter().position(|thread| thread.tid == tid)
     })??;
     Some(LinuxThreadSignalTarget::Saved {
         pid,

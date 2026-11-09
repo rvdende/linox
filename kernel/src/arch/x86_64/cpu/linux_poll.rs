@@ -892,19 +892,21 @@ pub(super) fn linux_poll_wait_live_return(
             else {
                 return false;
             };
-            linux_process_runtime_state(parent_pid)
-                .filter(|state| state.valid)
-                .is_some_and(|state| {
-                    state
-                        .descriptors
-                        .stdio_sockets
+            with_valid_linux_process_runtime_state(parent_pid, |state| {
+                let descriptors = &state.descriptors;
+                let fixed = descriptors
+                    .stdio_sockets
+                    .iter()
+                    .chain(&descriptors.sockets)
+                    .any(|stored| *stored == peer + 1);
+                (fixed, descriptors.overflow)
+            })
+            .is_some_and(|(fixed, overflow)| {
+                fixed
+                    || linux_saved_overflow_entries(overflow)
                         .iter()
-                        .chain(&state.descriptors.sockets)
-                        .any(|stored| *stored == peer + 1)
-                        || linux_saved_overflow_entries(&state.descriptors)
-                            .iter()
-                            .any(|(_, entry)| entry.socket == peer + 1)
-                })
+                        .any(|(_, entry)| entry.socket == peer + 1)
+            })
         })
     });
     let polls_socket = active.as_chunks::<8>().0.iter().any(|pollfd| {

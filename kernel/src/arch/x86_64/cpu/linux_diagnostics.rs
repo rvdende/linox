@@ -431,8 +431,8 @@ fn linux_show_task_states() {
             let thread = if next == current {
                 capture_linux_thread_runtime_state(slot)
             } else {
-                match linux_process_thread_runtime_state(next) {
-                    Some(threads) => threads[slot],
+                match with_linux_process_threads(next, |threads| threads[slot]) {
+                    Some(thread) => thread,
                     None => break,
                 }
             };

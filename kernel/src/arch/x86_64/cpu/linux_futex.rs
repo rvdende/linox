@@ -1211,9 +1211,14 @@ pub(super) fn linux_thread_robust_list(tid: u64) -> Result<u64, u64> {
         if !permitted {
             return Err(LINUX_EPERM);
         }
-        return Ok(linux_process_thread_runtime_state(pid)
-            .and_then(|threads| threads.iter().find(|thread| thread.tid == pid))
-            .map_or(0, |thread| thread.robust_list));
+        return Ok(with_linux_process_threads(pid, |threads| {
+            threads
+                .iter()
+                .find(|thread| thread.tid == pid)
+                .map(|thread| thread.robust_list)
+        })
+        .flatten()
+        .unwrap_or(0));
     };
     (linux_thread_handle(usize::from(handle.slot)) == Some(handle))
         .then(|| {

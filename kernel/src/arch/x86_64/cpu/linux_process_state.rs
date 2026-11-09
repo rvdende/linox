@@ -1,3 +1,9 @@
+//! Linux processes' saved state: the per-CPU bank's signal context, the
+//! process records (`with_linux_process_record` and its kin, each a hold
+//! of the domain instance's record lock for one closure), and saving,
+//! restoring and sharing a process's state through them.
+#![forbid(unsafe_code)]
+
 use super::*;
 
 /// A copy of this CPU's running process's signal context.
@@ -16,51 +22,165 @@ pub(super) fn set_current_linux_signal_context(context: LinuxSignalContext) {
     }
 }
 
-/// The record for process slot `slot` of domain instance `instance`,
-/// allocated on first use.
-pub(super) fn linux_process_record(
-    instance: usize,
-    slot: usize,
-) -> Option<&'static mut LinuxProcessRecord> {
+/// Makes sure process slot `slot` of domain instance `instance` has a
+/// record, allocating it (and room in the instance's table) with the
+/// record lock released. False without memory or for a slot out of range.
+fn reserve_linux_process_record(instance: usize, slot: usize) -> bool {
+    /// What one look under the lock found.
+    enum Found {
+        Present,
+        NeedsRecord,
+        NeedsRoom(usize),
+    }
     if instance >= LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT
         || slot >= linux_process::PROCESS_RUNTIME_LIMIT
     {
-        return None;
+        return false;
     }
-    // SAFETY: the table is only reached through these accessors, which the
-    // recursive kernel-entry boundary serializes.
-    let table = unsafe { &mut (*X86_MUTABLE_RUNTIME.process_records.get())[instance] };
-    if table.len() <= slot {
-        table.try_reserve(slot + 1 - table.len()).ok()?;
-        table.resize(slot + 1, LinuxProcessRecordSlot::EMPTY);
-    }
-    let entry = &mut table[slot];
-    if entry.record.is_null() {
-        let length = size_of::<LinuxProcessRecord>();
-        let (first, _) = memory::allocate_contiguous_extent(
-            memory::FrameOwner::KERNEL,
-            length.div_ceil(PAGE_SIZE),
-        )?;
-        let record =
-            paging::direct_map_range_address(first.address(), length)? as *mut LinuxProcessRecord;
-        // SAFETY: the extent is a fresh, zeroed, kernel-owned allocation sized
-        // for one record, and nothing else refers to it yet. The extended
-        // states and their valid flags are correct as zeros; the runtime and
-        // thread states are written field by field so no record-sized
-        // temporary is built on the kernel stack.
-        unsafe {
-            core::ptr::addr_of_mut!((*record).runtime).write(LinuxProcessRuntimeState::EMPTY);
-            let threads =
-                core::ptr::addr_of_mut!((*record).threads).cast::<LinuxThreadRuntimeState>();
-            for thread in 0..LINUX_THREAD_LIMIT {
-                threads.add(thread).write(LinuxThreadRuntimeState::EMPTY);
+    let lock = &X86_MUTABLE_RUNTIME.process_records[instance];
+    let mut record = None;
+    let mut larger: Option<Vec<Option<LinuxProcessRecord>>> = None;
+    loop {
+        let (found, displaced) = {
+            let mut table = lock.lock();
+            let records = &mut table.records;
+            let mut displaced = None;
+            if records.get(slot).is_some_and(Option::is_some) {
+                (Found::Present, displaced)
+            } else {
+                // A larger table made outside: the records move into its
+                // reserved room and the old storage is freed after, so
+                // nothing is allocated or freed here.
+                if records.capacity() <= slot {
+                    if let Some(mut new) = larger.take().filter(|new| new.capacity() > slot) {
+                        new.append(records);
+                        displaced = Some(core::mem::replace(records, new));
+                    }
+                }
+                if records.capacity() <= slot {
+                    (Found::NeedsRoom(records.capacity()), displaced)
+                } else if let Some(new) = record.take() {
+                    if records.len() <= slot {
+                        records.resize_with(slot + 1, || None);
+                    }
+                    records[slot] = Some(new);
+                    (Found::Present, displaced)
+                } else {
+                    (Found::NeedsRecord, displaced)
+                }
+            }
+        };
+        drop(displaced);
+        match found {
+            Found::Present => break,
+            Found::NeedsRecord => match LinuxProcessRecord::allocate() {
+                Some(new) => record = Some(new),
+                None => return false,
+            },
+            Found::NeedsRoom(capacity) => {
+                let mut new = Vec::new();
+                if new
+                    .try_reserve_exact((slot + 1).max(capacity.saturating_mul(2)).max(16))
+                    .is_err()
+                {
+                    return false;
+                }
+                larger = Some(new);
             }
         }
-        *entry = LinuxProcessRecordSlot { record, first };
     }
-    // SAFETY: the pointer addresses a live, kernel-owned record, and callers
-    // do not hold two references to one slot.
-    Some(unsafe { &mut *entry.record })
+    // A record made here for a slot another context filled meanwhile goes
+    // now, with the lock released.
+    drop(record);
+    true
+}
+
+/// Runs `f` on domain instance `instance`'s records with slot `slot`'s
+/// allocated, holding the instance's record lock for `f` alone. `f` must
+/// not lock, park, allocate or copy user memory: it copies values in and
+/// out of the records (the lock is a leaf, `LockRank::PROCESS_RECORDS`).
+fn with_linux_process_record_table<R>(
+    instance: usize,
+    slot: usize,
+    f: impl FnOnce(&mut LinuxProcessRecordTable) -> R,
+) -> Option<R> {
+    if !reserve_linux_process_record(instance, slot) {
+        return None;
+    }
+    Some(f(&mut X86_MUTABLE_RUNTIME.process_records[instance].lock()))
+}
+
+/// Runs `f` on the record of process slot `slot` of domain instance
+/// `instance`, allocated on first use (see `with_linux_process_record_table`
+/// for what `f` may do).
+pub(super) fn with_linux_process_record_at<R>(
+    instance: usize,
+    slot: usize,
+    f: impl FnOnce(&mut LinuxProcessRecord) -> R,
+) -> Option<R> {
+    with_linux_process_record_table(instance, slot, |table| table.record(slot).map(f))?
+}
+
+/// The current domain instance and process `pid`'s runtime slot in it.
+fn linux_process_record_index(pid: u32) -> Option<(usize, usize)> {
+    let instance = current_container_slot().unwrap_or(control_abi::DOMAIN_LIMIT);
+    Some((instance, linux_process::live_process_runtime_slot(pid)?))
+}
+
+/// Runs `f` on process `pid`'s record (of the current domain instance).
+pub(super) fn with_linux_process_record<R>(
+    pid: u32,
+    f: impl FnOnce(&mut LinuxProcessRecord) -> R,
+) -> Option<R> {
+    let (instance, slot) = linux_process_record_index(pid)?;
+    with_linux_process_record_at(instance, slot, f)
+}
+
+/// Runs `f` on the records of two different processes, `first`'s and
+/// `second`'s, under one hold of the lock. None when they are one process.
+pub(super) fn with_linux_process_record_pair<R>(
+    first: u32,
+    second: u32,
+    f: impl FnOnce(&mut LinuxProcessRecord, &mut LinuxProcessRecord) -> R,
+) -> Option<R> {
+    let (instance, first) = linux_process_record_index(first)?;
+    let (second_instance, second) = linux_process_record_index(second)?;
+    if instance != second_instance || !reserve_linux_process_record(instance, second) {
+        return None;
+    }
+    with_linux_process_record_table(instance, first, |table| {
+        table
+            .pair(first, second)
+            .map(|(first, second)| f(first, second))
+    })?
+}
+
+/// Runs `f` on process `pid`'s saved runtime state.
+pub(super) fn with_linux_process_runtime_state<R>(
+    pid: u32,
+    f: impl FnOnce(&mut LinuxProcessRuntimeState) -> R,
+) -> Option<R> {
+    with_linux_process_record(pid, |record| f(record.runtime()))
+}
+
+/// Runs `f` on process `pid`'s saved runtime state if it is valid (saved
+/// from a process that ran).
+pub(super) fn with_valid_linux_process_runtime_state<R>(
+    pid: u32,
+    f: impl FnOnce(&mut LinuxProcessRuntimeState) -> R,
+) -> Option<R> {
+    with_linux_process_record(pid, |record| {
+        let state = record.runtime();
+        state.valid.then(|| f(state))
+    })?
+}
+
+/// Runs `f` on process `pid`'s saved thread table.
+pub(super) fn with_linux_process_threads<R>(
+    pid: u32,
+    f: impl FnOnce(&mut [LinuxThreadRuntimeState; LINUX_THREAD_LIMIT]) -> R,
+) -> Option<R> {
+    with_linux_process_record(pid, |record| f(&mut record.threads))
 }
 
 /// Releases process `pid`'s runtime slot once it has ended (see
@@ -75,78 +195,41 @@ pub(super) fn release_linux_process_runtime_slot(pid: u32) -> bool {
     let Some(slot) = slot.filter(|slot| *slot >= LINUX_PROCESS_RECORDS_KEPT) else {
         return true;
     };
-    // SAFETY: as in linux_process_record; the process that used the slot
-    // has ended and its record was emptied, so nothing refers to it.
-    let tables = unsafe { &mut *X86_MUTABLE_RUNTIME.process_records.get() };
-    let Some(entry) = tables
-        .get_mut(instance)
-        .and_then(|table| table.get_mut(slot))
-        .filter(|entry| !entry.record.is_null())
-    else {
-        return true;
-    };
-    let pages = size_of::<LinuxProcessRecord>().div_ceil(PAGE_SIZE);
-    let released =
-        memory::scrub_and_release_contiguous_extent(memory::FrameOwner::KERNEL, entry.first, pages);
-    if released {
-        *entry = LinuxProcessRecordSlot::EMPTY;
-    }
-    released
-}
-
-/// The frames held by the process records allocated so far, every domain
-/// instance's: those of the kept slots stay for the next process.
-pub(crate) fn linux_process_record_frames() -> usize {
-    // SAFETY: as in linux_process_record; only the entries are read.
-    let tables = unsafe { &*X86_MUTABLE_RUNTIME.process_records.get() };
-    let pages = size_of::<LinuxProcessRecord>().div_ceil(PAGE_SIZE);
-    tables
-        .iter()
-        .flatten()
-        .filter(|entry| !entry.record.is_null())
-        .count()
-        * pages
-}
-
-/// The records already allocated for the current domain instance.
-pub(super) fn allocated_linux_process_records(
-) -> impl Iterator<Item = &'static mut LinuxProcessRecord> {
-    let instance = current_container_slot().unwrap_or(control_abi::DOMAIN_LIMIT);
-    // SAFETY: as in linux_process_record; every non-null entry is a live
-    // record.
-    let tables = unsafe { &*X86_MUTABLE_RUNTIME.process_records.get() };
-    tables
+    // The process that used the slot has ended and its record was emptied;
+    // the record is taken out under the lock and freed (the heap scrubs
+    // it) after.
+    let released = X86_MUTABLE_RUNTIME
+        .process_records
         .get(instance)
-        .map_or(&[][..], Vec::as_slice)
-        .iter()
-        .filter(|entry| !entry.record.is_null())
-        .map(|entry| unsafe { &mut *entry.record })
+        .and_then(|lock| lock.lock().records.get_mut(slot).and_then(Option::take));
+    drop(released);
+    true
 }
 
-fn linux_current_process_record(pid: u32) -> Option<&'static mut LinuxProcessRecord> {
+/// Runs `f` on each record already allocated for the current domain
+/// instance, under one hold of its record lock.
+pub(super) fn for_each_allocated_linux_process_record(mut f: impl FnMut(&mut LinuxProcessRecord)) {
     let instance = current_container_slot().unwrap_or(control_abi::DOMAIN_LIMIT);
-    linux_process_record(instance, linux_process::live_process_runtime_slot(pid)?)
-}
-
-pub(super) fn linux_process_runtime_state(
-    pid: u32,
-) -> Option<&'static mut LinuxProcessRuntimeState> {
-    linux_current_process_record(pid).map(|record| &mut record.runtime)
+    if let Some(lock) = X86_MUTABLE_RUNTIME.process_records.get(instance) {
+        lock.lock().records.iter_mut().flatten().for_each(&mut f);
+    }
 }
 
 /// How many threads process `pid`, which is not the current process, has:
 /// those its saved thread table holds, or one without a table.
 pub(super) fn linux_process_thread_count(pid: u32) -> usize {
-    let saved = linux_process_runtime_state(pid).is_some_and(|state| state.valid);
-    linux_process_thread_runtime_state(pid)
-        .filter(|_| saved)
-        .map_or(1, |threads| {
-            threads
+    with_linux_process_record(pid, |record| {
+        record.runtime().valid.then(|| {
+            record
+                .threads
                 .iter()
                 .filter(|thread| thread.state != LINUX_THREAD_FREE)
                 .count()
                 .max(1)
         })
+    })
+    .flatten()
+    .unwrap_or(1)
 }
 
 /// Whether `pid`'s main thread is blocked in a wait. Linux's
@@ -161,19 +244,14 @@ pub(super) fn linux_leader_thread_blocked(pid: u32) -> bool {
             )
         });
     }
-    linux_process_runtime_state(pid).is_some_and(|state| state.valid)
-        && linux_process_thread_runtime_state(pid).is_some_and(|threads| {
-            threads.iter().any(|thread| {
+    with_linux_process_record(pid, |record| {
+        record.runtime().valid
+            && record.threads.iter().any(|thread| {
                 thread.tid == pid
                     && matches!(thread.state, LINUX_THREAD_BLOCKED | LINUX_THREAD_PARKED)
             })
-        })
-}
-
-pub(super) fn linux_process_thread_runtime_state(
-    pid: u32,
-) -> Option<&'static mut [LinuxThreadRuntimeState; LINUX_THREAD_LIMIT]> {
-    linux_current_process_record(pid).map(|record| &mut record.threads)
+    })
+    .unwrap_or(false)
 }
 
 pub(super) struct LinuxForkParentRuntime {
@@ -290,7 +368,7 @@ pub(super) fn stage_linux_fork_parent_runtime_state(
         )
     });
     let nice = state.nice;
-    *linux_process_runtime_state(parent_pid)? = state;
+    with_linux_process_runtime_state(parent_pid, |saved| *saved = state)?;
     LINUX_BANK_STAGED[linux_cpu_bank()].store(true, Ordering::Release);
     Some(LinuxForkParentRuntime {
         stack: parent_stack,
@@ -298,12 +376,17 @@ pub(super) fn stage_linux_fork_parent_runtime_state(
     })
 }
 
+// The saved table is copied out (released with the record lock free), so
+// keep that copy in a frame of its own.
+#[inline(never)]
 pub(super) fn release_staged_linux_fork_descriptors(parent_pid: u32, shared: bool) {
     if shared {
         return;
     }
-    if let Some(state) = linux_process_runtime_state(parent_pid).filter(|state| state.valid) {
-        release_linux_descriptor_runtime_state(&state.descriptors);
+    if let Some(descriptors) =
+        with_valid_linux_process_runtime_state(parent_pid, |state| state.descriptors)
+    {
+        release_linux_descriptor_runtime_state(&descriptors);
     }
 }
 
@@ -312,25 +395,26 @@ pub(super) fn stage_linux_fork_child_runtime_state(
     child_pid: u32,
     new_mount_namespace: bool,
 ) -> Option<linux_mount::MountNamespaceHandle> {
-    let parent: &LinuxProcessRuntimeState =
-        linux_process_runtime_state(parent_pid).filter(|state| state.valid)?;
-    let child = linux_process_runtime_state(child_pid)?;
-    let parent_threads: &[LinuxThreadRuntimeState; LINUX_THREAD_LIMIT] =
-        linux_process_thread_runtime_state(parent_pid)?;
-    let child_threads = linux_process_thread_runtime_state(child_pid)?;
     if parent_pid == child_pid {
         return None;
     }
     let mount_namespace = if new_mount_namespace {
+        with_valid_linux_process_runtime_state(parent_pid, |_| ())?;
         linux_clone_mount_namespace()?
     } else {
-        parent.mount_namespace?
+        with_valid_linux_process_runtime_state(parent_pid, |state| state.mount_namespace)??
     };
-    // Parent and child are different processes, so different records; the
-    // slices copy in place, with no record-sized temporary on the stack.
-    core::slice::from_mut(&mut *child).copy_from_slice(core::slice::from_ref(parent));
-    child_threads.copy_from_slice(parent_threads);
-    {
+    with_linux_process_record_pair(parent_pid, child_pid, |parent, child| {
+        if !parent.runtime().valid {
+            return None;
+        }
+        // Parent and child are different processes, so different records;
+        // the copies go from one heap record to the other, with no
+        // record-sized temporary on the stack.
+        child.runtime.copy_from_slice(&*parent.runtime);
+        child.threads.copy_from_slice(&*parent.threads);
+        let child_threads = &mut child.threads;
+        let child = &mut child.runtime[0];
         let current = usize::from(child.current_thread_slot);
         for (slot, thread) in child_threads.iter_mut().enumerate() {
             if slot != current {
@@ -361,8 +445,8 @@ pub(super) fn stage_linux_fork_child_runtime_state(
         child.signal_context = LinuxSignalContext::ZERO;
         child.parent_death_signal = 0;
         child.mount_namespace = Some(mount_namespace);
-    }
-    Some(mount_namespace)
+        Some(mount_namespace)
+    })?
 }
 
 pub(super) fn save_current_linux_process_runtime_state(pid: u32) {
@@ -387,11 +471,8 @@ fn save_current_linux_process_runtime_state_now(pid: u32) {
     if linux_child_exited(pid) {
         wait_for_linux_process_threads_to_leave(pid);
     }
-    if let (Some(state), Some(destination)) = (
-        capture_linux_process_runtime_state(),
-        linux_process_runtime_state(pid),
-    ) {
-        *destination = state;
+    if let Some(state) = capture_linux_process_runtime_state() {
+        let _ = with_linux_process_runtime_state(pid, |saved| *saved = state);
     }
     if let Some(started) = started {
         X86_RUNTIME
@@ -412,7 +493,15 @@ pub(super) fn restore_saved_linux_process_runtime_state(pid: u32) -> bool {
 
 fn restore_saved_linux_process_runtime_state_now(pid: u32) -> bool {
     let started = cfg!(feature = "linux-boot-profile").then(timer::timestamp_counter);
-    let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
+    let Some((current_thread_slot, last_preempted_thread_slot, mount_namespace)) =
+        with_valid_linux_process_runtime_state(pid, |state| {
+            (
+                state.current_thread_slot,
+                state.last_preempted_thread_slot,
+                state.mount_namespace,
+            )
+        })
+    else {
         return false;
     };
     let Some(attached) = attach_linux_process_bank(pid, true) else {
@@ -425,31 +514,40 @@ fn restore_saved_linux_process_runtime_state_now(pid: u32) -> bool {
         // newer than what was saved. This CPU takes up the saved thread.
         X86_RUNTIME
             .LINUX_CURRENT_THREAD_SLOT
-            .store(state.current_thread_slot, Ordering::SeqCst);
+            .store(current_thread_slot, Ordering::SeqCst);
         X86_RUNTIME
             .LINUX_LAST_PREEMPTED_THREAD_SLOT
-            .store(state.last_preempted_thread_slot, Ordering::SeqCst);
+            .store(last_preempted_thread_slot, Ordering::SeqCst);
         let thread_signal_mask = X86_RUNTIME
             .LINUX_THREAD_SIGNAL_MASKS
-            .get(usize::from(state.current_thread_slot))
+            .get(usize::from(current_thread_slot))
             .map_or(0, |mask| mask.load(Ordering::SeqCst));
         X86_RUNTIME
             .ELF_PROBE_SIGNAL_MASK
             .store(thread_signal_mask, Ordering::SeqCst);
         return true;
     }
-    restore_linux_process_runtime_state(state);
-    let Some(threads) = linux_process_thread_runtime_state(pid) else {
+    // The mount namespace switch takes the namespace table's lock, so it
+    // comes first; the rest is stores to this CPU's bank, made straight
+    // from the record under its lock.
+    if let Some(namespace) = mount_namespace {
+        let _ = linux_mount::switch_to(namespace);
+    }
+    let restored = with_linux_process_record(pid, |record| {
+        restore_linux_process_runtime_state(record.runtime());
+        restore_linux_thread_runtime_state(
+            &record.threads,
+            current_thread_slot,
+            last_preempted_thread_slot,
+        );
+        record
+            .threads
+            .get(usize::from(current_thread_slot))
+            .map_or(0, |thread| thread.signal_mask)
+    });
+    let Some(thread_signal_mask) = restored else {
         return false;
     };
-    restore_linux_thread_runtime_state(
-        threads,
-        state.current_thread_slot,
-        state.last_preempted_thread_slot,
-    );
-    let thread_signal_mask = threads
-        .get(usize::from(state.current_thread_slot))
-        .map_or(0, |thread| thread.signal_mask);
     X86_RUNTIME
         .ELF_PROBE_SIGNAL_MASK
         .store(thread_signal_mask, Ordering::SeqCst);
@@ -469,12 +567,12 @@ fn restore_saved_linux_process_runtime_state_now(pid: u32) -> bool {
 // kernel stack while a child process runs.
 #[inline(never)]
 pub(super) fn capture_linux_descriptors_for_process(pid: u32) -> bool {
-    let Some(state) = linux_process_runtime_state(pid) else {
+    if with_linux_process_runtime_state(pid, |_| ()).is_none() {
         return false;
-    };
+    }
     assign_linux_open_file_ids();
-    state.descriptors = capture_linux_descriptor_runtime_state();
-    true
+    let descriptors = capture_linux_descriptor_runtime_state();
+    with_linux_process_runtime_state(pid, |state| state.descriptors = descriptors).is_some()
 }
 
 pub(super) fn capture_linux_thread_runtime_state(slot: usize) -> LinuxThreadRuntimeState {
@@ -684,13 +782,16 @@ pub(super) fn capture_linux_process_runtime_state_for(
     thread_slot: u8,
 ) -> Option<LinuxProcessRuntimeState> {
     let pid = current_linux_process_pid();
-    let threads = linux_process_thread_runtime_state(pid)?;
-    for (slot, state) in threads.iter_mut().enumerate() {
-        // A free slot is clear but for its generation (see
-        // clear_linux_thread_slot): copying its ~17 KiB of zeros on every
-        // process switch was most of a switch's cost.
-        *state =
-            if X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst) == LINUX_THREAD_FREE {
+    // The bank's thread table goes straight into the record (atomic loads
+    // under the record lock), not through the stack.
+    with_linux_process_threads(pid, |threads| {
+        for (slot, state) in threads.iter_mut().enumerate() {
+            // A free slot is clear but for its generation (see
+            // clear_linux_thread_slot): copying its ~17 KiB of zeros on
+            // every process switch was most of a switch's cost.
+            *state = if X86_RUNTIME.LINUX_THREAD_STATES[slot].load(Ordering::SeqCst)
+                == LINUX_THREAD_FREE
+            {
                 LinuxThreadRuntimeState {
                     generation: X86_RUNTIME.LINUX_THREAD_GENERATIONS[slot].load(Ordering::SeqCst),
                     ..LinuxThreadRuntimeState::EMPTY
@@ -698,7 +799,8 @@ pub(super) fn capture_linux_process_runtime_state_for(
             } else {
                 capture_linux_thread_runtime_state(slot)
             };
-    }
+        }
+    })?;
     Some(LinuxProcessRuntimeState {
         valid: true,
         active: X86_RUNTIME.ELF_PROBE_ACTIVE.load(Ordering::SeqCst),
@@ -807,10 +909,9 @@ pub(super) fn capture_linux_process_runtime_state_for(
     })
 }
 
+/// Puts saved state `state` in this CPU's bank: atomic stores only, so it
+/// runs under the record lock. The caller switches the mount namespace.
 fn restore_linux_process_runtime_state(state: &LinuxProcessRuntimeState) {
-    if let Some(namespace) = state.mount_namespace {
-        let _ = linux_mount::switch_to(namespace);
-    }
     X86_RUNTIME
         .ELF_PROBE_ACTIVE
         .store(state.active, Ordering::SeqCst);
@@ -997,9 +1098,13 @@ pub(super) fn pull_linux_shared_runtime_state() {
     if !parts.any() || !linux_bank_holds(linux_cpu_bank(), pid, linux_execution_instance()) {
         return;
     }
-    let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
-        return;
-    };
+    // Stores to this CPU's bank only, made from the record under its lock.
+    let _ = with_valid_linux_process_runtime_state(pid, |state| {
+        pull_linux_shared_parts(parts, state);
+    });
+}
+
+fn pull_linux_shared_parts(parts: LinuxSharedRuntimeParts, state: &LinuxProcessRuntimeState) {
     if parts.descriptors {
         install_linux_descriptor_runtime_state(&state.descriptors);
     }
@@ -1042,49 +1147,58 @@ pub(super) fn push_linux_shared_runtime_state() {
     if !parts.any() || !linux_bank_holds(linux_cpu_bank(), pid, linux_execution_instance()) {
         return;
     }
-    let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
-        return;
-    };
     if parts.descriptors {
         assign_linux_open_file_ids();
-        state.descriptors = capture_linux_descriptor_runtime_state();
     }
-    if parts.filesystem {
-        state.cwd = X86_RUNTIME.ELF_PROBE_CWD.load(Ordering::SeqCst);
-        state.rootfs_cwd = X86_RUNTIME.ELF_PROBE_ROOTFS_CWD.load(Ordering::SeqCst);
-        state.overlay_cwd = X86_RUNTIME.ELF_PROBE_OVERLAY_CWD.load(Ordering::SeqCst);
-        state.umask = X86_RUNTIME.ELF_PROBE_UMASK.load(Ordering::SeqCst);
-    }
-    if parts.signal_handlers {
-        for signal in 0..LINUX_SIGNAL_COUNT {
-            state.signal_handlers[signal] =
-                X86_RUNTIME.ELF_PROBE_SIGNAL_HANDLERS[signal].load(Ordering::SeqCst);
-            state.signal_flags[signal] =
-                X86_RUNTIME.ELF_PROBE_SIGNAL_FLAGS[signal].load(Ordering::SeqCst);
-            state.signal_restorers[signal] =
-                X86_RUNTIME.ELF_PROBE_SIGNAL_RESTORERS[signal].load(Ordering::SeqCst);
-            state.signal_action_masks[signal] =
-                X86_RUNTIME.ELF_PROBE_SIGNAL_ACTION_MASKS[signal].load(Ordering::SeqCst);
+    // Open-file ids are assigned above (which takes locks); the rest is
+    // loads from this CPU's bank, made into the record under its lock.
+    let saved = with_valid_linux_process_runtime_state(pid, |state| {
+        if parts.descriptors {
+            state.descriptors = capture_linux_descriptor_runtime_state();
         }
-    }
-    let source: &LinuxProcessRuntimeState = state;
-    let copy_to_sharers = |resource, copy: &dyn Fn(&mut LinuxProcessRuntimeState)| {
-        for peer in linux_process::live_processes_sharing(pid, resource) {
-            if let Some(destination) = linux_process_runtime_state(peer).filter(|state| state.valid)
-            {
-                copy(destination);
+        if parts.filesystem {
+            state.cwd = X86_RUNTIME.ELF_PROBE_CWD.load(Ordering::SeqCst);
+            state.rootfs_cwd = X86_RUNTIME.ELF_PROBE_ROOTFS_CWD.load(Ordering::SeqCst);
+            state.overlay_cwd = X86_RUNTIME.ELF_PROBE_OVERLAY_CWD.load(Ordering::SeqCst);
+            state.umask = X86_RUNTIME.ELF_PROBE_UMASK.load(Ordering::SeqCst);
+        }
+        if parts.signal_handlers {
+            for signal in 0..LINUX_SIGNAL_COUNT {
+                state.signal_handlers[signal] =
+                    X86_RUNTIME.ELF_PROBE_SIGNAL_HANDLERS[signal].load(Ordering::SeqCst);
+                state.signal_flags[signal] =
+                    X86_RUNTIME.ELF_PROBE_SIGNAL_FLAGS[signal].load(Ordering::SeqCst);
+                state.signal_restorers[signal] =
+                    X86_RUNTIME.ELF_PROBE_SIGNAL_RESTORERS[signal].load(Ordering::SeqCst);
+                state.signal_action_masks[signal] =
+                    X86_RUNTIME.ELF_PROBE_SIGNAL_ACTION_MASKS[signal].load(Ordering::SeqCst);
             }
         }
-    };
-    // `source` is this process's record, which no copy below writes: each
-    // destination is another process's.
+    });
+    if saved.is_none() {
+        return;
+    }
+    // The sharers are looked up with no lock held (the process table), and
+    // each copy goes from this process's record to the sharer's under one
+    // hold of the record lock.
+    let copy_to_sharers =
+        |resource, copy: &dyn Fn(&LinuxProcessRuntimeState, &mut LinuxProcessRuntimeState)| {
+            for peer in linux_process::live_processes_sharing(pid, resource) {
+                let _ = with_linux_process_record_pair(pid, peer, |source, destination| {
+                    let (source, destination) = (source.runtime(), destination.runtime());
+                    if destination.valid {
+                        copy(source, destination);
+                    }
+                });
+            }
+        };
     if parts.descriptors {
-        copy_to_sharers(SharedResource::Descriptors, &|destination| {
+        copy_to_sharers(SharedResource::Descriptors, &|source, destination| {
             destination.descriptors = source.descriptors;
         });
     }
     if parts.filesystem {
-        copy_to_sharers(SharedResource::Filesystem, &|destination| {
+        copy_to_sharers(SharedResource::Filesystem, &|source, destination| {
             destination.cwd = source.cwd;
             destination.rootfs_cwd = source.rootfs_cwd;
             destination.overlay_cwd = source.overlay_cwd;
@@ -1092,7 +1206,7 @@ pub(super) fn push_linux_shared_runtime_state() {
         });
     }
     if parts.signal_handlers {
-        copy_to_sharers(SharedResource::SignalHandlers, &|destination| {
+        copy_to_sharers(SharedResource::SignalHandlers, &|source, destination| {
             destination.signal_handlers = source.signal_handlers;
             destination.signal_flags = source.signal_flags;
             destination.signal_restorers = source.signal_restorers;
@@ -1128,12 +1242,21 @@ impl Drop for LinuxSharedStateCall {
 
 /// Releases the open files of process `pid`'s saved descriptor table,
 /// which it no longer uses, unless another live process still shares that
-/// table (CLONE_FILES): the last one to go releases them.
+/// table (CLONE_FILES): the last one to go releases them; with `only_valid`,
+/// only when its saved state is valid. The record keeps the table; the
+/// release works on a copy, made in this frame of its own and released
+/// with the record lock free.
 #[inline(never)]
-pub(super) fn release_linux_process_descriptors(pid: u32, state: &LinuxProcessRuntimeState) {
+pub(super) fn release_linux_process_record_descriptors(pid: u32, only_valid: bool) {
+    let Some(descriptors) = with_linux_process_runtime_state(pid, |state| {
+        (state.valid || !only_valid).then_some(state.descriptors)
+    })
+    .flatten() else {
+        return;
+    };
     if !linux_process::live_process_resource_shared(pid, linux_process::SharedResource::Descriptors)
     {
-        release_linux_descriptor_runtime_state(&state.descriptors);
+        release_linux_descriptor_runtime_state(&descriptors);
     }
 }
 

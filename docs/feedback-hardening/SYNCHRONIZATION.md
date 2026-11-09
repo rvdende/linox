@@ -142,6 +142,8 @@ nothing that takes a lock. Two such leaves are never held together.
   on the way back is freed after the lock is released.
 - `SIGNAL_QUEUES` (199, `linux_signal`): each domain's signal queues;
   see "Signal queues" below.
+- `PROCESS_RECORDS` (199, `cpu.rs`'s `LinuxProcessRecordTable`): each
+  domain instance's Linux process records; see "Process records" below.
 
 ## Other new ranks
 
@@ -288,6 +290,46 @@ test`), `make test-quick` and a full LTP run (the whole syscall list in
 one boot) saw only 0 (boot, no lock) and 100 (the kernel-entry lock); no
 memory cgroup ran out of memory in them, so the OOM path is what sets
 the rank, not the measurement.
+
+## Process records
+
+`PROCESS_RECORDS` (199): one `IrqSpinLock` per domain instance over its
+Linux process records, by runtime slot: a process's saved runtime state
+(descriptor table, signal handlers, limits, ...), its thread table and
+each thread's extended register state, kept while the process does not
+run on a CPU's bank. A record is three heap allocations (over 300 KiB in
+all), made when a process first occupies the slot and freed with the
+process for slots above the 256 kept.
+
+Every access is one closure under the lock (`with_linux_process_record`,
+`with_linux_process_runtime_state`, `with_linux_process_threads`,
+`with_linux_process_record_pair` for a fork's parent and child or a
+shared table's copy to a sharer, `for_each_allocated_linux_process_record`
+in cpu/linux_process_state.rs), so no reference to a record outlives the
+hold. The closures copy values in and out: stores to and loads from the
+CPU's bank (atomics), XSAVE and XRSTOR of a thread's extended state, and
+comparisons. They take no lock, allocate and free nothing, never park and
+never touch user memory. What needs more is done around them: a mount
+namespace switch before a restore; releasing or retaining a saved
+descriptor table on a copy taken out (or, for the bank's last CPU after
+a fork staged the record, with the replaced table moved to the heap); a
+look at a saved table's descriptors above the fixed table
+(`linux_fd_table`, its own lock) with the table id returned from the
+closure; the sharers of a table, found in the process table, before the
+copy to each. A record and room for it in the table are allocated with
+the lock released (`reserve_linux_process_record`: a table that must
+grow is built larger outside and the records are moved into it under the
+lock), and a released record leaves the table under the lock and is
+freed after.
+
+Records are read under whatever lock a system call holds (path walks
+ask whether another process has a file open for writing, under the
+route, overlay and volume tables), so the lock is a leaf ranked above
+every lock below the heap and above the other leaves. It shares 199 with
+SIGNAL_QUEUES and ADDRESS_SPACE_SCRATCH: all three take nothing while
+held, so none is ever taken under another. It is interrupt-safe, so no
+tick can arrive on the CPU that holds it. Taking it inside one of its own
+closures is a rank violation and fails closed.
 
 ## Local interrupt audit
 

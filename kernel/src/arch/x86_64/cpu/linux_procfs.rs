@@ -442,9 +442,7 @@ pub(super) fn linux_process_name(pid: u32, name: &mut [u8; 16]) -> &[u8] {
                 .load(Ordering::SeqCst),
         ]
     } else {
-        linux_process_runtime_state(pid)
-            .filter(|state| state.valid)
-            .map_or([0; 2], |state| state.process_name)
+        with_valid_linux_process_runtime_state(pid, |state| state.process_name).unwrap_or([0; 2])
     };
     name[..8].copy_from_slice(&words[0].to_ne_bytes());
     name[8..].copy_from_slice(&words[1].to_ne_bytes());
@@ -622,12 +620,15 @@ pub(super) fn linux_thread_state_by_tid(tid: u32) -> Option<(u32, u8)> {
     let mut pid = 0;
     while let Some(next) = linux_process::next_live_pid(pid) {
         pid = next;
-        if let Some(thread) = linux_process_thread_runtime_state(pid).and_then(|threads| {
+        if let Some(state) = with_linux_process_threads(pid, |threads| {
             threads
                 .iter()
                 .find(|thread| thread.state != LINUX_THREAD_FREE && thread.tid == tid)
-        }) {
-            return Some((pid, letter(thread.state)));
+                .map(|thread| thread.state)
+        })
+        .flatten()
+        {
+            return Some((pid, letter(state)));
         }
     }
     let status = linux_process::live_process_status(tid)?;
@@ -722,13 +723,15 @@ pub(super) fn linux_process_thread_ids(pid: u32, tids: &mut [u32; LINUX_THREAD_L
                 count += 1;
             }
         }
-    } else if let Some(threads) = linux_process_thread_runtime_state(pid) {
-        for thread in threads.iter() {
-            if thread.state != LINUX_THREAD_FREE && thread.tid != 0 {
-                tids[count] = thread.tid;
-                count += 1;
+    } else {
+        let _ = with_linux_process_threads(pid, |threads| {
+            for thread in threads.iter() {
+                if thread.state != LINUX_THREAD_FREE && thread.tid != 0 {
+                    tids[count] = thread.tid;
+                    count += 1;
+                }
             }
-        }
+        });
     }
     if count == 0 && linux_process::live_process_status(pid).is_some() {
         tids[0] = pid;

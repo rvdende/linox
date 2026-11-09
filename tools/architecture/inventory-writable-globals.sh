@@ -31,7 +31,7 @@ emit_matches interior-mutable \
     '^\s*(pub(\([^)]*\))?\s+)?static\s+[A-Z0-9_]+\s*:\s*[^=]*(Atomic|Mutex|RwLock|RefCell|UnsafeCell|Once|Spin|Lock)' \
     >>"$scratch"
 
-# Custom owner wrappers can hide atomics or UnsafeCell from the static
+# Custom owner wrappers can hide atomics, UnsafeCell or locks from the static
 # declaration. Find structs whose definition contains either form of interior
 # mutability, then include every static declared with one of those types.
 find "${source_roots[@]}" -type f -name '*.rs' -print0 |
@@ -44,7 +44,7 @@ find "${source_roots[@]}" -type f -name '*.rs' -print0 |
                 gsub(/[[:space:]]/, "", name)
                 remaining = 6
             }
-            remaining > 0 && /(UnsafeCell|Atomic)/ { print name; remaining = 0 }
+            remaining > 0 && /(UnsafeCell|Atomic|SpinLock<)/ { print name; remaining = 0 }
             remaining > 0 { remaining-- }
         ' "$file"
     done | sort -u >"$cell_types"

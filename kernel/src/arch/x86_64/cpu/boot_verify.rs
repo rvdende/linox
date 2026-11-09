@@ -4107,20 +4107,13 @@ fn verify_linux_cross_process_kcmp(parent: u32, child: u32) -> bool {
     let bounded = files
         && linux_kcmp(u64::from(u32::MAX), u64::from(child), 1, 0, 0) == LINUX_ESRCH
         && linux_kcmp(u64::from(parent), u64::from(child), 7, 0, 0) == LINUX_EINVAL;
-    let permission = if let Some(dumpable) = linux_process_runtime_state(child)
-        .filter(|state| state.valid)
-        .map(|state| {
-            let dumpable = state.dumpable;
-            state.dumpable = false;
-            dumpable
+    let permission = if let Some(dumpable) =
+        with_valid_linux_process_runtime_state(child, |state| {
+            core::mem::replace(&mut state.dumpable, false)
         }) {
         let denied = linux_kcmp(u64::from(parent), u64::from(child), 1, 0, 0) == LINUX_EPERM;
-        linux_process_runtime_state(child)
-            .filter(|state| state.valid)
-            .is_some_and(|state| {
-                state.dumpable = dumpable;
-                denied
-            })
+        with_valid_linux_process_runtime_state(child, |state| state.dumpable = dumpable).is_some()
+            && denied
     } else {
         false
     };
@@ -4138,9 +4131,10 @@ fn verify_linux_shared_open_file_offset(parent: u32, child: u32) -> bool {
     let original = linux_descriptor_offset(descriptor).load(Ordering::SeqCst);
     let marker = original.wrapping_add(0x0047_494e_5558);
     linux_descriptor_offset(descriptor).store(marker, Ordering::SeqCst);
-    let child_updated = linux_process_runtime_state(child)
-        .filter(|state| state.valid)
-        .is_some_and(|state| state.descriptors.stdio_offsets[descriptor as usize] == marker);
+    let child_updated = with_valid_linux_process_runtime_state(child, |state| {
+        state.descriptors.stdio_offsets[descriptor as usize] == marker
+    })
+    .unwrap_or(false);
     linux_descriptor_offset(descriptor).store(original, Ordering::SeqCst);
     child_updated
 }
@@ -4203,23 +4197,18 @@ fn verify_linux_cross_process_vm(pid: u32) -> bool {
         && linux_process_vm_iov(u64::from(pid), mapping, 1, mapping + 48, 2, 0, true) == 8;
 
     let permission = if let Some(dumpable) = partial
-        .then(|| linux_process_runtime_state(pid))
+        .then(|| {
+            with_valid_linux_process_runtime_state(pid, |state| {
+                core::mem::replace(&mut state.dumpable, false)
+            })
+        })
         .flatten()
-        .filter(|state| state.valid)
-        .map(|state| {
-            let dumpable = state.dumpable;
-            state.dumpable = false;
-            dumpable
-        }) {
+    {
         let denied =
             linux_process_vm_iov(u64::from(pid), mapping + 32, 1, mapping + 16, 1, 0, false)
                 == LINUX_EPERM;
-        linux_process_runtime_state(pid)
-            .filter(|state| state.valid)
-            .is_some_and(|state| {
-                state.dumpable = dumpable;
-                denied
-            })
+        with_valid_linux_process_runtime_state(pid, |state| state.dumpable = dumpable).is_some()
+            && denied
     } else {
         false
     };

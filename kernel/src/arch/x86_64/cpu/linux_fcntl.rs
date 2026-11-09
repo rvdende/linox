@@ -90,31 +90,35 @@ fn linux_file_descriptors(file: u32, mut visit: impl FnMut(u32, u64, bool)) {
         .filter_map(linux_process::live_process_pid_at)
         .filter(|pid| *pid != me)
     {
-        let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
+        // The fixed table is looked at under the record lock (`visit` only
+        // notes what it is shown), the table above it with the lock free.
+        let Some(overflow) = with_valid_linux_process_runtime_state(pid, |state| {
+            let descriptors = &state.descriptors;
+            for (index, (state, generation)) in descriptors
+                .stdio_devices
+                .iter()
+                .zip(&descriptors.stdio_tmp_generations)
+                .enumerate()
+            {
+                if let Some(writes) = open(*state, *generation) {
+                    visit(pid, index as u64, writes);
+                }
+            }
+            for (index, (state, generation)) in descriptors
+                .devices
+                .iter()
+                .zip(&descriptors.tmp_generations)
+                .enumerate()
+            {
+                if let Some(writes) = open(*state, *generation) {
+                    visit(pid, LINUX_AUX_DESCRIPTOR_FIRST + index as u64, writes);
+                }
+            }
+            descriptors.overflow
+        }) else {
             continue;
         };
-        let descriptors = &state.descriptors;
-        for (index, (state, generation)) in descriptors
-            .stdio_devices
-            .iter()
-            .zip(&descriptors.stdio_tmp_generations)
-            .enumerate()
-        {
-            if let Some(writes) = open(*state, *generation) {
-                visit(pid, index as u64, writes);
-            }
-        }
-        for (index, (state, generation)) in descriptors
-            .devices
-            .iter()
-            .zip(&descriptors.tmp_generations)
-            .enumerate()
-        {
-            if let Some(writes) = open(*state, *generation) {
-                visit(pid, LINUX_AUX_DESCRIPTOR_FIRST + index as u64, writes);
-            }
-        }
-        for (descriptor, entry) in linux_saved_overflow_entries(descriptors) {
+        for (descriptor, entry) in linux_saved_overflow_entries(overflow) {
             if let Some(writes) = open(entry.state, entry.generation) {
                 visit(pid, descriptor, writes);
             }

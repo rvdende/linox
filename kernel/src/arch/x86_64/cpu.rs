@@ -1,7 +1,10 @@
+#![forbid(unsafe_code)]
+
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
-use core::cell::UnsafeCell;
 
+use crate::sync::{IrqSpinLock, LockRank};
 use crate::trusted::claim::{Claim, ClaimCell};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -137,7 +140,7 @@ use linux_pipes::*;
 use linux_poll::*;
 use linux_prctl::*;
 pub(crate) use linux_process_lifecycle::*;
-pub(crate) use linux_process_state::*;
+use linux_process_state::*;
 use linux_process_vm::*;
 use linux_procfs::*;
 use linux_pty::*;
@@ -3106,64 +3109,64 @@ impl LinuxSignalContext {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(C)]
-struct LinuxSignalStack {
-    pointer: u64,
-    flags: u32,
-    padding: u32,
-    size: u64,
+pub(crate) struct LinuxSignalStack {
+    pub(crate) pointer: u64,
+    pub(crate) flags: u32,
+    pub(crate) padding: u32,
+    pub(crate) size: u64,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct LinuxSignalMachineContext {
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r11: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rax: u64,
-    rcx: u64,
-    rsp: u64,
-    rip: u64,
-    rflags: u64,
-    cs: u16,
-    gs: u16,
-    fs: u16,
-    ss: u16,
-    error: u64,
-    trap: u64,
-    old_mask: u64,
-    cr2: u64,
-    fpstate: u64,
-    reserved: [u64; 8],
+pub(crate) struct LinuxSignalMachineContext {
+    pub(crate) r8: u64,
+    pub(crate) r9: u64,
+    pub(crate) r10: u64,
+    pub(crate) r11: u64,
+    pub(crate) r12: u64,
+    pub(crate) r13: u64,
+    pub(crate) r14: u64,
+    pub(crate) r15: u64,
+    pub(crate) rdi: u64,
+    pub(crate) rsi: u64,
+    pub(crate) rbp: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rdx: u64,
+    pub(crate) rax: u64,
+    pub(crate) rcx: u64,
+    pub(crate) rsp: u64,
+    pub(crate) rip: u64,
+    pub(crate) rflags: u64,
+    pub(crate) cs: u16,
+    pub(crate) gs: u16,
+    pub(crate) fs: u16,
+    pub(crate) ss: u16,
+    pub(crate) error: u64,
+    pub(crate) trap: u64,
+    pub(crate) old_mask: u64,
+    pub(crate) cr2: u64,
+    pub(crate) fpstate: u64,
+    pub(crate) reserved: [u64; 8],
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct LinuxSignalUserContext {
-    flags: u64,
-    link: u64,
-    stack: LinuxSignalStack,
-    machine: LinuxSignalMachineContext,
-    signal_mask: u64,
+pub(crate) struct LinuxSignalUserContext {
+    pub(crate) flags: u64,
+    pub(crate) link: u64,
+    pub(crate) stack: LinuxSignalStack,
+    pub(crate) machine: LinuxSignalMachineContext,
+    pub(crate) signal_mask: u64,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct LinuxSignalInformation {
-    signal: i32,
-    error: i32,
-    code: i32,
-    padding: i32,
-    fields: [u8; 112],
+pub(crate) struct LinuxSignalInformation {
+    pub(crate) signal: i32,
+    pub(crate) error: i32,
+    pub(crate) code: i32,
+    pub(crate) padding: i32,
+    pub(crate) fields: [u8; 112],
 }
 
 impl LinuxSignalInformation {
@@ -3242,10 +3245,10 @@ impl LinuxSignalInformation {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct LinuxRtSignalFrame {
-    restorer: u64,
-    context: LinuxSignalUserContext,
-    information: LinuxSignalInformation,
+pub(crate) struct LinuxRtSignalFrame {
+    pub(crate) restorer: u64,
+    pub(crate) context: LinuxSignalUserContext,
+    pub(crate) information: LinuxSignalInformation,
 }
 
 struct LinuxRestoredSignalContext {
@@ -3255,61 +3258,8 @@ struct LinuxRestoredSignalContext {
     r11: u64,
 }
 
-crate::pod!(LinuxSignalStack {
-    pointer: u64,
-    flags: u32,
-    padding: u32,
-    size: u64,
-});
-crate::pod!(LinuxSignalMachineContext {
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r11: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rax: u64,
-    rcx: u64,
-    rsp: u64,
-    rip: u64,
-    rflags: u64,
-    cs: u16,
-    gs: u16,
-    fs: u16,
-    ss: u16,
-    error: u64,
-    trap: u64,
-    old_mask: u64,
-    cr2: u64,
-    fpstate: u64,
-    reserved: [u64; 8],
-});
-crate::pod!(LinuxSignalUserContext {
-    flags: u64,
-    link: u64,
-    stack: LinuxSignalStack,
-    machine: LinuxSignalMachineContext,
-    signal_mask: u64,
-});
-crate::pod!(LinuxSignalInformation {
-    signal: i32,
-    error: i32,
-    code: i32,
-    padding: i32,
-    fields: [u8; 112],
-});
-crate::pod!(LinuxRtSignalFrame {
-    restorer: u64,
-    context: LinuxSignalUserContext,
-    information: LinuxSignalInformation,
-});
+// Their `Pod` impls (they are copied to and from user memory as bytes)
+// are in trusted/pod.rs.
 const _: [(); 24] = [(); size_of::<LinuxSignalStack>()];
 const _: [(); 256] = [(); size_of::<LinuxSignalMachineContext>()];
 const _: [(); 304] = [(); size_of::<LinuxSignalUserContext>()];
@@ -3771,27 +3721,35 @@ impl LinuxProcessRuntimeState {
 
 /// Everything the runtime keeps for one process slot while the process is
 /// not running: its process-wide state, its thread table, and each thread's
-/// extended (x87/SSE/AVX) register state.
+/// extended (x87/SSE/AVX) register state. Over 300 KiB in all, so each part
+/// is a heap allocation of its own, made whole on the heap (never as a
+/// record-sized temporary on the kernel stack) the first time a process
+/// occupies the slot. Reached only under its domain instance's record lock
+/// (`with_linux_process_record` in cpu/linux_process_state.rs).
 struct LinuxProcessRecord {
-    runtime: LinuxProcessRuntimeState,
-    threads: [LinuxThreadRuntimeState; LINUX_THREAD_LIMIT],
-    extended_states: [ExtendedState; LINUX_THREAD_LIMIT],
+    /// One element: the process state is built in place on the heap, which
+    /// `Box::new` does not promise.
+    runtime: Box<[LinuxProcessRuntimeState; 1]>,
+    threads: Box<[LinuxThreadRuntimeState; LINUX_THREAD_LIMIT]>,
+    extended_states: Box<[ExtendedState; LINUX_THREAD_LIMIT]>,
     extended_state_valid: [bool; LINUX_THREAD_LIMIT],
 }
 
-/// A process slot's record, once allocated: where it is and the frames it
-/// was allocated from.
-#[derive(Clone, Copy)]
-struct LinuxProcessRecordSlot {
-    record: *mut LinuxProcessRecord,
-    first: memory::FrameLease,
-}
+impl LinuxProcessRecord {
+    /// An empty record, or None without memory.
+    #[inline(never)]
+    fn allocate() -> Option<Self> {
+        Some(Self {
+            runtime: crate::heap::try_boxed_array(LinuxProcessRuntimeState::EMPTY)?,
+            threads: crate::heap::try_boxed_array(LinuxThreadRuntimeState::EMPTY)?,
+            extended_states: crate::heap::try_boxed_array(ExtendedState::ZERO)?,
+            extended_state_valid: [false; LINUX_THREAD_LIMIT],
+        })
+    }
 
-impl LinuxProcessRecordSlot {
-    const EMPTY: Self = Self {
-        record: core::ptr::null_mut(),
-        first: memory::FrameLease::EMPTY,
-    };
+    fn runtime(&mut self) -> &mut LinuxProcessRuntimeState {
+        &mut self.runtime[0]
+    }
 }
 
 /// Process slots whose records stay allocated once their process ended,
@@ -3800,13 +3758,52 @@ impl LinuxProcessRecordSlot {
 /// of processes does not keep its records.
 const LINUX_PROCESS_RECORDS_KEPT: usize = 256;
 
-/// `process_records` holds one record per process slot of every domain
-/// instance, each table as long as the highest slot used. A record is over
-/// 100 KiB, so it is allocated from the frame allocator the first time a
-/// process occupies its slot instead of being reserved in the kernel image.
+/// One domain instance's process records, by runtime slot, as long as the
+/// highest slot used. Held under an interrupt-safe leaf lock
+/// (`LockRank::PROCESS_RECORDS`): nothing is allocated or freed while it
+/// is held (records and room for them are made before it is taken, and a
+/// released record is dropped after), and nothing else is locked.
+struct LinuxProcessRecordTable {
+    records: Vec<Option<LinuxProcessRecord>>,
+}
+
+impl LinuxProcessRecordTable {
+    const fn new() -> Self {
+        Self {
+            records: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, slot: usize) -> Option<&mut LinuxProcessRecord> {
+        self.records.get_mut(slot)?.as_mut()
+    }
+
+    /// The records of two different slots.
+    fn pair(
+        &mut self,
+        first: usize,
+        second: usize,
+    ) -> Option<(&mut LinuxProcessRecord, &mut LinuxProcessRecord)> {
+        if first == second {
+            return None;
+        }
+        let (low, high) = (first.min(second), first.max(second));
+        let length = self.records.len();
+        let (head, tail) = self.records.split_at_mut(high.min(length));
+        let low_record = head.get_mut(low)?.as_mut()?;
+        let high_record = tail.first_mut()?.as_mut()?;
+        Some(if first < second {
+            (low_record, high_record)
+        } else {
+            (high_record, low_record)
+        })
+    }
+}
+
+/// `process_records` holds one record table per domain instance, each
+/// behind its own lock.
 struct X86MutableRuntimeOwner {
-    process_records:
-        UnsafeCell<[Vec<LinuxProcessRecordSlot>; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT]>,
+    process_records: [IrqSpinLock<LinuxProcessRecordTable>; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT],
     /// The running process's signal context, per CPU (`linux_cpu_bank`):
     /// CPUs run different processes, each with its handler's saved context.
     /// Words copied in and out atomically; a bank is used by the CPU that
@@ -3817,17 +3814,12 @@ struct X86MutableRuntimeOwner {
     container_extended_states: [ClaimCell<ExtendedState>; control_abi::DOMAIN_LIMIT],
 }
 
-// SAFETY: every field but `process_records` is a ClaimCell or atomics.
-// `process_records` is reached only through the accessors in
-// cpu/linux_process_state.rs, under the kernel-entry lock, which hand out
-// each slot's record (docs/FRAMEKERNEL.md lists them as still to make
-// sound: their `&'static mut` returns need per-record ownership).
-unsafe impl Sync for X86MutableRuntimeOwner {}
-
 static X86_MUTABLE_RUNTIME: X86MutableRuntimeOwner = X86MutableRuntimeOwner {
     container_extended_states: [const { ClaimCell::new(ExtendedState::ZERO) };
         control_abi::DOMAIN_LIMIT],
-    process_records: UnsafeCell::new([const { Vec::new() }; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT]),
+    process_records: [const {
+        IrqSpinLock::new(LockRank::PROCESS_RECORDS, LinuxProcessRecordTable::new())
+    }; LINUX_PROCESS_RUNTIME_INSTANCE_LIMIT],
     signal_context: [const { [const { AtomicU64::new(0) }; LINUX_SIGNAL_CONTEXT_WORDS] };
         LINUX_CPU_BANK_LIMIT],
 };

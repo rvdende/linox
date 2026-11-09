@@ -16,7 +16,6 @@ extern crate alloc;
 compile_error!("the kernel must be built with --cfg aes_force_soft --cfg polyval_force_soft");
 
 mod address_space;
-#[allow(unsafe_code)]
 mod arch;
 mod bringup;
 mod capability;

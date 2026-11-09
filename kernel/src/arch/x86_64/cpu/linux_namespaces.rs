@@ -39,9 +39,7 @@ pub(super) fn linux_proc_namespace_at(
         b"mnt" => if pid == current_linux_process_pid() {
             linux_mount::current_handle()
         } else {
-            linux_process_runtime_state(pid)
-                .filter(|state| state.valid)
-                .and_then(|state| state.mount_namespace)
+            with_valid_linux_process_runtime_state(pid, |state| state.mount_namespace).flatten()
         }
         .map(|handle| Reference {
             kind: Kind::Mount,
@@ -334,15 +332,18 @@ fn linux_setns_join(reference: linux_namespace::Reference) -> u64 {
             if !linux_namespace_capable(None) {
                 return LINUX_EPERM;
             }
-            let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
-                return LINUX_ESRCH;
-            };
             // The process record says which namespace is current: it
             // changes first, then the installed one, and the namespace left
             // goes if nothing else uses it.
-            let previous = state.mount_namespace.replace(target);
+            let Some(previous) = with_valid_linux_process_runtime_state(pid, |state| {
+                state.mount_namespace.replace(target)
+            }) else {
+                return LINUX_ESRCH;
+            };
             if !linux_mount::switch_to(target) {
-                state.mount_namespace = previous;
+                let _ = with_linux_process_runtime_state(pid, |state| {
+                    state.mount_namespace = previous;
+                });
                 return LINUX_ENOMEM;
             }
             if let Some(previous) = previous.filter(|previous| *previous != target) {
@@ -667,17 +668,21 @@ pub(super) fn linux_unshare(flags: u64) -> u64 {
         }
     }
     if flags & LINUX_CLONE_NEWNS != 0 {
-        let Some(state) = linux_process_runtime_state(pid).filter(|state| state.valid) else {
+        if with_valid_linux_process_runtime_state(pid, |_| ()).is_none() {
             return LINUX_ESRCH;
-        };
+        }
         let previous = linux_mount::current_handle();
         let Some(mount_namespace) = linux_clone_mount_namespace() else {
             return LINUX_ENOMEM;
         };
         // The process's record names its namespace from here on.
-        state.mount_namespace = Some(mount_namespace);
+        let _ = with_linux_process_runtime_state(pid, |state| {
+            state.mount_namespace = Some(mount_namespace);
+        });
         if !linux_mount::switch_to(mount_namespace) {
-            state.mount_namespace = previous;
+            let _ = with_linux_process_runtime_state(pid, |state| {
+                state.mount_namespace = previous;
+            });
             linux_release_mount_namespace(mount_namespace);
             return LINUX_ENOMEM;
         }
@@ -709,10 +714,14 @@ pub(super) fn linux_clone_mount_namespace() -> Option<linux_mount::MountNamespac
 /// of the domain uses it any more (Linux frees a namespace with its last
 /// reference); a tmpfs no other namespace has mounted takes its files.
 pub(super) fn linux_release_mount_namespace(namespace: linux_mount::MountNamespaceHandle) {
-    if linux_mount::is_domain_root(namespace)
-        || allocated_linux_process_records()
-            .any(|record| record.runtime.mount_namespace == Some(namespace))
-    {
+    if linux_mount::is_domain_root(namespace) {
+        return;
+    }
+    let mut in_use = false;
+    for_each_allocated_linux_process_record(|record| {
+        in_use |= record.runtime().mount_namespace == Some(namespace);
+    });
+    if in_use {
         return;
     }
     // An exiting process's namespace may still be the one installed.

@@ -1451,23 +1451,28 @@ pub(crate) fn linux_generation_in_use(generation: u32) -> bool {
             if let Some(bank) = linux_live_process_bank(pid, instance) {
                 return in_bank(bank);
             }
-            linux_process_runtime_state(pid).is_some_and(|state| {
+            // The fixed table under the record lock, the table above it
+            // (its own lock) after.
+            with_valid_linux_process_runtime_state(pid, |state| {
                 let descriptors = &state.descriptors;
-                state.valid
-                    && (state.overlay_cwd == generation
-                        || descriptors
-                            .stdio_devices
-                            .iter()
-                            .zip(&descriptors.stdio_tmp_generations)
-                            .any(|(state, file)| *state != 0 && *file == generation)
-                        || descriptors
-                            .devices
-                            .iter()
-                            .zip(&descriptors.tmp_generations)
-                            .any(|(state, file)| *state != 0 && *file == generation)
-                        || linux_saved_overflow_entries(descriptors)
-                            .iter()
-                            .any(|(_, entry)| entry.generation == generation))
+                let fixed = state.overlay_cwd == generation
+                    || descriptors
+                        .stdio_devices
+                        .iter()
+                        .zip(&descriptors.stdio_tmp_generations)
+                        .any(|(state, file)| *state != 0 && *file == generation)
+                    || descriptors
+                        .devices
+                        .iter()
+                        .zip(&descriptors.tmp_generations)
+                        .any(|(state, file)| *state != 0 && *file == generation);
+                (fixed, descriptors.overflow)
+            })
+            .is_some_and(|(fixed, overflow)| {
+                fixed
+                    || linux_saved_overflow_entries(overflow)
+                        .iter()
+                        .any(|(_, entry)| entry.generation == generation)
             })
         })
 }

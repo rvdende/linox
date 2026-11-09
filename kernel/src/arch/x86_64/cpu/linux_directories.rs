@@ -255,8 +255,8 @@ pub(super) fn linux_pivot_root(new_root_address: u64, put_old_address: u64) -> u
             continue;
         };
         let in_namespace = pid == caller
-            || linux_process_runtime_state(pid)
-                .is_some_and(|state| state.mount_namespace == namespace);
+            || with_linux_process_runtime_state(pid, |state| state.mount_namespace)
+                .is_some_and(|own| own == namespace);
         let rooted_here =
             linux_process::with_live_process_root(pid, |own| own == root).unwrap_or(false);
         if !in_namespace || !rooted_here {

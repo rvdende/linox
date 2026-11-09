@@ -1150,10 +1150,10 @@ fn sync_saved_linux_open_file_offset(id: u64, value: u64) {
     // Every saved table is looked at only if it can hold the id: with a
     // thousand processes, looking through each one's descriptors on every
     // read made a read of a file opened since take a millisecond.
-    for record in allocated_linux_process_records() {
-        let state = &mut record.runtime;
+    for_each_allocated_linux_process_record(|record| {
+        let state = record.runtime();
         if !state.valid || id > state.descriptors.max_open_file_id {
-            continue;
+            return;
         }
         for descriptor in 0..state.descriptors.stdio_open_file_ids.len() {
             if state.descriptors.stdio_open_file_ids[descriptor] == id {
@@ -1165,7 +1165,7 @@ fn sync_saved_linux_open_file_offset(id: u64, value: u64) {
                 state.descriptors.offsets[descriptor] = value;
             }
         }
-    }
+    });
 }
 
 /// Sets open file `id`'s offset to `value` in the live banks of this

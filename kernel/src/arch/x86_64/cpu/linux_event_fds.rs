@@ -591,10 +591,21 @@ pub(super) fn linux_pidfd_getfd(pid_descriptor: u64, target: u64, flags: u64) ->
     if !linux_ptrace_access_permitted(process) {
         return LINUX_EPERM;
     }
+    let saved = with_valid_linux_process_runtime_state(process, |state| {
+        if target >= LINUX_DESCRIPTOR_TABLE_LIMIT {
+            Err(state.descriptors.overflow)
+        } else {
+            Ok(linux_saved_descriptor(&state.descriptors, target))
+        }
+    });
     let Some((device, oci, socket, socket_flags, tmp_generation, offset, open_file_id)) =
-        linux_process_runtime_state(process)
-            .filter(|state| state.valid)
-            .and_then(|state| linux_saved_descriptor(&state.descriptors, target))
+        (match saved {
+            None => None,
+            Some(Ok(found)) => found,
+            // Above the fixed table: its own table, looked at with the
+            // record lock released.
+            Some(Err(overflow)) => linux_saved_overflow_descriptor(overflow, target),
+        })
     else {
         return LINUX_EBADF;
     };
@@ -619,23 +630,30 @@ pub(super) fn linux_pidfd_getfd(pid_descriptor: u64, target: u64, flags: u64) ->
     descriptor
 }
 
+/// Descriptor `descriptor` (above the fixed table) of a saved table whose
+/// table above the fixed one is `overflow`.
+fn linux_saved_overflow_descriptor(
+    overflow: u32,
+    descriptor: u64,
+) -> Option<(u16, u16, crate::linux_socket::SlotId, u32, u32, u64, u64)> {
+    let entry = crate::linux_fd_table::get(overflow, descriptor)
+        .filter(|entry| !entry.vacant() && entry.open_file_id != 0)?;
+    Some((
+        entry.state,
+        entry.rootfs,
+        entry.socket,
+        entry.socket_flags,
+        entry.generation,
+        entry.offset,
+        entry.open_file_id,
+    ))
+}
+
+/// Descriptor `descriptor` of the fixed part of saved table `state`.
 fn linux_saved_descriptor(
     state: &LinuxDescriptorRuntimeState,
     descriptor: u64,
 ) -> Option<(u16, u16, crate::linux_socket::SlotId, u32, u32, u64, u64)> {
-    if descriptor >= LINUX_DESCRIPTOR_TABLE_LIMIT {
-        let entry = crate::linux_fd_table::get(state.overflow, descriptor)
-            .filter(|entry| !entry.vacant() && entry.open_file_id != 0)?;
-        return Some((
-            entry.state,
-            entry.rootfs,
-            entry.socket,
-            entry.socket_flags,
-            entry.generation,
-            entry.offset,
-            entry.open_file_id,
-        ));
-    }
     if descriptor < LINUX_AUX_DESCRIPTOR_FIRST {
         let index = descriptor as usize;
         let id = state.stdio_open_file_ids[index];
