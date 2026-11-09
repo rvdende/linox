@@ -9,8 +9,8 @@ unsafe_blocks="$({ rg -g '*.rs' -o 'unsafe \{' "$kernel_source" || true; } | wc 
 safety_comments="$({ rg -g '*.rs' -o 'SAFETY:' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 static_mut="$({ rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" || true; } | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 154 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 154 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 153 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 153 to ${unsafe_blocks}" >&2
     exit 1
 fi
 # Unsafe blocks without a SAFETY comment may only go down. (This replaced a

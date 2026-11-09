@@ -1327,20 +1327,18 @@ impl ProcessScheduler {
 
 pub(crate) fn acquire_process_scheduler_workspace() -> Option<&'static mut ProcessScheduler> {
     let workspace = current_process_scheduler_workspace();
-    let claim = workspace.try_claim()?;
-    // SAFETY: The owner claim serializes initialization. Each field is written
-    // directly so the bounded kernel stack never holds a complete scheduler
-    // temporary.
-    unsafe {
-        let workspace = claim.as_mut_ptr();
-        core::ptr::addr_of_mut!((*workspace).scheduler.threads).write(Vec::new());
-        core::ptr::addr_of_mut!((*workspace).scheduler.generations).write(Vec::new());
-        core::ptr::addr_of_mut!((*workspace).scheduler.current).write(None);
-        core::ptr::addr_of_mut!((*workspace).scheduler.next_slot).write(0);
-        core::ptr::addr_of_mut!((*workspace).current_by_cpu).write([None; PROCESS_CPU_LIMIT]);
-        core::ptr::addr_of_mut!((*workspace).dispatches).write([0; PROCESS_CPU_LIMIT]);
-    }
-    claim.publish_initialized();
+    // The workspace is small (its thread tables are on the heap), so it is
+    // built whole and published.
+    workspace.try_claim()?.publish(ProcessScheduler {
+        scheduler: Scheduler {
+            threads: Vec::new(),
+            generations: Vec::new(),
+            current: None,
+            next_slot: 0,
+        },
+        current_by_cpu: [None; PROCESS_CPU_LIMIT],
+        dispatches: [0; PROCESS_CPU_LIMIT],
+    });
     // SAFETY: A successful claim gives this lifecycle exclusive workspace use.
     Some(unsafe { &mut *workspace.get_mut_ptr()? })
 }

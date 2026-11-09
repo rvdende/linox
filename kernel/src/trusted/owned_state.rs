@@ -22,10 +22,6 @@
 //!   earlier `get` could still be live. Its one caller (the scheduler's
 //!   per-process workspace) never holds `get` references, only
 //!   `get_mut_ptr` ones scoped to a call.
-//! - [`OwnedStateClaim::publish_initialized`] is safe but asserts that the
-//!   caller initialized the value through [`OwnedStateClaim::as_mut_ptr`];
-//!   its one caller (`scheduler.rs`) writes every field in the `unsafe`
-//!   block just before. It should become an unsafe function with that caller.
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -80,7 +76,7 @@ impl<T> OwnedState<T> {
             return None;
         }
         // SAFETY: READY is stored with release ordering only after the value
-        // was completely written (`publish`, `publish_initialized`), and the
+        // was completely written (`publish`), and the
         // acquire load above saw it, so the value is initialized and its
         // writes are visible here.
         Some(unsafe { (&*self.value.get()).assume_init_ref() })
@@ -119,7 +115,7 @@ pub(crate) struct OwnedStateClaim<'a, T> {
 }
 
 impl<T> OwnedStateClaim<'_, T> {
-    pub(crate) fn as_mut_ptr(&self) -> *mut T {
+    fn as_mut_ptr(&self) -> *mut T {
         self.owner.value.get().cast::<T>()
     }
 
@@ -130,11 +126,6 @@ impl<T> OwnedStateClaim<'_, T> {
         // `write` drops nothing, and the slot holds no value to leak (EMPTY
         // means none, and a partial init through `as_mut_ptr` is overwritten).
         unsafe { self.as_mut_ptr().write(value) };
-        self.owner.state.store(READY, Ordering::Release);
-        self.published = true;
-    }
-
-    pub(crate) fn publish_initialized(mut self) {
         self.owner.state.store(READY, Ordering::Release);
         self.published = true;
     }
