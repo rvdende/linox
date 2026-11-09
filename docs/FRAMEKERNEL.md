@@ -512,6 +512,31 @@ Every step is a separate commit that keeps the system booting and passing
 are the ones that exercise the code it touches. "Removes" counts sites from
 the inventory; rerun the script to confirm.
 
+**Done so far (2026-11-09): the memory layer's first safe APIs.**
+`kernel/src/trusted/` exists (§4.1, stage A) with two modules:
+`trusted::frame::Frame`, a 4-KiB frame reached through the direct map and
+only ever copied in and out (words, byte ranges, fills, volatile loads and
+stores, whole-frame copies, all bounds-checked), and
+`trusted::page_table::{PageTable, PageEntry}`, a page-table frame viewed as
+its 512 entries plus `invalidate_page`. Any module may make a `Frame` from
+a `FrameLease`; only the memory layer (`address_space.rs`, `memory.rs`,
+`paging.rs`, `trusted/`) may make a `Frame` or `PageTable` from a bare
+physical address, which `check-kernel-unsafe.sh` enforces. Every table walk
+and frame view in `address_space.rs` and the post-boot walks in `paging.rs`
+use them (`mapped_frame` is gone); the exec, init, TLS, vDSO and vvar pages,
+the overlay page cache, the image store and the sysv IPC and aio zeroing
+copy through `Frame`; `crates/initial-stack` lays out init's stack on the
+host-testable side. Site counts went `address_space.rs` 283 -> 80,
+`paging.rs` 62 -> 15, kernel total 1,183 -> 927 (`rg -c 'unsafe \{|unsafe
+fn|unsafe impl|unsafe extern'`), with 11 documented sites in `trusted/`.
+`check-kernel-unsafe.sh` keeps a per-file ratchet for the files moved.
+Not yet done: the typed direct-map views (`&mut SegmentPage` and the like in
+sysv IPC, tmpfs, overlay, aio, signal; step 7), the CR3 loads in
+`address_space.rs` (`activate`, now each with a SAFETY comment), its owner
+cells (step 6), `FrameLease` ownership (finding 6: `Frame::leased` is only as
+sound as the lease), and the `Cursor` that would make writing entries a
+checked operation (step 11).
+
 **Coordination.** The scheduler rework is changing `cpu.rs` and
 `linux_process.rs` now. Steps 1 and 2 do not touch them. Step 3 wraps the
 operations of eight `unsafe fn`s in `cpu.rs` and step 4 adds one line at the

@@ -8,8 +8,8 @@ unsafe_blocks="$(rg -g '*.rs' -o 'unsafe \{' "$kernel_source" | wc -l | tr -d ' 
 safety_comments="$(rg -g '*.rs' -o 'SAFETY:' "$kernel_source" | wc -l | tr -d ' ')"
 static_mut="$(rg -g '*.rs' '^\s*(pub(\([^)]*\))?\s+)?static mut ' "$kernel_source" | wc -l | tr -d ' ')"
 
-if (( unsafe_blocks > 807 )); then
-    echo "kernel unsafe check: unsafe blocks grew from 807 to ${unsafe_blocks}" >&2
+if (( unsafe_blocks > 805 )); then
+    echo "kernel unsafe check: unsafe blocks grew from 805 to ${unsafe_blocks}" >&2
     exit 1
 fi
 if (( safety_comments < 390 )); then
@@ -32,6 +32,7 @@ per_file_limits=(
     "linux_aio.rs 4"
     "linux_overlay.rs 20"
     "linux_sysv_ipc.rs 12"
+    "memory.rs 38"
     "trusted/frame.rs 9"
     "trusted/page_table.rs 2"
 )

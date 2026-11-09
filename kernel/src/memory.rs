@@ -13,6 +13,7 @@
 //! highest-first so they do not exhaust low memory.
 
 use crate::sync::{IrqSpinLock, LockRank};
+use crate::trusted::frame::Frame;
 use crate::{
     arch::x86_64::paging, BootInfo, UefiMemoryDescriptor, EFI_BOOT_SERVICES_CODE,
     EFI_BOOT_SERVICES_DATA, EFI_CONVENTIONAL_MEMORY,
@@ -1175,8 +1176,7 @@ pub(crate) fn allocate_runtime_extent<const N: usize>() -> Option<[FrameLease; N
         generation: 1,
     });
     for frame in &frames {
-        let address = frame.direct_map_address()?;
-        unsafe { core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE as usize) };
+        Frame::leased(*frame)?.fill(0);
     }
     Some(frames)
 }
@@ -1186,8 +1186,8 @@ pub(crate) fn scrub_runtime_extent<const N: usize>(frames: [FrameLease; N]) -> b
         return false;
     }
     frames.iter().all(|frame| {
-        frame.direct_map_address().is_some_and(|address| {
-            unsafe { core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE as usize) };
+        Frame::leased(*frame).is_some_and(|page| {
+            page.fill(0);
             true
         })
     })
